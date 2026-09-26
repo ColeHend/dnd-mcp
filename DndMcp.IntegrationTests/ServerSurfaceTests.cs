@@ -31,6 +31,7 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     /// </summary>
     public static readonly IReadOnlyList<string> ExpectedToolNames =
     [
+        "dice_odds",
         "dice_roll",
     ];
 

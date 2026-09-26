@@ -95,12 +95,12 @@ internal static class ToolArgumentGuard
                 if (parameterTypes is not null &&
                     parameterTypes.TryGetValue(name, out var clrType) &&
                     IntegerRanges.TryGetValue(clrType, out var range) &&
-                    TryReadInteger(value, out var number) &&
-                    (number < range.Min || number > range.Max))
+                    IsIntegerShaped(value) &&
+                    OutOfRange(value, range) is { } direction)
                 {
                     // No CLR bounds in the text: "-2147483648 to 2147483647" reads as the tool's accepted range and
                     // invites a second failing call when the real range (e.g. times 1-100) is far narrower.
-                    problems.Add($"argument '{name}' was {Describe(value)}, which is too {(number < range.Min ? "small" : "large")} to be valid");
+                    problems.Add($"argument '{name}' was {Describe(value)}, which is too {direction} to be valid");
                 }
             }
         }
@@ -132,12 +132,14 @@ internal static class ToolArgumentGuard
     private const NumberStyles IntegerStyles = NumberStyles.AllowLeadingSign;
     private const NumberStyles NumberStylesForStrings = NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint | NumberStyles.AllowExponent;
 
+    // An integer too large for any CLR type still matches "integer": it is the right kind of value, and the range check
+    // below then says "too large", which is the true problem. Refusing it here said "should be integer" about a number
+    // like 99999999999999999999, which the model cannot act on. The range check needs the tool's MethodInfo; the SDK
+    // always supplies it, and without it an oversized integer would reach the binder's generic error.
     private static bool Matches(string type, JsonElement value) => type switch
     {
         "string" => value.ValueKind == JsonValueKind.String,
-        "integer" => (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out _)) ||
-                     (value.ValueKind == JsonValueKind.String && IsIntegerText(value.GetString()) &&
-                      long.TryParse(value.GetString(), IntegerStyles, CultureInfo.InvariantCulture, out _)),
+        "integer" => IsIntegerShaped(value),
         "number" => value.ValueKind == JsonValueKind.Number ||
                     (value.ValueKind == JsonValueKind.String && IsNumberText(value.GetString())),
         "boolean" => value.ValueKind is JsonValueKind.True or JsonValueKind.False,
@@ -147,16 +149,27 @@ internal static class ToolArgumentGuard
         _ => true,
     };
 
-    private static bool TryReadInteger(JsonElement value, out decimal number)
+    /// <summary>A JSON number or numeric string written as a whole number: digits with an optional sign.</summary>
+    private static bool IsIntegerShaped(JsonElement value) => value.ValueKind switch
     {
-        number = 0;
-        return value.ValueKind switch
+        JsonValueKind.Number => IsIntegerText(value.GetRawText()),
+        JsonValueKind.String => IsIntegerText(value.GetString()),
+        _ => false,
+    };
+
+    /// <summary>
+    /// "small" or "large" when an integer-shaped value does not fit <paramref name="range"/>, else null. A value too
+    /// big even for decimal (about 29 digits) is out of every range; its sign says which way.
+    /// </summary>
+    private static string? OutOfRange(JsonElement value, (decimal Min, decimal Max) range)
+    {
+        var text = value.ValueKind == JsonValueKind.String ? value.GetString()! : value.GetRawText();
+        if (!decimal.TryParse(text, IntegerStyles, CultureInfo.InvariantCulture, out var number))
         {
-            JsonValueKind.Number => value.TryGetDecimal(out number),
-            JsonValueKind.String => IsIntegerText(value.GetString()) &&
-                                    decimal.TryParse(value.GetString(), IntegerStyles, CultureInfo.InvariantCulture, out number),
-            _ => false,
-        };
+            return text.StartsWith('-') ? "small" : "large";
+        }
+
+        return number < range.Min ? "small" : number > range.Max ? "large" : null;
     }
 
     /// <summary>

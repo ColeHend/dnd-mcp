@@ -773,6 +773,73 @@ Try each of these:
 
 ## Implementation status (updated 2026-09-26)
 
+**Phase 1 — done.** The exit criterion is met: `dice_roll` and `dice_odds` pass every golden value above, as exact fractions where one exists.
+- 4d6kh3 has mean 15869/1296 and P(18) = 7/432.
+- 2d20kh1 is 553/40 and 3d20kh1 is 1239/80.
+- P(8d6 ≥ 30) = 638543/1679616.
+- An exploding d6 has mean 4.2, or 49/12 at depth cap 1.
+- Every PMF sums to 1 within 1e-12.
+- The χ² tests on 10⁶ rolls are marked `Category=Slow`.
+
+All of these were re-derived by brute force in Python for this phase.
+
+**Tests: 1297 passing** (1105 unit + 192 integration).
+- The work was reviewed through the same two lenses as Phase 0: correctness, and conventions with 61 mutation probes.
+- The correctness review found one real semantic bug and eight smaller ones; all are fixed and pinned. The bug: keep/drop on a `!`/`!p` pool was measured against the dice typed, not the exploded pool.
+- The mutation review left 19 real survivors. Each now has a test that kills it, and a re-run confirmed 9 of them including the fixes.
+
+**What exists now**
+- **Domain/Dice**
+  - `DiceExpression` is the parser. It covers the full grammar plus labels on constants, a leading unary sign, and `!N` meaning `!=N`. Static bounds are checked against ±10^12, so all runtime arithmetic is plain `long`.
+  - `DiceEvaluator` rolls with a record of every face. Its lean mode is also the Monte Carlo sampler, so an estimate and a roll cannot disagree about meaning.
+  - `Pmf<T>` is generic over `BigInteger` (exact fractions) and `double` (normalised).
+  - `KeepDistribution` is the keep-highest DP. It uses unconditional counts for `BigInteger` and conditional binomials for `double`, which stay stable at 1000 dice.
+  - `DistributionCompiler` builds explosion chains to the full cap and applies reroll weights.
+  - `DiceDistribution` tries exact → floating point → seeded Monte Carlo, each under a `WorkMeter` budget with a support cap. `DiceOdds` carries the result.
+  - Also here: `Fraction`, and `DiceCaps`/`DiceLimits`.
+- **Domain/Rng:** `Xoshiro256StarStar` (with Lemire bounded draws) and `SplitMix64`, each pinned to reference vectors, ready for Phase 5.
+- **Rollers:** `SeededDiceRoller` is new. `CryptoDiceRoller` now uses `GetInt32(sides) + 1`.
+- **Host**
+  - `dice_roll{expression, times, label, seed}` and the new `dice_odds{expression}`, rendered by `Formatting/DiceRollMarkdown` and `DiceOddsMarkdown`.
+  - `ToolArgumentGuard` now calls an integer beyond its CLR type (even beyond decimal) "too large" rather than "should be integer".
+- **Tests**
+  - `RollPathEnumerator` runs the real evaluator over every face sequence (with lowered caps). `DiceSemanticsAgreementTests` requires the exact PMF to equal it fraction for fraction for 40+ modifier combinations.
+  - The oracle shares the evaluator's reading of the grammar, so semantics such as keep/drop on exploding pools are also pinned by hand-computed scripted rolls.
+
+**Decisions made while implementing** (the plan is silent or differs)
+- `dice_roll`'s `secret` parameter and campaign roll logging wait for Phase 6. There is no campaign to log to yet, and a parameter that does nothing would mislead.
+- **Per-die order** is roll → reroll → explode → clamp, then keep/drop → count or sum on the pool.
+  - `!!` clamps the compounded total.
+  - `!`/`!p` clamp each die.
+  - `!p` subtracts 1 from every die an explosion adds.
+  - Success counting uses the clamped value.
+- **Keep/drop on `!`/`!p` pools** acts on the exploded pool. `4d6!dl1` drops one die of however many were rolled, and `2d6!kh3` keeps up to 3. On fixed pools, drops normalise to keeps (4d6dl1 = 4d6kh3).
+- **Caps**
+  - `r` rerolls physically up to 100 times, then draws directly from the non-matching faces (same distribution, bounded work).
+  - Explosions stop at 100 per die in rolling and in both exact paths. `dice_odds` reports the cap's effect when it exceeds 1e-12 (for 1d6!>=2 it is about 1e-8).
+  - One `dice_roll` call may make 1,000,000 physical rolls.
+- **Refusals the grammar does not spell out**
+  - A reroll matching no face, or (for `r`/`ro`) every face.
+  - An explosion that no face a die can end on matches, or that every one does. This is judged after `r`, so `1d6r<6!` and `1d6r6!` are refused.
+  - `8d6!>=30` is refused with a hint to write `8d6! >= 30`.
+  - A sign straight after kh/kl/dh/dl.
+  - Labels outside letters, digits, spaces and `'-.`. Labels render in italics, so they never read as arithmetic.
+- **`dice_odds` budgets**
+  - Exact: 1e6 work units and a 1024-bit total.
+  - Floating point: 2e8 units.
+  - Distinct totals: at most 2M.
+  - Monte Carlo: a 20M-roll budget, 200 to 1M samples, a hard stop at 1.5× the budget (20 samples minimum), and fixed seed 20260926 so the tool is idempotent.
+  - Measured in Release, the slowest inputs found take about 2 s: 1000d1000!>=2kh1 and 100d100kh50. Typical questions take well under 100 ms.
+  - 100d6! and 50d6!! now go to Monte Carlo, because building chains to the full cap is what keeps ranges and 0% claims truthful.
+- **What `dice_odds` prints as certain**
+  - A probability prints as 0% or 100% only when no possible total, or every one, meets the condition.
+  - For exact results that is judged on the support, which keeps underflowed values (weight 0.0). For Monte Carlo it is judged on the expression's static bounds.
+  - Anything else prints as "< 0.0000000001%", "> 99.9999999999%" or "≈ 0%".
+- **Output ceilings**
+  - `dice_roll` breakdowns share 8,000 characters. A roll summarises a group ("…+980 more = S"), then every group, then omits its dice with a closing note. The total can always be recomputed from what is shown.
+  - The worst case measured is under 16,000 characters.
+  - `dice_odds` shows a table only when there are at most 60 totals.
+
 **Phase 0 — done.** All three exit criteria are met:
 1. **A stub `dice_roll` answers inside Claude Code.** The server is registered at user scope (`claude mcp add --scope user dnd -- ~/.local/share/dnd-mcp/bin/DndMcp`), shows `✔ Connected`, and a headless `claude -p` session called `mcp__dnd__dice_roll` and got real cryptographic rolls back.
 2. **Both spikes are green.**
@@ -830,10 +897,24 @@ Everything below is fixed inline above, and each item is pinned by a test.
 
 ### Carry-forward notes for later phases
 
-**Phase 1**
-- **Cap dice output.** `1000d1000` × 100 is about 1M characters, against Claude Code's 25k-token limit. Summarise the face list past a threshold, and add an integration test that pins an output ceiling.
-- Sum in `long` or checked arithmetic; the stub needed a length cap to avoid wrapping `int`.
-- Replace `GetInt32(1, sides + 1)` with `GetInt32(sides) + 1`, so `sides = int.MaxValue` cannot overflow.
+**Phase 1** (all three done)
+- Cap dice output (character budget, pinned by `CallTool_LargestRolls_StayUnderTheOutputCeilingAndRemainCheckable`).
+- Sum in `long` (static bounds ≤ 10^12).
+- Use `GetInt32(sides) + 1`.
+
+**Phase 4 (from Phase 1)**
+- Reuse `Pmf<T>` (`Convolve`, `Map`, `Power`) for damage PMFs, and `KeepDistribution` for d20 modes (adv/ea already exist as 2d20kh1 and 3d20kh1).
+- A PMF's `Values` is its exact support. A weight of 0.0 means an underflowed double, not an impossible value, so never filter on weight.
+- Pass a `WorkMeter` with a budget; `WorkMeter.Unlimited` is for tests.
+
+**Phase 5 (from Phase 1)**
+- `Xoshiro256StarStar` and `SplitMix64` are in `DndMcp.Domain.Rng`. Seed each iteration as the plan says.
+- `DiceEvaluator.CreateSampler` is the model for an allocation-free sampling loop. Check the budget and cancellation on every sample, never every Nth: one sample can cost 10^6 rolls.
+
+**Phase 6 (from Phase 1)**
+- Add `secret` to `dice_roll` and log rolls to the active campaign.
+- `DiceRoll` holds every face for the `dice_roll` table.
+- Store the expression text, not the in-process enums (`DiceComparison`, `ExplodeKind`, `DiceOddsMethod`).
 
 **Phase 2**
 - **The published binary must ship `content/`.** Copy it next to the executable, or embed it. Today's publish has no content.

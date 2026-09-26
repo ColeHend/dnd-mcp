@@ -8,10 +8,10 @@ namespace DndMcp.Tests.Dice;
 /// including the highest, and refuses a die with fewer than one side.
 ///
 /// <para>
-/// The classic mistakes here are silent: an exclusive upper bound passed as <c>sides</c> instead of
-/// <c>sides + 1</c> means a d20 never rolls a natural 20, and a zero-based range produces 0s that still sum into
-/// a plausible-looking total. Range and coverage are asserted separately so each mistake fails its own test.
-/// Distribution quality (chi-square over 10^6 rolls) is a Phase 1 slow test.
+/// The classic mistakes here are silent: a range that stops one short means a d20 never rolls a natural 20, and a
+/// zero-based range produces 0s that still sum into a plausible-looking total. Range and coverage are asserted
+/// separately so each mistake fails its own test, and a χ² test over 10^6 d20 rolls (Category=Slow) catches a die
+/// that is merely lopsided.
 /// </para>
 /// </summary>
 public sealed class CryptoDiceRollerTests
@@ -49,6 +49,31 @@ public sealed class CryptoDiceRollerTests
         }
 
         Assert.Equal(Enumerable.Range(1, 20), seen.Order());
+    }
+
+    [Fact]
+    public void Roll_IntMaxValueSides_DoesNotOverflow()
+    {
+        // GetInt32(1, sides + 1) overflowed here; GetInt32(sides) + 1 cannot.
+        for (var i = 0; i < 1_000; i++)
+        {
+            Assert.InRange(_roller.Roll(int.MaxValue), 1, int.MaxValue);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Slow")]
+    public void Roll_OneMillionD20s_PassesChiSquare()
+    {
+        var counts = new long[21];
+        const int Rolls = 1_000_000;
+        for (var i = 0; i < Rolls; i++)
+        {
+            counts[_roller.Roll(20)]++;
+        }
+
+        var statistic = ChiSquare.Statistic(counts.AsSpan(1), Rolls);
+        Assert.True(statistic < ChiSquare.Critical(19), $"χ² over 10^6 d20 rolls is {statistic:F1}.");
     }
 
     [Theory]

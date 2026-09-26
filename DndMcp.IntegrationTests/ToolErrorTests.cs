@@ -23,7 +23,8 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>
 {
     private const string Prefix = "An error occurred invoking 'dice_roll': ";
 
-    private const string AcceptedParameters = "dice_roll accepts: expression (string, required), times (integer, optional).";
+    private const string AcceptedParameters =
+        "dice_roll accepts: expression (string, required), times (integer, optional), label (string, optional), seed (integer, optional).";
 
     private readonly McpServerHarness _server;
 
@@ -43,12 +44,87 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>
     [InlineData("1d20+")]
     [InlineData("0d6")]
     [InlineData("1001d6")]
+    [InlineData("4d6kh5")]
+    [InlineData("1d6r<=6")]
+    [InlineData("8d6!>=30")]
     [InlineData("")]
     public async Task CallTool_DomainInputError_ReturnsDomainMessageVerbatimAfterPrefix(string expression)
     {
         var result = await _server.Client.CallToolAsync("dice_roll", new Dictionary<string, object?> { ["expression"] = expression });
 
         Assert.Equal(Prefix + DomainMessageFor(expression), _server.ErrorText(result));
+    }
+
+    [Theory]
+    [InlineData("2d6 3")]
+    [InlineData("8d6!>=30")]
+    [InlineData("1d20>=5>=3")]
+    public async Task CallTool_DiceOddsInputError_ReturnsTheSameDomainMessage(string expression)
+    {
+        // Both dice tools share one parser; the model must get the same correction from either.
+        var result = await _server.Client.CallToolAsync("dice_odds", new Dictionary<string, object?> { ["expression"] = expression });
+
+        Assert.Equal("An error occurred invoking 'dice_odds': " + DomainMessageFor(expression), _server.ErrorText(result));
+    }
+
+    [Fact]
+    public async Task CallTool_DiceOddsMissingExpression_NamesItAndListsAcceptedParameters()
+    {
+        var result = await _server.CallToolJsonAsync("dice_odds", "{}");
+
+        Assert.Equal(
+            "An error occurred invoking 'dice_odds': Invalid arguments: missing required argument 'expression'. dice_odds accepts: expression (string, required).",
+            _server.ErrorText(result));
+    }
+
+    [Theory]
+    [InlineData("""{"expression":"1d6","seed":"abc"}""", "argument 'seed' should be integer or null but was the string \"abc\"")]
+    [InlineData("""{"expression":"1d6","seed":1.5}""", "argument 'seed' should be integer or null but was the number 1.5")]
+    [InlineData("""{"expression":"1d6","label":7}""", "argument 'label' should be string or null but was the number 7")]
+    public async Task CallTool_WrongTypeForOptionalParameter_NamesIt(string argumentsJson, string problem)
+    {
+        var result = await _server.CallToolJsonAsync("dice_roll", argumentsJson);
+
+        Assert.Equal(Prefix + "Invalid arguments: " + problem + ". " + AcceptedParameters, _server.ErrorText(result));
+    }
+
+    [Theory]
+    [InlineData("99999999999999999999", "the number 99999999999999999999", "large")]
+    [InlineData("-9223372036854775809", "the number -9223372036854775809", "small")]
+    [InlineData("\"99999999999999999999\"", "the string \"99999999999999999999\"", "large")]
+    // Beyond decimal as well: still an integer, still "too large", never the binder's detail-free error.
+    [InlineData("1000000000000000000000000000000000", "the number 1000000000000000000000000000000000", "large")]
+    [InlineData("-1000000000000000000000000000000000", "the number -1000000000000000000000000000000000", "small")]
+    public async Task CallTool_SeedBeyondLong_SaysTooLargeNotWrongType(string seedJson, string described, string direction)
+    {
+        var result = await _server.CallToolJsonAsync("dice_roll", $$"""{"expression":"1d6","seed":{{seedJson}}}""");
+
+        Assert.Equal(
+            Prefix + $"Invalid arguments: argument 'seed' was {described}, which is too {direction} to be valid. " + AcceptedParameters,
+            _server.ErrorText(result));
+    }
+
+    [Theory]
+    [InlineData("9223372036854775807")]
+    [InlineData("-9223372036854775808")]
+    [InlineData("null")]
+    public async Task CallTool_SeedAtLongBoundsOrNull_IsAccepted(string seedJson)
+    {
+        var result = await _server.CallToolJsonAsync("dice_roll", $$"""{"expression":"1d6","seed":{{seedJson}}}""");
+
+        Assert.StartsWith("**", _server.SuccessText(result), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    // "|" stands for a newline, decoded below, so no test name carries a raw control character.
+    [InlineData("line one|line two")]
+    [InlineData("A label that is far too long for anyone to want it shown next to their roll, repeated to pass the limit of one hundred")]
+    public async Task CallTool_UnusableLabel_SaysWhatALabelMayBe(string label)
+    {
+        var result = await _server.Client.CallToolAsync(
+            "dice_roll", new Dictionary<string, object?> { ["expression"] = "1d6", ["label"] = label.Replace('|', '\n') });
+
+        Assert.Equal(Prefix + "label must be one line of at most 100 characters, e.g. \"Stealth\".", _server.ErrorText(result));
     }
 
     [Theory]
@@ -169,7 +245,7 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>
     [Fact]
     public async Task CallTool_ExpressionOverLengthLimit_ReturnsDomainMessageNotAWrappedTotal()
     {
-        // 2,148 terms of +1000000 used to overflow the stub's int total and come back as a confident negative roll.
+        // 2,148 terms of +1000000 overflowed the Phase 0 stub's int total and came back as a confident negative roll.
         var expression = "1000000" + string.Concat(Enumerable.Repeat("+1000000", 2147));
 
         var result = await _server.Client.CallToolAsync("dice_roll", new Dictionary<string, object?> { ["expression"] = expression });
@@ -201,8 +277,8 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>
     /// <summary>
     /// The message Domain itself produces for <paramref name="expression"/>. Asking Domain (rather than copying its
     /// text here) makes the test pin the pass-through — "the model sees the domain message verbatim" — instead of
-    /// the wording, which DndMcp.Tests owns. Phase 1 replaces the stub parser: point this at the new entry point.
+    /// the wording, which DndMcp.Tests owns.
     /// </summary>
     private static string DomainMessageFor(string expression) =>
-        Assert.Throws<DndInputException>(() => StubDiceExpression.Parse(expression)).Message;
+        Assert.Throws<DndInputException>(() => DiceExpression.Parse(expression)).Message;
 }

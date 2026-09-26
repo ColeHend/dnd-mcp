@@ -5,8 +5,8 @@ Claude Code and Claude Desktop launch it over stdio.
 
 | Area | Status |
 |---|---|
-| Dice rolling (cryptographic RNG) | Phase 0 stub: sums of `NdM` and integers |
-| Exact dice odds | Phase 1 |
+| Dice rolling (cryptographic RNG) | Done (Phase 1): keep/drop, rerolls, exploding dice, min/max, success counts, `adv`/`dis`/`ea`, labels, pass/fail checks, optional `seed` |
+| Exact dice odds | Done (Phase 1): exact fractions, floating point for large pools, seeded Monte Carlo when no exact form exists |
 | Rules lookup (SRD 5.1 / 5.2.1 via the dnd5eapi dataset, offline) | Phase 2 |
 | Encounter difficulty (2014 + 2024) | Phase 3 |
 | DPR maths + feature deltas for homebrew | Phase 4 |

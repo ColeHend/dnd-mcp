@@ -15,4 +15,9 @@
     <PackageReference Include="FluentValidation" Version="12.1.1" />
   </ItemGroup>
 
+  <!-- Numerical internals (the binomial row, the arithmetic policies) are pinned directly by unit tests. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="DndMcp.Tests" />
+  </ItemGroup>
+
 </Project>

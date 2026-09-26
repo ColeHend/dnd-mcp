@@ -36,6 +36,7 @@ public sealed class StdoutPurityTests
     private const int DomainErrorCallId = 4;
     private const int GuardErrorCallId = 5;
     private const int UnknownToolId = 6;
+    private const int OddsCallId = 7;
 
     [Fact]
     public async Task BuiltServer_FullSession_WritesOnlyJsonRpcToStdout()
@@ -61,6 +62,7 @@ public sealed class StdoutPurityTests
         Assert.True(IsToolError(responses[DomainErrorCallId]));
         Assert.True(IsToolError(responses[GuardErrorCallId]));
         Assert.True(responses[UnknownToolId].TryGetProperty("error", out _), "An unknown tool should be a JSON-RPC error.");
+        Assert.False(IsToolError(responses[OddsCallId]), $"The dice_odds call (Monte Carlo path) failed.{server.Diagnostics()}");
     }
 
     [Fact]
@@ -122,8 +124,10 @@ public sealed class StdoutPurityTests
         await server.SendAsync(Request(DomainErrorCallId, "tools/call", """{"name":"dice_roll","arguments":{"expression":"2d6 3"}}"""));
         await server.SendAsync(Request(GuardErrorCallId, "tools/call", """{"name":"dice_roll","arguments":{"times":"three"}}"""));
         await server.SendAsync(Request(UnknownToolId, "tools/call", """{"name":"no_such_tool","arguments":{}}"""));
+        await server.SendAsync(Request(OddsCallId, "tools/call", """{"name":"dice_odds","arguments":{"expression":"4d6!kh3>=15"}}"""));
 
-        var rest = await server.WaitForResponsesAsync([ListToolsId, GoodCallId, DomainErrorCallId, GuardErrorCallId, UnknownToolId], timeout.Token);
+        var rest = await server.WaitForResponsesAsync(
+            [ListToolsId, GoodCallId, DomainErrorCallId, GuardErrorCallId, UnknownToolId, OddsCallId], timeout.Token);
 
         server.CloseInput();
         var exitCode = await server.WaitForExitAsync(ExitTimeout);
