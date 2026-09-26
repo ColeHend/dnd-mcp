@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>DndMcp</RootNamespace>
+    <AssemblyName>DndMcp</AssemblyName>
+    <Version>0.1.0</Version>
+
+    <!-- Framework-dependent builds keep running when only a newer major runtime is installed.
+         The registered binary is published self-contained anyway (see README), so this only
+         matters for `dotnet DndMcp.dll` during development. -->
+    <RollForward>Major</RollForward>
+
+    <!-- MEAI001: [AIParameterName] is marked experimental in Microsoft.Extensions.AI 10.8.x. It is how
+         multi-word tool parameters get snake_case names in the schema (dry_run, as_of_session) to match
+         the tool names and the snake_case nested objects, instead of C# camelCase leaking into what the
+         model sees. If the attribute is renamed or removed, the build breaks on the missing type, which is
+         the signal we want; the experimental warning itself adds nothing. -->
+    <NoWarn>$(NoWarn);MEAI001</NoWarn>
+
+    <!-- Lets `dotnet pack` produce an MCP server package later (dnx / NuGet). Not used for the
+         local install, which registers a published binary with Claude Code. -->
+    <PackAsTool>true</PackAsTool>
+    <PackageType>McpServer</PackageType>
+    <PackageId>DndMcp</PackageId>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <Description>D&amp;D 5e (2014 + 2024) MCP server: rules lookup, dice, DPR and Monte Carlo balance maths, encounter difficulty and campaign tracking.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include=".mcp\server.json" Pack="true" PackagePath="/.mcp/" />
+    <None Include="..\README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DndMcp.Domain\DndMcp.Domain.csproj" />
+    <ProjectReference Include="..\DndMcp.Repository\DndMcp.Repository.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
+    <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
+  </ItemGroup>
+
+  <!-- The integration tests call DndMcpServerRegistration directly so they exercise the exact
+       registrations the real server uses. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="DndMcp.IntegrationTests" />
+  </ItemGroup>
+
+</Project>

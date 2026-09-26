@@ -1,0 +1,7 @@
+* text=auto eol=lf
+
+# Vendored 5e-database JSON is pinned by sha256 in content/5e-database/manifest.json.
+# Any line-ending normalisation changes the bytes, the manifest check then fails, and the
+# SRD index is rebuilt (or refused) on every machine that checks the repo out differently.
+# Treat the vendored tree as opaque bytes.
+content/5e-database/** -text

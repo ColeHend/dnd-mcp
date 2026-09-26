@@ -1,0 +1,24 @@
+.vs/
+.vscode/
+.idea/
+bin/
+obj/
+DndMcp/bin/
+DndMcp/obj/
+DndMcp.Domain/bin/
+DndMcp.Domain/obj/
+DndMcp.Repository/bin/
+DndMcp.Repository/obj/
+DndMcp.Tests/bin/
+DndMcp.Tests/obj/
+DndMcp.Tests/TestResults/
+DndMcp.IntegrationTests/bin/
+DndMcp.IntegrationTests/obj/
+DndMcp.IntegrationTests/TestResults/
+# Publish output and local artifacts
+artifacts/
+publish/
+# Local databases created while developing
+*.db
+*.db-wal
+*.db-shm

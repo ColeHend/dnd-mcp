@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>DndMcp.Repository</RootNamespace>
+    <AssemblyName>DndMcp.Repository</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DndMcp.Domain\DndMcp.Domain.csproj" />
+  </ItemGroup>
+
+  <!-- Microsoft.Data.Sqlite's default bundle (SQLitePCLRaw e_sqlite3) ships FTS5 and JSON1, which the
+       campaign schema and the SRD index both depend on. SqliteCapabilityTests pins that, so a bundle
+       swap that drops either fails a test instead of failing at first query. -->
+  <ItemGroup>
+    <PackageReference Include="Dapper" Version="2.1.89" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
+  </ItemGroup>
+
+</Project>

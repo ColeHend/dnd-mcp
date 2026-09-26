@@ -1,0 +1,257 @@
+using System.Buffers;
+using System.Globalization;
+using System.Reflection;
+using System.Text.Json;
+using Microsoft.Extensions.AI;
+using ModelContextProtocol;
+
+namespace DndMcp.Hosting;
+
+/// <summary>
+/// Checks a call's top-level arguments against the tool's own input schema before the tool runs.
+///
+/// <para>
+/// Without this, the two most common model mistakes — leaving out a required argument, or sending a
+/// string where a number belongs — fail inside the SDK's argument binding with an ArgumentException or
+/// JsonException. The SDK reports those as the bare "An error occurred invoking '&lt;tool&gt;'.", which gives
+/// the model nothing to correct. Validating against the schema the model was shown turns them into a
+/// message that names the argument and lists what the tool accepts.
+/// </para>
+/// <para>
+/// Deliberately shallow: required-ness and the JSON type of each top-level argument only. Nested objects
+/// (builds, campaign ops) are validated by FluentValidation in Domain, where the rules live.
+/// </para>
+/// <para>
+/// Whatever this accepts, the SDK's binder must also accept — anything accepted here and refused there
+/// falls through to the generic message again. Two gaps are closed for that reason. Numeric strings are
+/// held to the text System.Text.Json reads, which is stricter than .NET's own parsers (see
+/// <see cref="IsIntegerText"/>). And when the tool's method is known, an integer must fit the parameter's
+/// CLR type, because the schema says only "integer" for int and long alike. ToolErrorTests pins the dice
+/// cases and ArgumentBindingAgreementTests pins number and renamed parameters; the reverse direction
+/// (refusing what the binder would take) only costs the model a retry and is allowed for "NaN"/"Infinity".
+/// </para>
+/// </summary>
+internal static class ToolArgumentGuard
+{
+    private static readonly SearchValues<char> NumberCharacters = SearchValues.Create("0123456789+-.eE");
+
+    private static readonly Dictionary<Type, (decimal Min, decimal Max)> IntegerRanges = new()
+    {
+        [typeof(sbyte)] = (sbyte.MinValue, sbyte.MaxValue),
+        [typeof(byte)] = (byte.MinValue, byte.MaxValue),
+        [typeof(short)] = (short.MinValue, short.MaxValue),
+        [typeof(ushort)] = (ushort.MinValue, ushort.MaxValue),
+        [typeof(int)] = (int.MinValue, int.MaxValue),
+        [typeof(uint)] = (uint.MinValue, uint.MaxValue),
+        [typeof(long)] = (long.MinValue, long.MaxValue),
+        [typeof(ulong)] = (ulong.MinValue, ulong.MaxValue),
+    };
+
+    /// <param name="method">
+    /// The tool's C# method (the SDK puts it first in <c>McpServerTool.Metadata</c>), used only for the
+    /// integer range check. Null skips that check rather than guessing a range.
+    /// </param>
+    public static void Validate(string toolName, JsonElement inputSchema, IDictionary<string, JsonElement>? arguments, MethodInfo? method = null)
+    {
+        if (inputSchema.ValueKind != JsonValueKind.Object ||
+            !inputSchema.TryGetProperty("properties", out var properties) ||
+            properties.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        var problems = new List<string>();
+
+        if (inputSchema.TryGetProperty("required", out var required) && required.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var name in required.EnumerateArray().Select(r => r.GetString()).OfType<string>())
+            {
+                if (arguments is null || !arguments.TryGetValue(name, out var value) || value.ValueKind == JsonValueKind.Undefined)
+                {
+                    problems.Add($"missing required argument '{name}'");
+                }
+            }
+        }
+
+        if (arguments is not null)
+        {
+            var parameterTypes = ParameterTypesBySchemaName(method);
+
+            foreach (var (name, value) in arguments)
+            {
+                if (!properties.TryGetProperty(name, out var property))
+                {
+                    problems.Add($"unknown argument '{name}'");
+                    continue;
+                }
+
+                var allowed = AllowedTypes(property);
+                if (allowed.Count > 0 && !allowed.Any(type => Matches(type, value)))
+                {
+                    problems.Add($"argument '{name}' should be {string.Join(" or ", allowed)} but was {Describe(value)}");
+                    continue;
+                }
+
+                if (parameterTypes is not null &&
+                    parameterTypes.TryGetValue(name, out var clrType) &&
+                    IntegerRanges.TryGetValue(clrType, out var range) &&
+                    TryReadInteger(value, out var number) &&
+                    (number < range.Min || number > range.Max))
+                {
+                    // No CLR bounds in the text: "-2147483648 to 2147483647" reads as the tool's accepted range and
+                    // invites a second failing call when the real range (e.g. times 1-100) is far narrower.
+                    problems.Add($"argument '{name}' was {Describe(value)}, which is too {(number < range.Min ? "small" : "large")} to be valid");
+                }
+            }
+        }
+
+        if (problems.Count > 0)
+        {
+            throw new McpException(
+                $"Invalid arguments: {string.Join("; ", problems)}. {toolName} accepts: {DescribeParameters(inputSchema, properties)}.");
+        }
+    }
+
+    private static List<string> AllowedTypes(JsonElement property)
+    {
+        if (!property.TryGetProperty("type", out var type))
+        {
+            return [];
+        }
+
+        return type.ValueKind switch
+        {
+            JsonValueKind.String => [type.GetString()!],
+            JsonValueKind.Array => type.EnumerateArray().Select(t => t.GetString()).OfType<string>().ToList(),
+            _ => [],
+        };
+    }
+
+    // Numbers sent as strings ("3") are accepted because the SDK's options set AllowReadingFromString and
+    // would bind them fine; rejecting them here would refuse calls that work.
+    private const NumberStyles IntegerStyles = NumberStyles.AllowLeadingSign;
+    private const NumberStyles NumberStylesForStrings = NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint | NumberStyles.AllowExponent;
+
+    private static bool Matches(string type, JsonElement value) => type switch
+    {
+        "string" => value.ValueKind == JsonValueKind.String,
+        "integer" => (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out _)) ||
+                     (value.ValueKind == JsonValueKind.String && IsIntegerText(value.GetString()) &&
+                      long.TryParse(value.GetString(), IntegerStyles, CultureInfo.InvariantCulture, out _)),
+        "number" => value.ValueKind == JsonValueKind.Number ||
+                    (value.ValueKind == JsonValueKind.String && IsNumberText(value.GetString())),
+        "boolean" => value.ValueKind is JsonValueKind.True or JsonValueKind.False,
+        "array" => value.ValueKind == JsonValueKind.Array,
+        "object" => value.ValueKind == JsonValueKind.Object,
+        "null" => value.ValueKind == JsonValueKind.Null,
+        _ => true,
+    };
+
+    private static bool TryReadInteger(JsonElement value, out decimal number)
+    {
+        number = 0;
+        return value.ValueKind switch
+        {
+            JsonValueKind.Number => value.TryGetDecimal(out number),
+            JsonValueKind.String => IsIntegerText(value.GetString()) &&
+                                    decimal.TryParse(value.GetString(), IntegerStyles, CultureInfo.InvariantCulture, out number),
+            _ => false,
+        };
+    }
+
+    /// <summary>
+    /// An optional sign, then ASCII digits, and nothing else — the integer text System.Text.Json reads.
+    /// </summary>
+    /// <remarks>
+    /// long.TryParse alone is not enough: it ignores trailing NUL characters, so "3\u0000" would pass here
+    /// and then fail in the binder with the bare generic error. Whitespace, other Unicode digits and
+    /// exponents ("1e2") are refused by both, but spelling the rule out keeps it from depending on that.
+    /// </remarks>
+    private static bool IsIntegerText(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return false;
+        }
+
+        var digits = text.AsSpan(text[0] is '+' or '-' ? 1 : 0);
+        return digits.Length > 0 && !digits.ContainsAnyExceptInRange('0', '9');
+    }
+
+    /// <summary>
+    /// A finite number written with ASCII digits, a sign, '.' and an exponent only.
+    /// </summary>
+    /// <remarks>
+    /// double.TryParse is looser than the binder in three ways, each a bare generic error if let through:
+    /// trailing NULs ("2.5\u0000"), case-insensitive "nan"/"infinity", and overflow to infinity ("1e400").
+    /// Within this character set, and finite, the two agree (checked case by case against
+    /// JsonSerializer with the server's options).
+    /// </remarks>
+    private static bool IsNumberText(string? text) =>
+        !string.IsNullOrEmpty(text) &&
+        !text.AsSpan().ContainsAnyExcept(NumberCharacters) &&
+        double.TryParse(text, NumberStylesForStrings, CultureInfo.InvariantCulture, out var number) &&
+        double.IsFinite(number);
+
+    /// <summary>
+    /// C# parameter types keyed by the name the model sees in the schema, for the integer range check.
+    /// </summary>
+    /// <remarks>
+    /// [AIParameterName] renames a parameter in both the schema and the binder. Keying by the C# name would
+    /// miss every renamed parameter and silently skip its range check, and an out-of-range value would reach
+    /// the model as the bare generic error again.
+    /// </remarks>
+    private static Dictionary<string, Type>? ParameterTypesBySchemaName(MethodInfo? method)
+    {
+        if (method is null)
+        {
+            return null;
+        }
+
+        var types = new Dictionary<string, Type>(StringComparer.Ordinal);
+        foreach (var parameter in method.GetParameters())
+        {
+            if (SchemaName(parameter) is { } name)
+            {
+                types.TryAdd(name, Nullable.GetUnderlyingType(parameter.ParameterType) ?? parameter.ParameterType);
+            }
+        }
+
+        return types;
+    }
+
+    // MEAI001: the attribute is experimental in Microsoft.Extensions.AI 10.8.3. If it is renamed or removed,
+    // the SDK's parameter naming changes with it, and a build break here is the right signal.
+#pragma warning disable MEAI001
+    private static string? SchemaName(ParameterInfo parameter) =>
+        parameter.GetCustomAttribute<AIParameterNameAttribute>()?.Name ?? parameter.Name;
+#pragma warning restore MEAI001
+
+    private static string Describe(JsonElement value) => value.ValueKind switch
+    {
+        JsonValueKind.String => $"the string \"{Truncate(value.GetString())}\"",
+        JsonValueKind.Number => $"the number {value.GetRawText()}",
+        JsonValueKind.True or JsonValueKind.False => $"the boolean {value.GetRawText()}",
+        JsonValueKind.Null => "null",
+        JsonValueKind.Array => "an array",
+        JsonValueKind.Object => "an object",
+        _ => value.ValueKind.ToString(),
+    };
+
+    private static string DescribeParameters(JsonElement schema, JsonElement properties)
+    {
+        var required = schema.TryGetProperty("required", out var r) && r.ValueKind == JsonValueKind.Array
+            ? r.EnumerateArray().Select(x => x.GetString()).OfType<string>().ToHashSet()
+            : [];
+
+        return string.Join(", ", properties.EnumerateObject().Select(p =>
+        {
+            var types = AllowedTypes(p.Value).Where(t => t != "null").ToList();
+            var typeText = types.Count == 0 ? "any" : string.Join("|", types);
+            return $"{p.Name} ({typeText}, {(required.Contains(p.Name) ? "required" : "optional")})";
+        }));
+    }
+
+    private static string Truncate(string? text) =>
+        text is null ? string.Empty : text.Length <= 40 ? text : text[..40] + "…";
+}

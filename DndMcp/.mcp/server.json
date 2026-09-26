@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "description": "D&D 5e (2014 + 2024): rules lookup, dice, DPR and Monte Carlo balance maths, encounter difficulty, campaign tracking.",
+  "name": "io.github.colehend/dnd-mcp",
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "nuget",
+      "identifier": "DndMcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [],
+      "environmentVariables": []
+    }
+  ],
+  "repository": {
+    "url": "https://github.com/ColeHend/dnd-mcp",
+    "source": "github"
+  }
+}

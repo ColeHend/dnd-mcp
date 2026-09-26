@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>DndMcp.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <!-- References Domain + Repository but NOT the MCP host, matching the sibling repos. Host-level
+       behaviour (tool registration, error mapping, stdout purity) is DndMcp.IntegrationTests' job. -->
+  <ItemGroup>
+    <ProjectReference Include="..\DndMcp.Domain\DndMcp.Domain.csproj" />
+    <ProjectReference Include="..\DndMcp.Repository\DndMcp.Repository.csproj" />
+  </ItemGroup>
+
+  <!-- Vendored content is copied next to the tests so conformance tests read the real files. -->
+  <ItemGroup>
+    <None Include="..\content\**\*" CopyToOutputDirectory="PreserveNewest" LinkBase="content" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.0">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="coverlet.collector" Version="10.0.1">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+</Project>
