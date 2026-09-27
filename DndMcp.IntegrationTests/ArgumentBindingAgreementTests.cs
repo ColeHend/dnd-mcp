@@ -189,4 +189,61 @@ public sealed class ArgumentBindingAgreementTests : IClassFixture<TestOnlyToolsS
 
         Assert.Equal("name=a; more=1", text);
     }
+
+    // A parameter published untyped with another parameter's shape (SameShapeAsAttribute, balance_compare's variant) gets
+    // every check the typed one gets: unknown and missing fields, JSON types, nested items, and the test-deserialize
+    // backstop as the other parameter's CLR type, which only a DateOnly field can reach here.
+    [Theory]
+    [InlineData("""{"shape":{"name":"a"},"copy":{"name":"b","colour":"red"}}""", "argument 'copy' has unknown field 'colour' (fields: name, when, tags)")]
+    [InlineData("""{"shape":{"name":"a"},"copy":{"when":"2024-01-01"}}""", "argument 'copy' is missing required field 'name'")]
+    [InlineData("""{"shape":{"name":"a"},"copy":{"name":"b","tags":["x",3]}}""", "argument 'copy' field 'tags' item 2 should be string but was the number 3")]
+    [InlineData("""{"shape":{"name":"a"},"copy":{"name":"b","when":"not a date"}}""", "argument 'copy' field 'when' could not be read as the tool expects")]
+    [InlineData("""{"shape":{"name":"a"},"copy":"b"}""", "argument 'copy' should be object but was the string \"b\"")]
+    [InlineData("""{"shape":{"name":"a"},"copy":[{"name":"b"}]}""", "argument 'copy' should be object but was an array")]
+    public async Task CallTool_SameShapeArgument_GuardChecksItAsTheOtherParameter(string arguments, string problem)
+    {
+        var text = _server.ErrorText(await _server.CallToolJsonAsync("echo_shape", arguments));
+
+        Assert.StartsWith(EchoShapePrefix + problem + ". echo_shape accepts:", text, StringComparison.Ordinal);
+        Assert.EndsWith(", copy (object, optional).", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("""{"shape":{"name":"a"},"copy":{"name":"b","when":"2024-01-01"}}""", "name=a; more=0; copy=b")]
+    [InlineData("""{"shape":{"name":"a"},"copy":null}""", "name=a; more=0")]
+    public async Task CallTool_SameShapeArgumentTheGuardAccepts_Binds(string arguments, string bound)
+    {
+        Assert.Equal(bound, _server.SuccessText(await _server.CallToolJsonAsync("echo_shape", arguments)));
+    }
+
+    private const string Fighter =
+        """{"name":"F","level":5,"abilities":{"str":18},"attacks":[{"name":"Greatsword","count":2,"damage":"2d6","damage_type":"slashing","properties":["melee","heavy","two-handed"]}]}""";
+
+    [Theory]
+    // Numbers quoted inside a build bind like quoted top-level numbers (AllowReadingFromString), step values included.
+    [InlineData("""{"name":"F","level":"5","abilities":{"str":"18"},"attacks":[{"name":"Greatsword","count":"2","damage":"2d6","damage_type":"slashing","properties":["melee","heavy","two-handed"],"to_hit":{"bonus":"0"}}]}""")]
+    // A step map with a quoted value.
+    [InlineData("""{"name":"F","level":5,"abilities":{"str":{"1":"18"}},"attacks":[{"name":"Greatsword","count":{"1":2},"damage":"2d6","damage_type":"slashing","properties":["melee","heavy","two-handed"]}]}""")]
+    public async Task CallTool_BalanceBuildWithQuotedNumbers_BindsToTheSameBuild(string build)
+    {
+        var quoted = _server.SuccessText(await _server.CallToolJsonAsync("balance_dpr", $$"""{"build":{{build}},"target":{"ac":"15"},"horizon":"round1"}"""));
+        var plain = _server.SuccessText(await _server.CallToolJsonAsync("balance_dpr", $$"""{"build":{{Fighter}},"target":{"ac":15},"horizon":"round1"}"""));
+
+        Assert.Equal(plain, quoted);
+        Assert.Contains("**15.00** damage per round at level 5 against AC 15", plain, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("balance_dpr", "build", ""","target":null,"levels":null,"ac_range":null,"horizon":null,"rounds":null,"rest_preset":null,"encounters_per_day":null,"short_rests":null,"rulings":null""")]
+    [InlineData("balance_dpr", "build", ""","levels":[],"ac_range":[]""")]
+    [InlineData("balance_compare", "baseline", ""","feature":{"name":"Lucky","modifiers":[{"kind":"lucky"}]},"variant":null,"target":null,"levels":null,"horizon":null,"rounds":null,"rest_preset":null,"encounters_per_day":null,"short_rests":null,"rulings":null""")]
+    public async Task CallTool_BalanceNullOrEmptyOptionalArguments_MeanTheDefaults(string tool, string buildArgument, string rest)
+    {
+        // Models send null (or an empty list) for "use the default"; each must bind and read as the default: a 3-round
+        // fight, the build's own level, the CR = level target, the 2014 DMG day, every ruling off.
+        var text = _server.SuccessText(await _server.CallToolJsonAsync(tool, $$"""{"{{buildArgument}}":{{Fighter}}{{rest}}}"""));
+
+        Assert.Contains("at level 5 against AC 15 — a 3-round fight (the mean per round)", text, StringComparison.Ordinal);
+        Assert.Contains("2014 DMG: 6–8 encounters, 2 short rests", text, StringComparison.Ordinal);
+    }
 }

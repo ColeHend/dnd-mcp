@@ -597,7 +597,7 @@ public sealed class SrdIndexServiceTests
     }
 
     [Fact]
-    public async Task RulesTools_NoContent_ReturnTheReasonWhileDiceTablesCrEncountersAndTheHandshakeWork()
+    public async Task RulesTools_NoContent_ReturnTheReasonWhileDiceTablesCrEncountersBalanceAndTheHandshakeWork()
     {
         using var content = new TempDirectory();
         var server = McpServerHarness.WithOptions(o => o.ContentRoot = content.Path);
@@ -624,6 +624,12 @@ public sealed class SrdIndexServiceTests
             Assert.Contains("## 2024 rules: Low", server.SuccessText(byCr), StringComparison.Ordinal);
             var byName = await server.CallToolJsonAsync("encounter_difficulty", """{"party":[5,5,5,5],"monsters":[{"name":"Ogre","count":3}]}""");
             Assert.Equal("An error occurred invoking 'encounter_difficulty': " + expected, server.ErrorText(byName));
+
+            // The balance tools and their tables are Domain maths too.
+            var dpr = await server.CallToolJsonAsync("balance_dpr", """{"build":{"name":"W","preset":"warlock_baseline","level":5}}""");
+            Assert.Contains("**17.80** damage per round at level 5", server.SuccessText(dpr), StringComparison.Ordinal);
+            var targets = await server.Client.CallToolAsync("rules_get", new Dictionary<string, object?> { ["ref"] = "rules://tables/dpr-targets-by-level" });
+            Assert.StartsWith("# DPR Targets by Level", server.SuccessText(targets), StringComparison.Ordinal);
         }
         finally
         {

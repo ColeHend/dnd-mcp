@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using DndMcp.Domain.Core;
 using DndMcp.Domain.Dice;
+using DndMcp.Domain.Features;
 using DndMcp.IntegrationTests.Infrastructure;
 using ModelContextProtocol;
 using Xunit;
@@ -276,6 +277,82 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>
         Assert.Equal($"An error occurred invoking '{tool}': Invalid arguments: {problem}. {accepted}", _server.ErrorText(result));
     }
 
+    private const string BalanceDprParameters =
+        "balance_dpr accepts: build (object, required), target (object, optional), levels (array of integer, optional), " +
+        "ac_range (array of integer, optional), horizon (string, optional), rounds (integer, optional), rest_preset (string, " +
+        "optional), encounters_per_day (number, optional), short_rests (integer, optional), rulings (object, optional).";
+
+    private const string BalanceCompareParameters =
+        "balance_compare accepts: baseline (object, required), variant (object, optional), feature (object, optional), target " +
+        "(object, optional), levels (array of integer, optional), horizon (string, optional), rounds (integer, optional), " +
+        "rest_preset (string, optional), encounters_per_day (number, optional), short_rests (integer, optional), rulings " +
+        "(object, optional).";
+
+    private const string Fighter =
+        """{"name":"F","level":5,"abilities":{"str":18},"attacks":[{"name":"Greatsword","count":2,"damage":"2d6","damage_type":"slashing"}]}""";
+
+    [Theory]
+    [InlineData("balance_dpr", "{}", "missing required argument 'build'", BalanceDprParameters)]
+    [InlineData("balance_dpr", """{"build":"a fighter"}""", "argument 'build' should be object but was the string \"a fighter\"", BalanceDprParameters)]
+    [InlineData("balance_dpr", """{"build":{"name":"F","level":5,"attacks":[{"name":"A","damage":"1d8","cuont":2}]}}""",
+        "argument 'build' field 'attacks' item 1 has unknown field 'cuont' (fields: name, count, action, to_hit, damage, damage_type, " +
+        "ability_to_damage, properties, offhand, mastery, cantrip, from_level, until_level)", BalanceDprParameters)]
+    [InlineData("balance_dpr", """{"build":{"name":"F","level":"five"}}""", "argument 'build' field 'level' should be integer but was the string \"five\"", BalanceDprParameters)]
+    [InlineData("balance_dpr", """{"build":{"name":"F","level":5,"attacks":[{"name":"A","damage":"1d8","to_hit":{"bonus":99999999999}}]}}""",
+        "argument 'build' field 'attacks' item 1 field 'to_hit' field 'bonus' was the number 99999999999, which is too large to be valid", BalanceDprParameters)]
+    [InlineData("balance_dpr", """{"build":{"name":"F","level":5,"modifiers":[{"kind":"lucky","attacks":"A"}]}}""",
+        "argument 'build' field 'modifiers' item 1 field 'attacks' should be array but was the string \"A\"", BalanceDprParameters)]
+    [InlineData("balance_dpr", """{"build":{"name":"F","level":5},"target":{"armor":15}}""",
+        "argument 'target' has unknown field 'armor' (fields: ac, cr, save_bonus, saves, hp, resistances, vulnerabilities, immunities, " +
+        "magic_resistance, evasion, condition, cover, legendary_resistance, save_dice, second_target_rate)", BalanceDprParameters)]
+    [InlineData("balance_dpr", """{"build":{"name":"F","level":5},"rulings":{"hew_gets_pb":"yes"}}""",
+        "argument 'rulings' field 'hew_gets_pb' should be boolean but was the string \"yes\"", BalanceDprParameters)]
+    [InlineData("balance_dpr", """{"build":{"name":"F","level":5},"levels":[5,"ten"]}""", "argument 'levels' item 2 should be integer but was the string \"ten\"", BalanceDprParameters)]
+    [InlineData("balance_dpr", """{"build":{"name":"F","level":5},"encounters_per_day":"many"}""",
+        "argument 'encounters_per_day' should be number or null but was the string \"many\"", BalanceDprParameters)]
+    [InlineData("balance_compare", """{"feature":{"name":"X"}}""", "missing required argument 'baseline'", BalanceCompareParameters)]
+    [InlineData("balance_compare", """{"baseline":{"name":"F","level":5},"variant":{"name":"G","level":5,"attacks":[{"name":"A","cuont":2}]}}""",
+        "argument 'variant' field 'attacks' item 1 has unknown field 'cuont' (fields: name, count, action, to_hit, damage, damage_type, " +
+        "ability_to_damage, properties, offhand, mastery, cantrip, from_level, until_level)", BalanceCompareParameters)]
+    [InlineData("balance_compare", """{"baseline":{"name":"F","level":5},"variant":"F with GWM"}""",
+        "argument 'variant' should be object but was the string \"F with GWM\"", BalanceCompareParameters)]
+    [InlineData("balance_compare", """{"baseline":{"name":"F","level":5},"feature":{"name":"X","modifiers":[{"knd":"lucky"}]}}""",
+        "argument 'feature' field 'modifiers' item 1 has unknown field 'knd'", BalanceCompareParameters)]
+    public async Task CallTool_BalanceArgumentOfTheWrongShape_NamesTheFieldAndListsAcceptedParameters(
+        string tool, string argumentsJson, string problem, string accepted)
+    {
+        var text = _server.ErrorText(await _server.CallToolJsonAsync(tool, argumentsJson));
+
+        // The field list of a modifier is long; the part that names the problem and the parameter list are pinned.
+        Assert.StartsWith($"An error occurred invoking '{tool}': Invalid arguments: {problem}", text, StringComparison.Ordinal);
+        Assert.EndsWith(". " + accepted, text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("""{"kind":"smite"}""")]
+    [InlineData("""{"kind":"extra_damage","dice":"2d8kh1"}""")]
+    [InlineData("""{"kind":"to_hit","type":"fire","amount":1}""")]
+    public async Task CallTool_BalanceDslError_ReturnsTheDomainMessageVerbatim(string modifier)
+    {
+        // The DSL's validators own every message (DndMcp.Tests pins the wording); the tool must pass it through untouched.
+        var build = $$"""{"name":"F","level":5,"abilities":{"str":18},"attacks":[{"name":"Greatsword","count":2,"damage":"2d6","damage_type":"slashing"}],"modifiers":[{{modifier}}]}""";
+        var expected = Assert.Throws<DndInputException>(() =>
+            BuildResolver.Resolve(DslJson.Deserialize<BuildSpec>(build, "build"), (IReadOnlyList<int>?)null, null, "build")).Message;
+
+        var result = await _server.CallToolJsonAsync("balance_dpr", $$"""{"build":{{build}}}""");
+
+        Assert.Equal("An error occurred invoking 'balance_dpr': " + expected, _server.ErrorText(result));
+    }
+
+    [Fact]
+    public async Task CallTool_BalanceToolsAfterAnError_KeepServing()
+    {
+        _server.ErrorText(await _server.CallToolJsonAsync("balance_compare", $$"""{"baseline":{{Fighter}}}"""));
+
+        var good = _server.SuccessText(await _server.CallToolJsonAsync("balance_dpr", $$"""{"build":{{Fighter}}}"""));
+        Assert.StartsWith("# Damage per round: F", good, StringComparison.Ordinal);
+    }
+
     [Theory]
     // HUGE is 100,000 characters, filled in at run time so no test name carries it.
     [InlineData("rules_get", """{"name":"Fireball","edition":"HUGE"}""")]
@@ -296,6 +373,25 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>
         var error = _server.ErrorText(await _server.CallToolJsonAsync(tool, argumentsJson));
 
         Assert.True(error.Length < 600, $"{error.Length} characters: {error[..Math.Min(300, error.Length)]}");
+        Assert.Contains("…", error, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    // HUGE is 100,000 characters. A build's messages list its fields or kinds and the tool's parameters, so the ceiling is
+    // higher than for dice_roll; what matters is that the pasted text is cut, not echoed.
+    [InlineData("balance_dpr", """{"build":{"name":"F","level":5,"attacks":[{"name":"A","damage":"1d8"}]},"horizon":"HUGE"}""")]
+    [InlineData("balance_dpr", """{"build":{"name":"F","level":5,"attacks":[{"name":"A","damage":"1d8","HUGE":1}]}}""")]
+    [InlineData("balance_dpr", """{"build":{"name":"HUGE","level":5,"attacks":[{"name":"A","damage":"1d8"}]}}""")]
+    [InlineData("balance_dpr", """{"build":{"name":"F","level":5,"attacks":[{"name":"A","damage":"1d8","damage_type":"HUGE"}]}}""")]
+    [InlineData("balance_compare", """{"baseline":{"name":"F","level":5,"attacks":[{"name":"A","damage":"1d8"}]},"feature":{"name":"X","modifiers":[{"kind":"HUGE"}]}}""")]
+    [InlineData("balance_compare", """{"baseline":{"name":"F","level":5,"attacks":[{"name":"A","damage":"1d8"}]},"rest_preset":"HUGE"}""")]
+    public async Task CallTool_HugeArgumentInABalanceError_IsEchoedShortened(string tool, string argumentsTemplate)
+    {
+        var argumentsJson = argumentsTemplate.Replace("HUGE", new string('x', 100_000), StringComparison.Ordinal);
+
+        var error = _server.ErrorText(await _server.CallToolJsonAsync(tool, argumentsJson));
+
+        Assert.True(error.Length < 1_500, $"{error.Length} characters: {error[..Math.Min(300, error.Length)]}");
         Assert.Contains("…", error, StringComparison.Ordinal);
     }
 

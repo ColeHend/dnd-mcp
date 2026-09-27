@@ -92,6 +92,7 @@ internal static class DndMcpServerRegistration
             .WithTools<DiceTools>(McpJson.Options)
             .WithTools<RulesTools>(McpJson.Options)
             .WithTools<EncounterTools>(McpJson.Options)
+            .WithTools<BalanceTools>(McpJson.Options)
             .WithResources<RulesResources>()
             .WithResources(RulesTableResources.Create());
     }

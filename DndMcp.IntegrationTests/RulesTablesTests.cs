@@ -64,12 +64,25 @@ public sealed class RulesTablesTests : IClassFixture<McpServerHarness>
     [InlineData("encounter-multipliers-2014", 6)]
     [InlineData("adventuring-day-xp-2014", 20)]
     [InlineData("monster-stats-by-cr-2014", 34)]
+    [InlineData("dpr-targets-by-level", 20)]
     public async Task RulesGet_EveryTable_HasEveryRow(string slug, int rows)
     {
         var text = await Get(new() { ["ref"] = RulesTables.UriPrefix + slug });
         var tableRows = text.Split('\n').Where(l => l.StartsWith("| ", StringComparison.Ordinal)).ToList();
 
         Assert.Equal(rows + 1, tableRows.Count);
+    }
+
+    [Theory]
+    // gwf-expected-values: d4–d12, then 6 weapon dice × (plain, GWF 2014, GWF 2024). aoe-targets: 5 shapes, then 6 spells.
+    [InlineData("gwf-expected-values", 5, 18)]
+    [InlineData("aoe-targets", 5, 6)]
+    public async Task RulesGet_TwoTablePage_HasEveryRowOfBoth(string slug, int first, int second)
+    {
+        var text = await Get(new() { ["ref"] = RulesTables.UriPrefix + slug });
+        var tableRows = text.Split('\n').Where(l => l.StartsWith("| ", StringComparison.Ordinal)).ToList();
+
+        Assert.Equal(first + 1 + second + 1, tableRows.Count);
     }
 
     [Theory]
@@ -83,6 +96,21 @@ public sealed class RulesTablesTests : IClassFixture<McpServerHarness>
     [InlineData("adventuring-day-xp-2014", "| 5 | 3,500 |")]
     [InlineData("monster-stats-by-cr-2014", "| 0 | +2 | ≤ 13 | 1–6 | ≤ +3 | 0–1 | ≤ 13 |")]
     [InlineData("monster-stats-by-cr-2014", "| 25 | +8 | 19 | 581–625 | +12 | 213–230 | 21 |")]
+    // The CR = level row, the typical save, both reference curves (contract §8.11) and the warlock's odds.
+    [InlineData("dpr-targets-by-level", "| 1 | +2 | 13 | 85 | +3 | 13 | +0 | 7.08 | 6.30 | +5 (65%) |")]
+    [InlineData("dpr-targets-by-level", "| 5 | +3 | 15 | 145 | +6 | 15 | +2 | 12.08 | 17.80 | +7 (65%) |")]
+    [InlineData("dpr-targets-by-level", "| 9 | +4 | 16 | 205 | +7 | 16 | +4 | 17.08 | 20.50 | +9 (70%) |")]
+    [InlineData("dpr-targets-by-level", "| 20 | +6 | 19 | 400 | +10 | 19 | +9 | 33.33 | 38.20 | +11 (65%) |")]
+    // Research A2: d6 3.5 / 25/6 / 4; d12 6.5 / 22/3 / 6.75; Savage Attacker's best of two d12 is 1222/144.
+    [InlineData("gwf-expected-values", "| d6 | 3.5 | 4.1667 | +0.6667 | 4 | +0.5 | 4.4722 |")]
+    [InlineData("gwf-expected-values", "| d12 | 6.5 | 7.3333 | +0.8333 | 6.75 | +0.25 | 8.4861 |")]
+    // Contract §8.4's Savage Attacker table: 1d8 4.5 → 5.8125, crit 9 → 10.8457 with the ruling; 2d6 GWF 2024 8 → 8.9105, 16 → 17.3.
+    [InlineData("gwf-expected-values", "| 1d8 | — | 4.5 | 5.8125 | 9 | 10.3125 | 10.8457 |")]
+    [InlineData("gwf-expected-values", "| 2d6 | 2024 | 8 | 8.9105 | 16 | 16.9105 | 17.3 |")]
+    [InlineData("aoe-targets", "| sphere | radius | radius ÷ 5, rounded up (at least 1) |")]
+    [InlineData("aoe-targets", "| Fireball | 20-ft sphere | 4 |")]
+    [InlineData("aoe-targets", "| Lightning Bolt | 100-ft line | 4 |")]
+    [InlineData("aoe-targets", "| Cone of Cold | 60-ft cone | 6 |")]
     public async Task RulesGet_Table_RendersTheDomainValues(string slug, string row)
     {
         Assert.Contains(row, await Get(new() { ["ref"] = RulesTables.UriPrefix + slug }), StringComparison.Ordinal);
@@ -100,6 +128,30 @@ public sealed class RulesTablesTests : IClassFixture<McpServerHarness>
         Assert.Contains("also in the free 2014 Basic Rules; not in SRD 5.1", line, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("dpr-targets-by-level", "not in either SRD")]
+    [InlineData("dpr-targets-by-level", "The Finished Book (tomedunn), not a DMG table")]
+    [InlineData("dpr-targets-by-level", "community conventions")]
+    [InlineData("aoe-targets", "Dungeon Master's Guide (2014), p. 249; not in either SRD")]
+    public async Task RulesGet_DprTable_NamesItsNonSrdSources(string slug, string source)
+    {
+        // A model quoting "the DMG's typical save bonus" or "the official DPR target" would be repeating an invention.
+        var line = (await Get(new() { ["ref"] = RulesTables.UriPrefix + slug })).Split('\n')[2];
+
+        Assert.Contains(source, line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RulesGet_DprTargets_WarlockColumnIsThePublishedCurve()
+    {
+        // Contract §8.11, computed by the engine from the preset rather than typed in: the table and the tools cannot differ.
+        double[] published = [6.30, 8.25, 8.25, 8.90, 17.80, 17.80, 17.80, 19.10, 20.50, 19.10, 28.65, 28.65, 28.65, 28.65, 28.65, 28.65, 38.20, 38.20, 38.20, 38.20];
+        var rows = (await Get(new() { ["ref"] = RulesTables.UriPrefix + "dpr-targets-by-level" }))
+            .Split('\n').Where(l => l.StartsWith("| ", StringComparison.Ordinal)).Skip(1).Select(l => l.Split(" | ")).ToList();
+
+        Assert.Equal(published.Select(p => p.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)), rows.Select(r => r[8]));
+    }
+
     [Fact]
     public async Task RulesGet_MonsterStats_SaysNeitherSrdHasIt()
     {
@@ -115,7 +167,7 @@ public sealed class RulesTablesTests : IClassFixture<McpServerHarness>
         var attribution = await Get(new() { ["ref"] = "rules://attribution" });
         var notSrd = RulesTables.All.Where(t => !t.Source.StartsWith("SRD", StringComparison.Ordinal)).Select(t => t.Uri).ToList();
 
-        Assert.Equal(4, notSrd.Count);
+        Assert.Equal(6, notSrd.Count);
         Assert.All(notSrd, uri => Assert.Contains($"`{uri}`", attribution, StringComparison.Ordinal));
         Assert.Contains("## Not SRD text", attribution, StringComparison.Ordinal);
     }

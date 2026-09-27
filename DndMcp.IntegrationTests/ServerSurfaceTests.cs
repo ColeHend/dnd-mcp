@@ -31,6 +31,8 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     /// </summary>
     public static readonly IReadOnlyList<string> ExpectedToolNames =
     [
+        "balance_compare",
+        "balance_dpr",
         "dice_odds",
         "dice_roll",
         "encounter_difficulty",
@@ -47,6 +49,8 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     public static readonly IReadOnlyDictionary<string, (bool ReadOnly, bool Destructive, bool Idempotent, bool OpenWorld)> ExpectedAnnotations =
         new Dictionary<string, (bool, bool, bool, bool)>
         {
+            ["balance_compare"] = (true, false, true, false),
+            ["balance_dpr"] = (true, false, true, false),
             ["dice_odds"] = (true, false, true, false),
             ["dice_roll"] = (true, false, false, false),
             ["encounter_difficulty"] = (true, false, true, false),
@@ -62,8 +66,11 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     [
         "rules://attribution",
         "rules://tables/adventuring-day-xp-2014",
+        "rules://tables/aoe-targets",
         "rules://tables/cr-xp",
+        "rules://tables/dpr-targets-by-level",
         "rules://tables/encounter-multipliers-2014",
+        "rules://tables/gwf-expected-values",
         "rules://tables/monster-stats-by-cr-2014",
         "rules://tables/xp-budget-2024",
         "rules://tables/xp-thresholds-2014",
@@ -273,6 +280,72 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
         var later = _server.Client.ServerInstructions!.Split('\n').Single(l => l.StartsWith("More tools arrive", StringComparison.Ordinal));
 
         Assert.DoesNotContain("encounter", later, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ServerInstructions_LaterBuildsLine_NoLongerPromisesDamagePerRound()
+    {
+        // balance_dpr and balance_compare exist now; "damage-per-round … arrive in later builds" would tell the model they don't.
+        var later = _server.Client.ServerInstructions!.Split('\n').Single(l => l.StartsWith("More tools arrive", StringComparison.Ordinal));
+
+        Assert.DoesNotContain("damage", later, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("balance", later, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("campaign tracking", later, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("balance_dpr", "build", "target", "levels", "ac_range", "horizon", "rounds", "rest_preset", "encounters_per_day", "short_rests", "rulings")]
+    [InlineData("balance_compare", "baseline", "variant", "feature", "target", "levels", "horizon", "rounds", "rest_preset", "encounters_per_day", "short_rests", "rulings")]
+    public async Task BalanceTools_Description_NamesEveryArgumentAndGivesAnExample(string name, params string[] arguments)
+    {
+        // MCP has no input_examples: the description is where the model learns each argument and sees one whole call.
+        var tool = await GetToolAsync(name);
+        var properties = tool.JsonSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToList();
+
+        Assert.Equal(arguments.Order(StringComparer.Ordinal), properties.Order(StringComparer.Ordinal));
+        Assert.All(arguments, a => Assert.Contains(a, tool.Description, StringComparison.Ordinal));
+        Assert.Contains("\nExample: {", tool.Description, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("balance_dpr", "build")]
+    [InlineData("balance_compare", "baseline")]
+    [InlineData("balance_compare", "feature")]
+    public async Task BalanceTools_BuildSchema_TypesNestedObjectsAndLeavesStepValuesUntyped(string name, string parameter)
+    {
+        // The spec classes are the schema: attacks and modifiers are typed objects the argument guard can check field by
+        // field, while step values ("a number or {\"1\": 1, \"5\": 2}") must stay untyped or the SDK's binder refuses one form.
+        var schema = (await GetToolAsync(name)).JsonSchema.GetProperty("properties").GetProperty(parameter);
+        var attack = schema.GetProperty("properties").GetProperty("attacks").GetProperty("items");
+        var modifier = schema.GetProperty("properties").GetProperty("modifiers").GetProperty("items");
+
+        Assert.Contains("object", Types(attack));
+        Assert.Contains("object", Types(modifier));
+        foreach (var stepValue in new[] { attack.GetProperty("properties").GetProperty("count"), attack.GetProperty("properties").GetProperty("damage"), modifier.GetProperty("properties").GetProperty("amount") })
+        {
+            Assert.False(stepValue.TryGetProperty("type", out _), $"{name}.{parameter}: a step value has a type: {stepValue}");
+            Assert.Contains("step map", stepValue.GetProperty("description").GetString(), StringComparison.Ordinal);
+        }
+    }
+
+    // "object" or ["object", "null"]: the SDK writes either, depending on the property's nullability.
+    private static List<string> Types(JsonElement schema) =>
+        schema.GetProperty("type") is { ValueKind: JsonValueKind.Array } types
+            ? types.EnumerateArray().Select(t => t.GetString()!).ToList()
+            : [schema.GetProperty("type").GetString()!];
+
+    [Fact]
+    public async Task BalanceCompare_Variant_IsPublishedUntypedWithoutASecondBuildSchema()
+    {
+        // A second copy of the build schema made balance_compare's definition 38 KB; variant is the baseline's shape, checked
+        // by the argument guard against baseline's schema (SameShapeAsAttribute). Pinned so the copy does not creep back.
+        var schema = (await GetToolAsync("balance_compare")).JsonSchema;
+        var variant = schema.GetProperty("properties").GetProperty("variant");
+
+        Assert.False(variant.TryGetProperty("properties", out _));
+        Assert.False(variant.TryGetProperty("type", out _));
+        Assert.Contains("same fields as baseline", variant.GetProperty("description").GetString(), StringComparison.Ordinal);
+        Assert.True(schema.GetRawText().Length < 32_000, $"balance_compare's input schema is {schema.GetRawText().Length} characters.");
     }
 
     [Fact]

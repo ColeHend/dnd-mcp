@@ -153,7 +153,8 @@ public sealed partial class RulesTools
         "Give exactly one of:\n" +
         "- ref: an entry's ref from rules_search or an earlier result, e.g. \"2024/spell/fireball\"; \"spell/fireball\" uses " +
         "edition; an API URL like \"/api/2014/monsters/goblin\" works too. \"rules://attribution\" gives the SRD licence text; " +
-        "\"rules://tables\" lists the rules tables (XP by CR, encounter budgets and thresholds, DMG monster statistics by CR), " +
+        "\"rules://tables\" lists the rules tables (XP by CR, encounter budgets and thresholds, DMG monster statistics by CR, " +
+        "DPR targets, GWF and area-of-effect tables), " +
         "each also by its name, e.g. name \"XP Budget per Character\".\n" +
         "- name: the entry's name, e.g. \"Fireball\", \"Adult Red Dragon\", \"Grappled\". Case and punctuation don't matter, and " +
         "the other edition's name for a renamed entry works (\"Thug\" finds the 2024 Tough).\n" +

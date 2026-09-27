@@ -9,9 +9,10 @@ using DndMcp.Repository.Srd.Index;
 namespace DndMcp.Formatting;
 
 /// <summary>
-/// The rules tables this server serves whole: the encounter-building tables of both editions and the tables keyed by
-/// Challenge Rating. Each is a <c>rules://tables/&lt;slug&gt;</c> resource and is also reachable through <c>rules_get</c>
-/// (by that URI or by the table's name), because Claude Desktop attaches resources only by hand.
+/// The rules tables this server serves whole: the encounter-building tables of both editions, the tables keyed by
+/// Challenge Rating, and the tables the DPR tools cite (<see cref="BalanceRulesTables"/>). Each is a
+/// <c>rules://tables/&lt;slug&gt;</c> resource and is also reachable through <c>rules_get</c> (by that URI or by the
+/// table's name), because Claude Desktop attaches resources only by hand.
 ///
 /// <para>
 /// <b>Rendered from the Domain tables the maths uses</b> (<see cref="ChallengeRatingTables"/>,
@@ -89,6 +90,7 @@ internal static class RulesTables
             "The 2014 DMG's expected AC, hit points, attack bonus, damage per round and save DC for each CR (not in either SRD).",
             ["Monster Statistics by Challenge Rating", "Monster Statistics by CR", "Monster Stats by CR"],
             MonsterStats2014),
+        .. BalanceRulesTables.All,
     ];
 
     /// <summary>
@@ -152,7 +154,8 @@ internal static class RulesTables
         return text.ToString().TrimEnd() + "\n";
     }
 
-    private static string Page(RulesTable table, string body, params string[] notes)
+    /// <summary>A table's page: its title, the edition and source line with its URI, the body, then each note.</summary>
+    internal static string Page(RulesTable table, string body, params string[] notes)
     {
         var text = new StringBuilder()
             .Append(CultureInfo.InvariantCulture, $"# {table.Title}\n\n")

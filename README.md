@@ -9,11 +9,45 @@ Claude Code and Claude Desktop launch it over stdio.
 | Exact dice odds | Done (Phase 1): exact fractions, floating point for large pools, seeded Monte Carlo when no exact form exists |
 | Rules lookup (SRD 5.1 / 5.2.1 via the dnd5eapi dataset, offline) | Done (Phase 2): `rules_search` (full text, either edition or both) and `rules_get` (by ref or name; `edition: "both"` puts 2014 and 2024 side by side), plus the `rules://attribution` resource |
 | Encounter difficulty (2014 + 2024) | Done (Phase 3): `encounter_difficulty` (2014 DMG thresholds and multipliers, 2024 XP budget, or both side by side; SRD monsters by name or ref, any other by CR; effective-level offset), plus the `rules://tables/*` resources (XP by CR, both editions' encounter tables, DMG monster statistics by CR), also served by `rules_get` |
-| DPR maths + feature deltas for homebrew | Phase 4 |
+| DPR maths + feature deltas for homebrew | Done (Phase 4): `balance_dpr` (exact damage per round of a build in the feature DSL: per-attack and per-rider breakdown, round-1 damage percentiles, power-attack choices, save effects with kill chances; round 1, fight or adventuring-day horizon; level curves and level × AC grids) and `balance_compare` (a feature's ΔDPR against a baseline, its level-equivalent and balance band, Bonus Action and Reaction collisions), plus the `rules://tables/{dpr-targets-by-level, gwf-expected-values, aoe-targets}` resources |
 | Monte Carlo combat simulation | Phase 5 |
 | Campaign tracking (SQLite, knowledge/provenance, markdown export) | Phases 6–8 |
 
 The design, decisions and phase plan are in [PLAN.md](PLAN.md).
+
+## Tools
+
+| Tool | What it answers |
+|---|---|
+| `rules_search` | Which SRD entries mention these words (2014 SRD 5.1, 2024 SRD 5.2.1, or both). |
+| `rules_get` | One SRD entry in full by ref or name, or both editions side by side; also the rules tables and the attribution. |
+| `dice_roll` | A roll made for the user, with every die shown. |
+| `dice_odds` | Exact probabilities for a dice expression. |
+| `encounter_difficulty` | How hard a fight is for a party, by the 2014 DMG method, the 2024 XP budget, or both. |
+| `balance_dpr` | A build's damage per round, computed exactly over every die outcome (not simulated). |
+| `balance_compare` | What a homebrew feature adds to a baseline build, in damage and in character levels. |
+
+**The balance tools.** A build is written in a small JSON feature DSL: attacks (dice, damage type, to-hit, properties,
+weapon mastery, cantrip scaling) and modifiers (`to_hit`, `extra_damage` for smites and Sneak Attack, `bonus_damage`,
+`crit_range`, `advantage`, `lucky`, `elven_accuracy`, `damage_die_remap` for Great Weapon Fighting, `reroll_damage_take_best`
+for Savage Attacker, `extra_attack` for Action Surge and bonus or reaction attacks, `power_attack`, `save_effect` for
+Fireball-style effects, `condition_on_hit`, `ignore_cover`, and the defensive `ac`, `resistance` and `temp_hp`). Any
+number can change with level through a step map such as `{"1": 1, "5": 2}`. `balance_dpr` reports:
+
+- the damage per round on three horizons: round 1 (the nova), a fight of R rounds, and an adventuring day (the 2014 DMG's
+  6–8 encounters and 2 short rests, a "light day" that is labelled unofficial, or a custom one);
+- per attack and rider: hit and crit chances, uses per round and damage per use;
+- the exact round-1 damage distribution;
+- the power-attack decision;
+- save effects over a shared damage roll (Fireball on four goblins: raw 89.2, effective 28.00, all four die 99.93%).
+
+`balance_compare` measures ΔDPR under identical assumptions. It turns the delta into a level-equivalent (Δ ÷ the damage
+per round the baseline gains per level in that tier, or RPGBOT's reference slope when the baseline does not scale) and a
+band: Under, On budget, Creeping, Over or Breaking.
+
+The default target at level L is the 2014 DMG's monster row for CR = L, with a typical save bonus from The Finished
+Book. Table rulings the rules text does not settle (Hew and +PB, Cleave and the Attack action, GWF on rider dice, Savage
+Attacker on crit dice) are flags, echoed in every result.
 
 ## Install for Claude Code
 
@@ -89,7 +123,9 @@ its title ("Corrected from the upstream data: …"), and `rules://attribution` g
 
 Not SRD text: the 2014 encounter-building tables (XP thresholds, encounter multipliers, adventuring-day XP) and the
 Monster Statistics by Challenge Rating table come from the Dungeon Master's Guide (2014), the first three also from the
-free 2014 Basic Rules, not from SRD 5.1, so the CC-BY licence above does not cover them. They are included for personal
+free 2014 Basic Rules, not from SRD 5.1, so the CC-BY licence above does not cover them. The DPR tools add the DMG
+2014's Targets in Areas of Effect (p. 249), a typical monster save bonus by CR from The Finished Book (tomedunn), and two
+community reference curves: RPGBOT's DPR target and the Warlock Baseline (Form of Dread). They are included for personal
 use (PLAN.md, open question 1), and every result that uses them names that source.
 
 This project is unofficial Fan Content, compatible with fifth edition.

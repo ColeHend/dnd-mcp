@@ -26,6 +26,11 @@
     <None Include="Encounters\Fixtures\*.md" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- The independent DPR oracle's cases (exact fractions from Dpr/Fixtures/oracle/oracle.py); see its README.md. -->
+  <ItemGroup>
+    <None Include="Dpr\Fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
     <PackageReference Include="xunit" Version="2.9.3" />

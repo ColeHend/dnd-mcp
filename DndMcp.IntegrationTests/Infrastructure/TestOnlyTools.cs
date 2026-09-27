@@ -68,8 +68,10 @@ public sealed class TestOnlyTools
     [Description("Test only: echoes an object argument and an array of objects, as bound.")]
     public string EchoShape(
         [Description("An object argument.")] EchoShapeInput shape,
-        [Description("An array of objects.")] EchoShapeInput[]? more = null) =>
-        $"name={shape.Name}; more={more?.Length ?? 0}";
+        [Description("An array of objects.")] EchoShapeInput[]? more = null,
+        [Description("Untyped, with shape's fields (SameShapeAsAttribute, as balance_compare's variant).")][SameShapeAs("shape")] object? copy = null) =>
+        $"name={shape.Name}; more={more?.Length ?? 0}" +
+        (copy is JsonElement { ValueKind: JsonValueKind.Object } element ? $"; copy={element.Deserialize<EchoShapeInput>(McpJson.Options)!.Name}" : string.Empty);
 }
 
 /// <summary>An object parameter with a required field, a field the schema cannot fully check, and a nested array.</summary>
