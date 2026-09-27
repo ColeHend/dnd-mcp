@@ -7,7 +7,7 @@ Claude Code and Claude Desktop launch it over stdio.
 |---|---|
 | Dice rolling (cryptographic RNG) | Done (Phase 1): keep/drop, rerolls, exploding dice, min/max, success counts, `adv`/`dis`/`ea`, labels, pass/fail checks, optional `seed` |
 | Exact dice odds | Done (Phase 1): exact fractions, floating point for large pools, seeded Monte Carlo when no exact form exists |
-| Rules lookup (SRD 5.1 / 5.2.1 via the dnd5eapi dataset, offline) | Phase 2 |
+| Rules lookup (SRD 5.1 / 5.2.1 via the dnd5eapi dataset, offline) | Done (Phase 2): `rules_search` (full text, either edition or both) and `rules_get` (by ref or name; `edition: "both"` puts 2014 and 2024 side by side), plus the `rules://attribution` resource |
 | Encounter difficulty (2014 + 2024) | Phase 3 |
 | DPR maths + feature deltas for homebrew | Phase 4 |
 | Monte Carlo combat simulation | Phase 5 |
@@ -26,11 +26,31 @@ claude mcp list        # dnd should show as connected
 ```
 
 Register a **published binary**, not `dotnet run`: build output on stdout corrupts the MCP stream.
-For development against a local build:
+
+The publish directory holds the executable **and a `content/` directory** (the vendored SRD data, the 2024 Rules
+Glossary and the licences). The server reads `content/` from beside the executable, so copy or move the whole
+directory, never the binary alone. To check an install, and to build the rules index before the first session:
+
+```bash
+~/.local/share/dnd-mcp/bin/DndMcp srd-build     # exit 0 and a summary; the reason on stderr and exit 1 if broken
+```
+
+To upgrade, publish into an empty directory (delete `~/.local/share/dnd-mcp/bin` first): `dotnet publish` never
+removes files an older version left behind.
+
+The rules index (`srd.db`) is a disposable cache in `$DND_MCP_CACHE_DIR`, else `$XDG_CACHE_HOME/dnd-mcp`, else
+`~/.cache/dnd-mcp`. Set `DND_MCP_CACHE_DIR` to an absolute path: MCP configs are JSON, which expands nothing, so the
+server expands a leading `~/` itself and ignores any other relative value. The server rebuilds the index by itself
+(about a second) whenever the content, the curated corrections or the importer changes; `srd-build --force` rebuilds it
+on demand. Deleting it is always safe, even while a session is running: the next rules call reopens or rebuilds it.
+
+For development against a local build, give the dev server its own cache, so it and the installed server never replace
+each other's `srd.db` when their content differs:
 
 ```bash
 dotnet build DndMcp.sln
-claude mcp add --scope local dnd-dev -- dotnet run --project DndMcp --no-build --no-launch-profile
+claude mcp add --transport stdio --scope local --env DND_MCP_CACHE_DIR="$HOME/.cache/dnd-mcp-dev" dnd-dev \
+  -- dotnet run --project DndMcp --no-build --no-launch-profile
 ```
 
 Server logs go to stderr; `claude --debug=mcp` captures them.
@@ -44,6 +64,10 @@ dotnet test  DndMcp.sln
 
 ## Attribution
 
+The statements below are also served to MCP clients as the `rules://attribution` resource (and by `rules_get` with
+ref `rules://attribution`), with the exact data versions and the 5e-database licence, and every rules result names the
+SRD it comes from.
+
 This work includes material taken from the System Reference Document 5.1 ("SRD 5.1") by Wizards of the Coast LLC
 and available at https://dnd.wizards.com/resources/systems-reference-document. The SRD 5.1 is licensed under the
 Creative Commons Attribution 4.0 International License available at
@@ -54,4 +78,13 @@ available at https://www.dndbeyond.com/srd. The SRD 5.2.1 is licensed under the 
 International License, available at https://creativecommons.org/licenses/by/4.0/legalcode.
 
 SRD content is taken from the [5e-bits 5e-database](https://github.com/5e-bits/5e-srd-api/tree/main/packages/5e-database)
-dataset (MIT licensed; see `content/LICENSES/`). This project is unofficial Fan Content, compatible with fifth edition.
+dataset (MIT licensed; see `content/LICENSES/`), and the 2024 rules from the SRD 5.2.1 Rules Glossary as structured JSON
+from the [serving-solid-characters](https://github.com/ColeHend/serving-solid-characters) project.
+
+Curated corrections: 301 of the served records (255 from 2024, 46 from 2014) had damaged upstream text or data (text
+spliced from another entry, words run together, rows missing, text cut short or back-translated). Their text is
+replaced with the SRD's own words, copied from the SRD 5.2 markdown for 2024 and the SRD 5.1 markdown for 2014, as listed
+in `content/srd-corrections.json` and explained in `content/srd-corrections.md`. Every corrected entry says so under
+its title ("Corrected from the upstream data: …"), and `rules://attribution` gives the file's sha256.
+
+This project is unofficial Fan Content, compatible with fifth edition.

@@ -26,6 +26,12 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>
     private const string AcceptedParameters =
         "dice_roll accepts: expression (string, required), times (integer, optional), label (string, optional), seed (integer, optional).";
 
+    private const string RulesSearchParameters =
+        "rules_search accepts: query (string, required), edition (string, optional), kinds (array of string, optional), limit (integer, optional).";
+
+    private const string RulesGetParameters =
+        "rules_get accepts: ref (string, optional), name (string, optional), kind (string, optional), edition (string, optional), format (string, optional).";
+
     private readonly McpServerHarness _server;
 
     public ToolErrorTests(McpServerHarness server)
@@ -251,6 +257,46 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>
         var result = await _server.Client.CallToolAsync("dice_roll", new Dictionary<string, object?> { ["expression"] = expression });
 
         Assert.Equal(Prefix + DomainMessageFor(expression), _server.ErrorText(result));
+    }
+
+    [Theory]
+    [InlineData("rules_search", "{}", "missing required argument 'query'", RulesSearchParameters)]
+    [InlineData("rules_search", """{"query":["fire"]}""", "argument 'query' should be string but was an array", RulesSearchParameters)]
+    // A model often writes the edition as a number; the binder will not turn 2024 into "2024", so the guard must say so.
+    [InlineData("rules_search", """{"query":"fire","edition":2024}""", "argument 'edition' should be string or null but was the number 2024", RulesSearchParameters)]
+    [InlineData("rules_search", """{"query":"fire","limit":"ten"}""", "argument 'limit' should be integer but was the string \"ten\"", RulesSearchParameters)]
+    [InlineData("rules_get", """{"name":"Fireball","edition":2014}""", "argument 'edition' should be string or null but was the number 2014", RulesGetParameters)]
+    [InlineData("rules_get", """{"name":{"en":"Fireball"}}""", "argument 'name' should be string or null but was an object", RulesGetParameters)]
+    [InlineData("rules_get", """{"reference":"spell/fireball"}""", "unknown argument 'reference'", RulesGetParameters)]
+    public async Task CallTool_RulesToolArgumentOfTheWrongShape_NamesItAndListsAcceptedParameters(
+        string tool, string argumentsJson, string problem, string accepted)
+    {
+        var result = await _server.CallToolJsonAsync(tool, argumentsJson);
+
+        Assert.Equal($"An error occurred invoking '{tool}': Invalid arguments: {problem}. {accepted}", _server.ErrorText(result));
+    }
+
+    [Theory]
+    // HUGE is 100,000 characters, filled in at run time so no test name carries it.
+    [InlineData("rules_get", """{"name":"Fireball","edition":"HUGE"}""")]
+    [InlineData("rules_get", """{"name":"Fireball","format":"HUGE"}""")]
+    [InlineData("rules_search", """{"query":"fireball","edition":"HUGE"}""")]
+    // "monster" followed by 100,000 hyphens canonicalises to a real kind, so the kind/ref mismatch used to quote all of it.
+    [InlineData("rules_get", """{"ref":"2024/spell/fireball","kind":"monsterDASHES"}""")]
+    [InlineData("rules_get", """{"name":"Fireball","HUGE":1}""")]
+    [InlineData("dice_roll", """{"expression":"1d6","HUGE":1}""")]
+    public async Task CallTool_HugeArgumentInAnError_IsEchoedShortened(string tool, string argumentsTemplate)
+    {
+        // A pasted page as an edition, format, kind or argument name came back whole: 1 MB in gave 1 MB of error for the
+        // model to read back.
+        var argumentsJson = argumentsTemplate
+            .Replace("HUGE", new string('x', 100_000), StringComparison.Ordinal)
+            .Replace("DASHES", new string('-', 100_000), StringComparison.Ordinal);
+
+        var error = _server.ErrorText(await _server.CallToolJsonAsync(tool, argumentsJson));
+
+        Assert.True(error.Length < 600, $"{error.Length} characters: {error[..Math.Min(300, error.Length)]}");
+        Assert.Contains("…", error, StringComparison.Ordinal);
     }
 
     [Fact]

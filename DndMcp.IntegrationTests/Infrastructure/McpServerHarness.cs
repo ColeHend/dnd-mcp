@@ -32,11 +32,15 @@ namespace DndMcp.IntegrationTests.Infrastructure;
 /// has them, so ServerSurfaceTests still sees exactly the production tool list.
 /// </para>
 /// <para>
-/// The server runs inside the test process, with the developer's real environment and home directory. Nothing
-/// registered today reads a path, but the SRD index (Phase 2) and the campaign database (Phase 6) will: before
-/// those services are registered, <c>AddDndMcpServer</c> needs a path override this harness sets to a temp
-/// directory, or in-memory tests will open the user's real campaigns.db. <see cref="BuiltServerProcess"/>
-/// already isolates the child process's paths.
+/// The server runs inside the test process, with the developer's real environment and home directory, so every path
+/// it touches is set here rather than left to the environment. The SRD index goes to <see cref="SharedCacheDirectory"/>
+/// under the test output (never <c>~/.cache/dnd-mcp</c>): shared by every harness in the run, so srd.db is built once
+/// per test run rather than once per test class. It is emptied before its first use in each run, because srd.db's
+/// staleness key covers the content and the schema version but not the importer's code: a srd.db an earlier run left
+/// behind would hide a pairing, alias or search-text change from every tool-level test.
+/// <see cref="WithOptions"/> points a harness elsewhere (broken content, an unwritable cache). The data directory (Phase
+/// 6's campaigns.db) is <see cref="DataDirectory"/>, under the test output too, so a harness can never open the user's
+/// real campaigns. <see cref="BuiltServerProcess"/> isolates the child process's paths through its environment.
 /// </para>
 /// </summary>
 public sealed class McpServerHarness : IAsyncLifetime
@@ -49,10 +53,20 @@ public sealed class McpServerHarness : IAsyncLifetime
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// Servers are built one at a time. When two threads build the same tool at once (xUnit runs test classes in
+    /// parallel, each with its own harness), ModelContextProtocol 2.2.0 / Microsoft.Extensions.AI 10.8.3 intermittently
+    /// leave an injected parameter such as <c>IProgress&lt;ProgressNotificationValue&gt;</c> in the tool's input schema,
+    /// where it shows up as a "progress" argument. The real server builds its one server once, on one thread, so this is
+    /// a test-only hazard; ServerSurfaceTests pins that parallel harnesses all see the production schema.
+    /// </summary>
+    private static readonly Lock ServerConstructionLock = new();
+
     private readonly Pipe _clientToServer = new();
     private readonly Pipe _serverToClient = new();
     private readonly CancellationTokenSource _serverCts = new();
     private readonly Action<IMcpServerBuilder>? _configureServer;
+    private readonly Action<DndMcpServerOptions>? _configureOptions;
     private ServiceProvider? _provider;
     private Task _serverTask = Task.CompletedTask;
     private McpClient? _client;
@@ -63,16 +77,49 @@ public sealed class McpServerHarness : IAsyncLifetime
     }
 
     // Private: xUnit requires a class fixture to have exactly one public constructor.
-    private McpServerHarness(Action<IMcpServerBuilder> configureServer)
+    private McpServerHarness(Action<IMcpServerBuilder>? configureServer, Action<DndMcpServerOptions>? configureOptions)
     {
         _configureServer = configureServer;
+        _configureOptions = configureOptions;
     }
+
+    // Emptied on first use in each test process (Lazy runs the factory once, however many test classes ask at once).
+    private static readonly Lazy<string> SharedCache = new(() =>
+    {
+        var directory = Path.Combine(AppContext.BaseDirectory, "test-cache");
+        if (Directory.Exists(directory))
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+
+        return directory;
+    });
+
+    /// <summary>
+    /// The directory every harness keeps srd.db in: under the test output, so it is deleted with the build output and
+    /// never the user's cache. Emptied before its first use in each test process, so the first harness builds srd.db with
+    /// this run's importer (see the class summary).
+    /// </summary>
+    public static string SharedCacheDirectory => SharedCache.Value;
+
+    /// <summary>
+    /// The data directory every harness gives the server (<see cref="DndMcpServerOptions.DataDirectory"/>): under the test
+    /// output, never <c>~/.local/share/dnd-mcp</c>, where the user's campaigns will live. Not created until something
+    /// writes there.
+    /// </summary>
+    public static string DataDirectory { get; } = Path.Combine(AppContext.BaseDirectory, "test-data");
 
     /// <summary>
     /// The production registrations plus whatever <paramref name="configureServer"/> adds, typically
-    /// <c>WithTools&lt;T&gt;(McpJson.Options)</c> for a test-only tool class.
+    /// <c>WithTools&lt;T&gt;(McpJson.Options)</c> for a test-only tool class, or a replacement service.
     /// </summary>
-    public static McpServerHarness WithExtraTools(Action<IMcpServerBuilder> configureServer) => new(configureServer);
+    public static McpServerHarness WithExtraTools(Action<IMcpServerBuilder> configureServer) => new(configureServer, null);
+
+    /// <summary>
+    /// The production server with its options changed after the harness's own (<see cref="SharedCacheDirectory"/>),
+    /// e.g. a <see cref="DndMcpServerOptions.ContentRoot"/> with no content, to see what the model is told.
+    /// </summary>
+    public static McpServerHarness WithOptions(Action<DndMcpServerOptions> configureOptions) => new(null, configureOptions);
 
     /// <summary>
     /// Everything the server logged. When a call unexpectedly comes back as the SDK's generic error, the real
@@ -82,6 +129,10 @@ public sealed class McpServerHarness : IAsyncLifetime
 
     public McpClient Client =>
         _client ?? throw new InvalidOperationException("The harness has not been initialized; use it as an xUnit fixture or await InitializeAsync first.");
+
+    /// <summary>The server's services, for tests that check what the server holds (the SRD index service).</summary>
+    public IServiceProvider Services =>
+        _provider ?? throw new InvalidOperationException("The harness has not been initialized; use it as an xUnit fixture or await InitializeAsync first.");
 
     public async Task InitializeAsync()
     {
@@ -93,14 +144,25 @@ public sealed class McpServerHarness : IAsyncLifetime
         });
 
         var server = services
-            .AddDndMcpServer()
+            .AddDndMcpServer(options =>
+            {
+                options.CacheDirectory = SharedCacheDirectory;
+                options.DataDirectory = DataDirectory;
+                _configureOptions?.Invoke(options);
+            })
             .WithStreamServerTransport(_clientToServer.Reader.AsStream(), _serverToClient.Writer.AsStream());
         _configureServer?.Invoke(server);
 
         // Scope validation on: stdio creates a DI scope per request, so a scoped service captured by a singleton
         // would work by accident in one request and leak state across the next. Fail here instead.
-        _provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
-        _serverTask = _provider.GetRequiredService<McpServer>().RunAsync(_serverCts.Token);
+        McpServer mcpServer;
+        lock (ServerConstructionLock)
+        {
+            _provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+            mcpServer = _provider.GetRequiredService<McpServer>();
+        }
+
+        _serverTask = mcpServer.RunAsync(_serverCts.Token);
 
         using var timeout = new CancellationTokenSource(StartupTimeout);
         _client = await McpClient.CreateAsync(

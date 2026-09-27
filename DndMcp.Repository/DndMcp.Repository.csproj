@@ -20,4 +20,10 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
   </ItemGroup>
 
+  <!-- The index builder's pairing and aliasing internals (SrdCounterparts.Match, IndexedDocument) are pinned directly
+       by unit tests, the same arrangement as Domain's numerical internals. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="DndMcp.Tests" />
+  </ItemGroup>
+
 </Project>

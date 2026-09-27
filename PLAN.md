@@ -49,7 +49,7 @@
 | Q4 | Simulator depth | **Core + extensible** *(locked)*: attacks, saves, AoE, crits, resistances, HP/death saves, multiattack, recharge, legendary actions/resistance, and common conditions. No grid. |
 | D1 | Content source | 5e-database JSON **vendored in the repo at `5e-database-v7.0.0`**, English only, with a sha256 manifest. Add your `2024/rules.json` as the 2024 Rules Glossary. No HTTP at runtime. |
 | D2 | Data access | **Microsoft.Data.Sqlite + Dapper + hand-written SQL migrations.** Not EF Core: the design depends on FTS5, triggers, STRICT tables, partial and expression indexes, `json_patch`, and recursive CTEs, and EF would fight all of them. |
-| D3 | Two database files | `srd.db` is disposable and rebuilt from the vendored JSON whenever **any** input changes: the 5e-database manifest fingerprint (`ContentManifest.ComputeFingerprint`), the `rules-glossary-2024.json` hash, or the importer/schema version. `campaigns.db` is precious and backed up. They never share a file. |
+| D3 | Two database files | `srd.db` is disposable and rebuilt from the vendored JSON whenever **any** input changes: the 5e-database manifest fingerprint (`ContentManifest.ComputeFingerprint`), the `rules-glossary-2024.json` hash, the `srd-corrections.json` hash, or the importer/schema version (`SrdIndexSchema.Version`, bumped by hand: the key covers inputs, not code). `campaigns.db` is precious and backed up. They never share a file. |
 | D4 | Tool surface | **18 coarse tools**, each with an `action` parameter. Claude Code's tool search is on by default, so definitions load on demand. |
 | D5 | Homebrew input | One declarative **feature DSL** (JSON "modifiers") consumed by both the closed-form DPR engine and the simulator. Claude translates a homebrew feature into modifiers; adding a feature needs no code. |
 | D6 | Assembly prefix | `DndMcp.*`, distinct from `SolidCharacters.*` and `SavingCharacters.*` (the sibling precedent against assembly-identity clashes) |
@@ -68,7 +68,7 @@ Claude Code / Claude Desktop
 DndMcp  (Exe; ModelContextProtocol 2.2.0; all logs → stderr)
   ├─ Tools/ Resources/ Prompts/   thin: validate → call Domain/Repository → concise markdown
   ├─ Cli/                         `restore | srd-build | backup | export` — ops needing exclusive DB access, never MCP tools
-  ├─ Startup                      SrdIndexBootstrapper (background; tools await readiness), CampaignDbMigrator
+  ├─ Startup                      SrdIndexService + SrdIndexWarmup (background; tools await readiness), CampaignDbMigrator
   │
   ├─ DndMcp.Domain   (zero project refs; pure and deterministic)
   │    Dice/         parser → AST, CryptoRoller, exact Distribution (PMFs), keep-highest DP
@@ -86,7 +86,7 @@ DndMcp  (Exe; ModelContextProtocol 2.2.0; all logs → stderr)
 
 Files (XDG):  ~/.local/share/dnd-mcp/campaigns.db  (+ backups/, exports/)
               ~/.cache/dnd-mcp/srd.db              (rebuildable)
-Overrides:    DND_MCP_DATA_DIR, DND_MCP_DB, XDG_DATA_HOME, XDG_CACHE_HOME
+Overrides:    DND_MCP_DATA_DIR, DND_MCP_CACHE_DIR, DND_MCP_DB, XDG_DATA_HOME, XDG_CACHE_HOME (absolute paths or ~/ only)
 ```
 
 Invariants worth stating once:
@@ -108,7 +108,8 @@ dnd-mcp/
 ├─ content/
 │  ├─ 5e-database/v7.0.0/{2014,2024}/5e-SRD-*.json   vendored from packages/5e-database/src/{year}/en/
 │  ├─ 5e-database/manifest.json                     tag, source URL, sha256 per file
-│  ├─ rules-glossary-2024.json                      copied from serving-solid-characters/.../data/srd/2024/rules.json
+│  ├─ rules-glossary-2024.json (+ .md provenance)   copied from serving-solid-characters/.../data/srd/2024/rules.json
+│  ├─ srd-corrections.json (+ .md)                  curated fixes to provably wrong upstream records, verbatim SRD text
 │  ├─ overrides/monsters.{2014,2024}.json           normalization fixes keyed {edition}/{index}
 │  ├─ overrides/spells.2024.json                    DC / AoE / upcast overlay for combat spells
 │  └─ LICENSES/                                     SRD-5.1 CC-BY, SRD-5.2.1 CC-BY, 5e-database MIT
@@ -184,7 +185,7 @@ The saving plan's "known gaps" concluded that an integration-test project is the
 | Tool | Hints | What it does |
 |---|---|---|
 | `rules_search` | RO, idem, closed | FTS over all SRD content. `{query, edition: 2014\|2024\|both, kinds?[], limit=10}` returns ranked refs with snippets. |
-| `rules_get` | RO, idem, closed | `{ref \| kind+name, edition, format: concise\|full\|combatant}`. `both` returns a side-by-side 2014/2024 comparison. `combatant` returns the **normalized simulator view plus normalization warnings**, so you can see how the sim reads a stat block. |
+| `rules_get` | RO, idem, closed | `{ref \| kind+name, edition, format: concise\|full}` (`combatant` arrives with the Phase 5 normalizer). `both` returns a side-by-side 2014/2024 comparison. `combatant` returns the **normalized simulator view plus normalization warnings**, so you can see how the sim reads a stat block. |
 | `dice_roll` | RO, closed | `{expression, times=1, label?, secret?, seed?}` returns totals and **every die face**. Rolls are logged to the active campaign; `secret` hides DM rolls from player-safe exports. |
 | `dice_odds` | RO, idem, closed | `{expression}` such as `8d6>=30` or `4d6kh3`. Returns mean, SD, P(=/≥/≤), percentiles, and an exact fraction when the space is small. |
 | `encounter_difficulty` | RO, idem, closed | `{edition, party: levels[] \| "campaign", monsters[{ref \| cr, count, exclude?}], effective_level_offset?}` returns budget, label, per-edition math and warnings. It can show both editions. |
@@ -771,7 +772,100 @@ Try each of these:
 
 ---
 
-## Implementation status (updated 2026-09-26)
+## Implementation status (updated 2026-09-27)
+
+**Phase 2 — done.** The exit criterion is met: `rules_search` and `rules_get` work in both editions and with `edition: "both"`, and the import counts match the vendored data.
+- srd.db holds **4,602 documents**: 2,415 for 2014 and 2,187 for 2024 (174 of them the Rules Glossary). Every (edition, kind) count is pinned: monsters 334 / 341, spells 319 / 339, feats 1 / 17, rules 137 / 174, levels 290 / 287, and the rest. Every stored record is checked value for value against the vendored JSON (or its correction).
+- A cold build takes about 0.6 s and a reopen about 0.1 s. srd.db is 13.8 MB.
+- Checked against the published single-file binary: `content/` ships beside it, `DndMcp srd-build` works, and the stdout-purity test passes, including a rules call that builds the index.
+- Published as **0.2.0** and installed at `~/.local/share/dnd-mcp/bin` with its `content/`. `claude mcp list` shows ✔ Connected.
+- Manual end-to-end check: three headless `claude -p` runs on the installed server, all answered correctly. The model found the tools from the server instructions alone.
+  - "Compare the grappled condition in the 2014 and 2024 rules": `rules_get` edition both, then the 2014 Melee Attacks section and 2024 Unarmed Strike.
+  - The Vex mastery.
+  - The 2024 Oath of Devotion spells: the corrected table, including the tiers upstream's garbled text dropped.
+
+**Tests: 4,307 passing** (2,493 unit + 1,814 integration), 0 build warnings.
+- The work went through three review rounds. First, eight independent lenses, each finding checked by an adversarial verifier: 55 findings, 54 confirmed. Then a fix round and a re-verification of every finding (49 fixed, 6 partly), plus 57 new issues, mostly side effects of the first fixes. A third fix round followed.
+- The data corrections were audited word by word against the SRD markdown.
+- Mutation campaigns ran over the index, tools and formatters, and each surviving mutant got a killing test.
+
+**What exists now**
+- **Repository/Srd/Index**
+  - `SrdIndexBuilder` verifies the manifest, reads every file `SrdKinds` lists plus the glossary, applies the corrections overlay, and writes STRICT tables plus FTS5. It builds into a temp file and renames it into place. It uses journal_mode DELETE and deletes abandoned temp files after 10 minutes.
+  - `SrdIndexContent` computes the staleness key: schema version, manifest fingerprint, glossary sha256 and corrections sha256.
+  - `SrdIndexOpener.OpenOrBuild` reuses or rebuilds the index, and retries when another version replaces the file at the same moment.
+  - `SrdIndex` answers `Search`, `FindByName`, `Get`, `Counterparts`, `ClassLevels`, `SubclassLevels` and `Counts`. Its 4 read-only connections are opened together and validated up front, so deleting or replacing srd.db mid-session changes nothing for a running server.
+  - `SrdCounterparts` pairs the two editions (2,052 pairs):
+    - by slug;
+    - by unique name (features within their class);
+    - graded features ("Wild Shape (CR 1 or below)" with 2024 Wild Shape, lowest level first);
+    - subclass levels;
+    - 2014 variant magic items with their 2024 parent;
+    - 2014 rule sections with the glossary entries they contain (Grappling with Melee Attacks);
+    - a manual table, with one comment per pair.
+  - `SrdCuratedAliases` holds the 85 2014 subsection headings that name a rule, and 8 extra names ("Shove", "Damage Resistance").
+  - Also: `SrdNames` (name keys: NFKC, diacritics, apostrophes, format characters), `SrdKindNames` (plurals, API names, race⇄species), `SrdRefParser` (`kind/slug`, `edition/kind/slug`, API URLs), `SrdSearchText`, and `SrdIndexUnavailableException`, whose messages are written for the user.
+- **Repository/Srd**
+  - `SrdKinds`: 28 kinds, their API segments and their per-edition files.
+  - `SrdCorrections`: the overlay loader. It sets or adds top-level properties, validated both ways.
+  - `DndMcpPaths`: cache and data directories, with warnings for ignored overrides.
+- **content**
+  - `rules-glossary-2024.json`, sha-pinned, with its provenance in a .md file.
+  - `srd-corrections.json`: 301 entries (255 for 2024, 46 for 2014). Replacement text is copied verbatim from the SRD 5.2 and 5.1 markdown, and every corrected document says "*Corrected from the upstream data: …*".
+- **Host**
+  - `rules_search` and `rules_get` (`RulesTools`).
+  - `SrdIndexService`: lazy, plus a warm-up hosted service, so the handshake never waits on a build. Tools wait up to 25 s and send progress. It falls back to a private temp directory when the cache can't be written, and it reopens after an unavailable-index error.
+  - `rules://attribution`, also reachable through `rules_get`.
+  - `DndMcp srd-build [--force]`: exit 0 = ok, 1 = failure, 2 = usage.
+  - `DndMcpServerOptions`: content root, cache and data directories.
+  - `ToolArgumentGuard` checks array item types.
+  - `Formatting/Srd`: the `SrdMarkdown` dispatcher (title, meta line, cap at 32,000 characters, comparison layout with an at-a-glance table for spells and monsters) and per-kind formatters (monster stat blocks, spells, class level tables, subclasses, origins, equipment, magic items, 2014 rule tree, 2024 glossary). `SrdProse` changes whitespace only; `SrdChoiceMarkdown` renders choice trees.
+
+**Decisions made while implementing** (the plan is silent or differs)
+- `format` is `concise | full`. `combatant` waits for the Phase 5 normalizer, because a value that does nothing would mislead.
+- `edition` defaults to 2024 until Phase 6 supplies the active campaign's ruleset.
+- **Refs** are `{edition}/{kind}/{slug}` (`2024/spell/fireball`). Results always print them with the edition, so a copied ref fetches exactly that record.
+- **Level records** are stored and reachable by ref, and they feed the class tables. They are not full-text searchable: 577 "Fighter N" rows would bury real results.
+- **Search**
+  - Words are ANDed; a trailing `*` is a prefix; every word is quoted, so user text never becomes FTS syntax.
+  - If no document has every word, search matches any word and says so.
+  - Exact name and alias matches come first, then bm25 with weights 10 / 5 / 1. Loose forms ("lich stat block", "Healing Word spell", plurals) count as exact.
+  - Inputs are capped (query length, distinct words) with actionable messages.
+- **Name matching tiers**, used by lookup, by search's exact tier and by the ambiguity footer:
+  - own name in a content kind;
+  - alias in a content kind;
+  - own name in a reference kind (language, proficiency, skill, …);
+  - alias in a reference kind;
+  - heading or section alias.
+  - Within a tier: kind priority, then lower feature level, then slug.
+  - So 2024 "Goblin" gives the Goblin Warrior monster, not the language. "Acolyte" gives the background, not the Priest Acolyte monster. "Bardic Inspiration" gives the level-1 grade.
+- **Edition "both" never claims something does not exist.** The other side comes from recorded counterparts, preferring one that answers to the typed name. Failing that it tries the same kind and slug, then the same name ("matched by name only"). Only then does it print a hedged "no entry matched … try rules_search".
+- **Aliases are typed** (`qualifier`, `counterpart`, `heading`, `section`, `curated`), and the meta line shows each the right way:
+  - "2014 name: Thug", not "also known as";
+  - "Covers: Grappling; Opportunity Attacks; …".
+  - A lookup that lands through a heading says the rule is covered by that subsection.
+- **Upstream data is not trusted blindly.** Provably wrong records are fixed through the corrections overlay, never in the vendored files. Anything left as upstream wrote it is listed in `srd-corrections.md` and pinned by `SrdDataQualityTests`. Examples of what was found:
+  - 2024 potions had their text shifted between records (Potion of Heroism carried Gaseous Form's effect);
+  - about 30 flattened tables;
+  - 2024 category lists contradicted their items (Hide Armor filed under Light);
+  - the Oath of Devotion spell table was garbled;
+  - 2014 spells were machine back-translated (Hold Monster, Dominate Beast's upcast rule);
+  - 2014 to-hit bonuses contradicted their own stat blocks (Kraken, Purple Worm and others);
+  - the Mule carried the Octopus's actions;
+  - Pirate Captain and Unicorn were missing their bonus actions.
+- **Paths**
+  - `DND_MCP_CACHE_DIR` and `DND_MCP_DATA_DIR` must be absolute or start with `~/`. MCP configs are JSON and expand nothing, so other relative values are ignored with a logged warning.
+  - The host's content root is the executable's directory, so a project's appsettings.json is never loaded.
+- **Refusals the brief did not spell out:** `kinds: ["level"]` in search, a conflicting ref edition, and `kind` with a ref of another kind. Each gets a message with the fix.
+
+**Corrections found while implementing**
+- **SDK (ModelContextProtocol 2.2.0):** building the same tool on two threads at once can leave the injected `IProgress<ProgressNotificationValue>` parameter in the input schema as a phantom `progress` argument. Production builds one server on one thread. `McpServerHarness` serialises server construction, and `ServerSurfaceTests` fails if the lock is removed.
+- **SQLite:** an unwritable directory raises SQLITE_CANTOPEN, not an IOException. `File.GetLastWriteTimeUtc` on a vanished file returns 1601, not an exception, which made an early temp-file cleanup delete a live build's journal.
+- **Data vs plan**
+  - The 2024 Rules Glossary is the only 2024 rules text. SRD 5.2.1's core chapters are not in the data: Playing the Game, the Spells chapter's casting rules, Character Creation, the Equipment prose and the Gameplay Toolbox. The server instructions say so, so a model reports "not in this server's data" rather than guessing.
+  - Glossary entries that cite those chapters carry a note saying the chapter is not included.
+
+**Phase 2 carry-forwards:** all done. The published binary ships `content/`. `AddDndMcpServer` takes a content root plus cache and data directories, and the harness isolates them. The converter note needed no new converters, because the index stores raw JSON.
 
 **Phase 1 — done.** The exit criterion is met: `dice_roll` and `dice_odds` pass every golden value above, as exact fractions where one exists.
 - 4d6kh3 has mean 15869/1296 and P(18) = 7/432.
@@ -916,10 +1010,27 @@ Everything below is fixed inline above, and each item is pinned by a test.
 - `DiceRoll` holds every face for the `dice_roll` table.
 - Store the expression text, not the in-process enums (`DiceComparison`, `ExplodeKind`, `DiceOddsMethod`).
 
-**Phase 2**
-- **The published binary must ship `content/`.** Copy it next to the executable, or embed it. Today's publish has no content.
-- Add a data/cache path override to `AddDndMcpServer` and set it in `McpServerHarness`, so tests never touch `~/.local/share/dnd-mcp` or `~/.cache/dnd-mcp`. `StdoutPurityTests` already isolates `DND_MCP_DATA_DIR` / `XDG_*`.
-- In custom converters, call `options.GetConverter(typeof(T)).Read(...)` rather than `JsonSerializer.Deserialize(ref reader)`; the latter loses the absolute error path. Use `TrySkip()` on a reader copy, not `Skip()`.
+**Phase 2** (all done; see the Phase 2 status above)
+- The publish ships `content/`, `AddDndMcpServer` takes content, cache and data directories, and the harness isolates them.
+- The converter note still applies to any future converter. Phase 2 added none: the index stores each record's raw JSON.
+
+**Phase 3 (from Phase 2)**
+- `rules://tables/{name}` is still to come. Make every such resource reachable through a tool too (rules_get already serves `rules://attribution`).
+- Monster CR and XP for encounters: read them from srd.db documents, which include the corrections, not from the vendored files.
+
+**Phase 5 (from Phase 2)**
+- **Read corrected records.** `srd-corrections.json` is applied when srd.db is built. The typed models (`SrdJson.ReadArray<Monster2024>` …) read the vendored files unchanged, so a normalizer built on them would simulate the uncorrected 2024 Mule (the Octopus's actions) and a Pirate Captain without Captain's Charm. Build combatants from srd.db documents (`SrdDocument.Json`), or run records through `SrdCorrections.Apply` before deserialising. `SrdCorrectedTypedModelTests` pins that every corrected monster and spell still deserialises strictly into its typed model.
+- **Two overlays, two jobs.** `srd-corrections.json` restores SRD text. The planned `overrides/monsters.*.json` and `overrides/spells.2024.json` carry normalisation facts: the 5 mislabeled half-damage saves, riders, DC/AoE for 2024 spells. Overrides layer on the corrected record, and a text fix never belongs in an override.
+- Add `format: "combatant"` to `rules_get` together with the normalizer. `SrdMarkdown.Formats` and the description list the formats in one place.
+- Any change to what srd.db stores bumps `SrdIndexSchema.Version`. `SrdIndexSchemaVersionTests` pins a digest of the hand-written tables to it.
+
+**Phase 6 (from Phase 2)**
+- The rules tools' `edition` default is fixed at 2024, and `rules_search`'s schema advertises `"default":"2024"`. Switch it to the active campaign's ruleset (D8) and update the descriptions.
+- `DndMcpServerOptions.DataDirectory` exists for campaigns.db; `McpServerHarness` points it at the test output.
+
+**Known gaps left open in Phase 2** (low severity, recorded so they aren't lost)
+- The 2024 SRD core chapters (Playing the Game, spellcasting rules, Character Creation, Equipment prose, Gameplay Toolbox) are absent from the data. The SRD 5.2 markdown (CC-BY) has them. Importing them as a 2024 rule tree, as 2014's is, would be the biggest remaining quality gain for 2024 rules questions; it is a scope decision for later.
+- Some 2014 wording differences that look like PHB errata are left as upstream wrote them, with the list in `srd-corrections.md`. Where the SRD markdown itself is damaged (Animal Friendship's higher level, Compulsion), nothing verbatim exists to copy.
 
 **Phases 2–6**
 - `ToolArgumentGuard` is shallow. When tools gain object parameters (builds, campaign ops), have it test-deserialize each argument with `McpJson.Options` and report `JsonException.Path`. Otherwise a malformed nested object reaches the model as the generic error.

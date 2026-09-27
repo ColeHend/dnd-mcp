@@ -33,6 +33,32 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     [
         "dice_odds",
         "dice_roll",
+        "rules_get",
+        "rules_search",
+    ];
+
+    /// <summary>
+    /// THE hints each tool declares (readOnly, destructive, idempotent, openWorld), as PLAN.md's tool table gives them.
+    /// Claude Code decides what it auto-approves or warns about from these, so a flipped hint must be a deliberate diff
+    /// here: checking only that each is set let openWorld become true or idempotent false with every test green.
+    /// dice_roll is the one tool that is not idempotent: the same call rolls again.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, (bool ReadOnly, bool Destructive, bool Idempotent, bool OpenWorld)> ExpectedAnnotations =
+        new Dictionary<string, (bool, bool, bool, bool)>
+        {
+            ["dice_odds"] = (true, false, true, false),
+            ["dice_roll"] = (true, false, false, false),
+            ["rules_get"] = (true, false, true, false),
+            ["rules_search"] = (true, false, true, false),
+        };
+
+    /// <summary>
+    /// THE list of resources, for the same reason. Claude Code offers each as an <c>@dnd:</c> mention and adds tools to
+    /// read them, so a resource appearing or vanishing changes what the model can reach.
+    /// </summary>
+    public static readonly IReadOnlyList<string> ExpectedResourceUris =
+    [
+        "rules://attribution",
     ];
 
     // Claude Code truncates tool descriptions and server instructions here (CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH).
@@ -46,6 +72,8 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     }
 
     public static TheoryData<string> ToolNames => new(ExpectedToolNames);
+
+    public static TheoryData<string> ResourceUris => new(ExpectedResourceUris);
 
     // The Claude API tool-name rule, tightened to Claude Code's 64-character cap. The SDK allows '.', the API does not.
     [GeneratedRegex("^[a-zA-Z0-9_-]{1,64}$")]
@@ -112,6 +140,25 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
         Assert.True(annotations.OpenWorldHint.HasValue, $"{name}: openWorldHint is unset (spec default: true).");
     }
 
+    [Fact]
+    public void ExpectedAnnotations_EveryTool_HasARow()
+    {
+        Assert.Equal(ExpectedToolNames.Order(StringComparer.Ordinal), ExpectedAnnotations.Keys.Order(StringComparer.Ordinal));
+    }
+
+    [Theory]
+    [MemberData(nameof(ToolNames))]
+    public async Task ToolAnnotations_EveryTool_HasExactlyTheExpectedHints(string name)
+    {
+        var annotations = (await GetToolAsync(name)).ProtocolTool.Annotations;
+        var expected = ExpectedAnnotations[name];
+
+        Assert.NotNull(annotations);
+        Assert.Equal(
+            ((bool?)expected.ReadOnly, (bool?)expected.Destructive, (bool?)expected.Idempotent, (bool?)expected.OpenWorld),
+            (annotations.ReadOnlyHint, annotations.DestructiveHint, annotations.IdempotentHint, annotations.OpenWorldHint));
+    }
+
     [Theory]
     [MemberData(nameof(ToolNames))]
     public async Task ToolAnnotations_ReadOnlyTool_IsNotDestructive(string name)
@@ -148,6 +195,141 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     }
 
     [Fact]
+    public async Task ListResources_Server_ExposesExactlyTheExpectedResources()
+    {
+        var resources = await _server.Client.ListResourcesAsync();
+
+        Assert.Equal(
+            ExpectedResourceUris.Order(StringComparer.Ordinal),
+            resources.Select(r => r.Uri).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task ListResourceTemplates_Server_HasNone()
+    {
+        // A method whose URI gains a {parameter} silently moves from resources/list to resources/templates/list, where
+        // Claude Code may not offer it as a mention at all (PLAN.md, SDK research). Pinned so that move is deliberate.
+        var templates = await _server.Client.ListResourceTemplatesAsync();
+
+        Assert.Empty(templates);
+    }
+
+    [Theory]
+    [MemberData(nameof(ResourceUris))]
+    public async Task Resource_EveryResource_HasNameTitleDescriptionAndMarkdownType(string uri)
+    {
+        var resources = await _server.Client.ListResourcesAsync();
+        var resource = Assert.Single(resources, r => r.Uri == uri).ProtocolResource;
+
+        Assert.False(string.IsNullOrWhiteSpace(resource.Name), $"{uri} has no name.");
+        Assert.False(string.IsNullOrWhiteSpace(resource.Title), $"{uri} has no title; /mcp would show the raw name.");
+        Assert.False(string.IsNullOrWhiteSpace(resource.Description), $"{uri} has no description.");
+        Assert.Equal("text/markdown", resource.MimeType);
+    }
+
+    [Theory]
+    [MemberData(nameof(ToolNames))]
+    public void ServerInstructions_EveryTool_IsNamed(string name)
+    {
+        // Under tool search the instructions are what make the model look a tool up at all; a tool they never mention is
+        // found only by luck.
+        Assert.Contains(name, _server.Client.ServerInstructions, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ServerInstructions_LaterBuildsLine_NoLongerPromisesRulesLookup()
+    {
+        // A promise of something that already exists tells the model the rules tools are not there yet.
+        var later = _server.Client.ServerInstructions!.Split('\n').Single(l => l.StartsWith("More tools arrive", StringComparison.Ordinal));
+
+        Assert.DoesNotContain("rules", later, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task RulesScope_InstructionsAndRulesGet_SayThe2024RulesAreTheRulesGlossary()
+    {
+        // 37 glossary entries end "See also 'Playing the Game' (…)", a chapter this server does not serve. Told nothing, a
+        // model spends calls searching for the fuller 2024 chapter text and then answers from memory.
+        var rulesGet = (await _server.Client.ListToolsAsync()).Single(t => t.Name == "rules_get");
+
+        Assert.Contains("2024 rules are the SRD 5.2.1 Rules Glossary", _server.Client.ServerInstructions, StringComparison.Ordinal);
+        Assert.Contains("2024 rules are the SRD 5.2.1 Rules Glossary", rulesGet.Description, StringComparison.Ordinal);
+    }
+
+    public static TheoryData<string> Missing2024Chapters => new(DndMcp.Tools.RulesTools.Missing2024Chapters);
+
+    [Theory]
+    [MemberData(nameof(Missing2024Chapters))]
+    public async Task RulesScope_InstructionsAndBothRulesTools_NameEveryChapterTheDataLacks(string chapter)
+    {
+        // Told only that "Playing the Game" was missing, models kept searching for multiclassing, travel pace or the
+        // one-spell-slot-per-turn rule, then answered from memory as if quoting the SRD.
+        var tools = await _server.Client.ListToolsAsync();
+
+        Assert.Contains(chapter, _server.Client.ServerInstructions, StringComparison.Ordinal);
+        Assert.Contains(chapter, tools.Single(t => t.Name == "rules_get").Description, StringComparison.Ordinal);
+        Assert.Contains(chapter, tools.Single(t => t.Name == "rules_search").Description, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RulesScope_InstructionsAndBothRulesTools_SayMulticlassingRulesAreNotInTheData()
+    {
+        // FTS finds no multiclassing prose in either edition; only each class's prerequisites and proficiencies exist.
+        var tools = await _server.Client.ListToolsAsync();
+
+        foreach (var text in new[]
+                 {
+                     _server.Client.ServerInstructions!,
+                     tools.Single(t => t.Name == "rules_get").Description,
+                     tools.Single(t => t.Name == "rules_search").Description,
+                 })
+        {
+            Assert.Contains("multiclassing rules in either edition", text, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task RulesGet_Description_SaysTheAttributionRefWorks()
+    {
+        // The attribution resource is reachable through rules_get; a model is told so where it reads about refs.
+        var rulesGet = (await _server.Client.ListToolsAsync()).Single(t => t.Name == "rules_get");
+
+        Assert.Contains("\"rules://attribution\" gives the SRD licence text", rulesGet.Description, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Harness_ManyServersStartingAtOnce_EachExposesTheSameSchemas()
+    {
+        // ModelContextProtocol 2.2.0 intermittently leaves an injected parameter (IProgress, for the rules tools) in the
+        // input schema when two threads build the same tool at once. Production builds one server per process; the test
+        // suite builds dozens in parallel, so McpServerHarness builds them one at a time. Without that, other tests see a
+        // phantom "progress" argument now and then; this makes the race happen on purpose.
+        var expected = await SchemaPropertiesAsync(_server);
+        var harnesses = Enumerable.Range(0, 12).Select(_ => new McpServerHarness()).ToList();
+        using var barrier = new Barrier(harnesses.Count);
+        try
+        {
+            await Task.WhenAll(harnesses.Select(h => Task.Run(async () =>
+            {
+                barrier.SignalAndWait();
+                await h.InitializeAsync();
+            })));
+
+            foreach (var harness in harnesses)
+            {
+                Assert.Equal(expected, await SchemaPropertiesAsync(harness));
+            }
+        }
+        finally
+        {
+            foreach (var harness in harnesses)
+            {
+                await harness.DisposeAsync();
+            }
+        }
+    }
+
+    [Fact]
     public void ServerInfo_Name_IsDnd()
     {
         // serverInfo.name is only the server's self-reported identity: Claude Code shows it in server status and falls
@@ -174,6 +356,12 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     {
         Assert.Equal(McpServerHarness.ProtocolVersion, _server.Client.NegotiatedProtocolVersion);
     }
+
+    private static async Task<List<string>> SchemaPropertiesAsync(McpServerHarness server) =>
+        (await server.Client.ListToolsAsync())
+            .OrderBy(t => t.Name, StringComparer.Ordinal)
+            .Select(t => $"{t.Name}: {string.Join(", ", t.JsonSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name))}")
+            .ToList();
 
     private async Task<McpClientTool> GetToolAsync(string name)
     {

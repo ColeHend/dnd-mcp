@@ -26,6 +26,22 @@ references the host; it drives the server through a real MCP client.
    `ServerSurfaceTests` checks every tool.
 4. **Vendored content is pinned by sha256.** Never hand-edit files under `content/5e-database/`; re-vendor with
    `scripts/fetch-5e-database.sh`. `.gitattributes` keeps git from rewriting their line endings.
+5. **Wrong upstream records are fixed in `content/srd-corrections.json`, never in the vendored files.** Each entry
+   replaces (or adds) whole top-level properties with text copied verbatim from the SRD markdown, and carries a reason
+   and a source; the reason is shown on the corrected document. Paraphrased or invented rules text is worse than the
+   damage it replaces, because every answer is labelled as SRD text.
+6. **srd.db is a cache keyed on its inputs.** Its staleness key covers `SrdIndexSchema.Version`, the manifest
+   fingerprint and the sha256 of the glossary and the corrections file — not the importer's code. Any change to the
+   schema, import, pairing, aliases or search text must bump `SrdIndexSchema.Version`, or every existing install keeps
+   serving the old index. `SrdIndexSchemaVersionTests` pins a digest of the hand-written tables to the version.
+7. **`content/` ships beside the executable.** The published binary alone has no rules data; copy the whole publish
+   directory, and publish upgrades into an empty one (`dotnet publish` never deletes stale files).
+8. **Formatter output is bounded and shaped.** A body uses `###` headings or deeper (it sits under `## 2014` in a
+   comparison) and every real record must render under `SrdMarkdown.MaxChars`; `SrdMarkdownRenderAllTests` renders all
+   ~4,600 records to hold both.
+9. **Build MCP servers one at a time in tests.** In ModelContextProtocol 2.2.0, building the same tool on two threads
+   at once can leave an injected `IProgress<>` parameter in the input schema as a phantom argument. `McpServerHarness`
+   serialises server construction; keep it that way.
 
 ## 3. Conventions
 

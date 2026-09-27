@@ -18,8 +18,12 @@ namespace DndMcp.Hosting;
 /// message that names the argument and lists what the tool accepts.
 /// </para>
 /// <para>
-/// Deliberately shallow: required-ness and the JSON type of each top-level argument only. Nested objects
-/// (builds, campaign ops) are validated by FluentValidation in Domain, where the rules live.
+/// Deliberately shallow: required-ness and the JSON type of each top-level argument, plus the type of each item of an
+/// array argument (<c>kinds: ["spell", 3]</c> fails in the binder just as a wrong top-level type does). <b>Nested objects
+/// are not checked yet</b>, and FluentValidation in Domain cannot stand in for that: a malformed object fails in the SDK's
+/// binder before any validator runs, and the model gets the bare generic error. The first object parameter (Phase 4
+/// builds, Phase 6 campaign operations) needs this guard to test-deserialize the argument with <c>McpJson.Options</c> and
+/// report the <c>JsonException.Path</c>; only then can FluentValidation's rules reach the model.
 /// </para>
 /// <para>
 /// Whatever this accepts, the SDK's binder must also accept — anything accepted here and refused there
@@ -34,6 +38,8 @@ namespace DndMcp.Hosting;
 internal static class ToolArgumentGuard
 {
     private static readonly SearchValues<char> NumberCharacters = SearchValues.Create("0123456789+-.eE");
+
+    private const int MaxItemProblems = 5;
 
     private static readonly Dictionary<Type, (decimal Min, decimal Max)> IntegerRanges = new()
     {
@@ -81,7 +87,8 @@ internal static class ToolArgumentGuard
             {
                 if (!properties.TryGetProperty(name, out var property))
                 {
-                    problems.Add($"unknown argument '{name}'");
+                    // Truncated: the name is the model's text, and a pasted page as a key must not come back whole.
+                    problems.Add($"unknown argument '{Truncate(name)}'");
                     continue;
                 }
 
@@ -89,6 +96,12 @@ internal static class ToolArgumentGuard
                 if (allowed.Count > 0 && !allowed.Any(type => Matches(type, value)))
                 {
                     problems.Add($"argument '{name}' should be {string.Join(" or ", allowed)} but was {Describe(value)}");
+                    continue;
+                }
+
+                if (value.ValueKind == JsonValueKind.Array)
+                {
+                    problems.AddRange(ItemProblems(name, property, value));
                     continue;
                 }
 
@@ -109,6 +122,60 @@ internal static class ToolArgumentGuard
         {
             throw new McpException(
                 $"Invalid arguments: {string.Join("; ", problems)}. {toolName} accepts: {DescribeParameters(inputSchema, properties)}.");
+        }
+    }
+
+    /// <summary>
+    /// One problem per array item whose JSON type the schema's <c>items</c> does not allow, numbered from 1 as a person
+    /// counts, and at most <see cref="MaxItemProblems"/> of them so a long wrong array cannot bury the parameter list.
+    /// </summary>
+    /// <remarks>
+    /// Every item is held to the same type rules as a top-level value (numeric strings for integers, and so on), because
+    /// the binder reads each item with the same System.Text.Json converter it uses for a scalar parameter. The integer
+    /// range check is not applied to items: no array parameter has integer items yet, and the first one needs the element
+    /// type looked up the way <see cref="ParameterTypesBySchemaName"/> looks up a parameter's.
+    /// </remarks>
+    private static IEnumerable<string> ItemProblems(string name, JsonElement property, JsonElement array)
+    {
+        if (!property.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Object)
+        {
+            yield break;
+        }
+
+        var allowed = AllowedTypes(items);
+        if (allowed.Count == 0)
+        {
+            yield break;
+        }
+
+        var position = 0;
+        var reported = 0;
+        var unreported = 0;
+        foreach (var item in array.EnumerateArray())
+        {
+            position++;
+            if (allowed.Any(type => Matches(type, item)))
+            {
+                continue;
+            }
+
+            if (reported == MaxItemProblems)
+            {
+                unreported++;
+                continue;
+            }
+
+            reported++;
+
+            // "string", not "string or null": the schema allows null items (nullable reference types), but a null kind is
+            // never what the caller meant, and naming it would invite one.
+            var expected = string.Join(" or ", allowed.Where(t => t != "null").DefaultIfEmpty("null"));
+            yield return $"argument '{name}' item {position.ToString(CultureInfo.InvariantCulture)} should be {expected} but was {Describe(item)}";
+        }
+
+        if (unreported > 0)
+        {
+            yield return $"argument '{name}' has {unreported.ToString(CultureInfo.InvariantCulture)} more item(s) of the wrong type";
         }
     }
 
@@ -259,10 +326,21 @@ internal static class ToolArgumentGuard
 
         return string.Join(", ", properties.EnumerateObject().Select(p =>
         {
-            var types = AllowedTypes(p.Value).Where(t => t != "null").ToList();
-            var typeText = types.Count == 0 ? "any" : string.Join("|", types);
+            var typeText = TypeText(p.Value);
+            if (typeText == "array" && p.Value.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Object &&
+                TypeText(items) is var itemText and not "any")
+            {
+                typeText = $"array of {itemText}";
+            }
+
             return $"{p.Name} ({typeText}, {(required.Contains(p.Name) ? "required" : "optional")})";
         }));
+    }
+
+    private static string TypeText(JsonElement schema)
+    {
+        var types = AllowedTypes(schema).Where(t => t != "null").ToList();
+        return types.Count == 0 ? "any" : string.Join("|", types);
     }
 
     private static string Truncate(string? text) =>

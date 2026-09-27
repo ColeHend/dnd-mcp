@@ -52,14 +52,68 @@ public sealed class BuiltServerProcess : IAsyncDisposable
     /// <summary>Every line the process has written to stdout so far, in order.</summary>
     public IReadOnlyList<string> StdoutLines => _stdout.ToArray();
 
+    /// <summary>Every line the process has written to stderr so far (its log), in order.</summary>
+    public IReadOnlyList<string> StderrLines => _stderr.ToArray();
+
+    /// <summary>The private directory the process runs in and keeps its (isolated) data and cache under.</summary>
+    public string WorkingDirectory => _workingDirectory;
+
+    /// <summary>The server's process id, for tests that inspect what the process holds (its file watches).</summary>
+    public int ProcessId => _process.Id;
+
     /// <summary>
     /// Starts the built host (<see cref="BuiltHost.Command"/>) in an empty temporary working directory, with its
     /// data locations isolated there by <see cref="IsolateUserData"/>.
     /// </summary>
-    public static BuiltServerProcess Start()
+    /// <param name="prepareWorkingDirectory">
+    /// Fills the working directory before the process starts. Claude Code launches the server in the user's project, so
+    /// this is how a test puts that project's files (an appsettings.json, many subdirectories) around the server.
+    /// </param>
+    public static BuiltServerProcess Start(Action<string>? prepareWorkingDirectory = null)
+    {
+        var workingDirectory = Directory.CreateTempSubdirectory("dnd-mcp-stdio-").FullName;
+        prepareWorkingDirectory?.Invoke(workingDirectory);
+        var (startInfo, command) = CreateStartInfo([], workingDirectory);
+        var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException($"Could not start '{command}'.");
+
+        return new BuiltServerProcess(process, workingDirectory, command);
+    }
+
+    /// <summary>
+    /// Runs the built host as a command (<c>DndMcp srd-build</c>) in <paramref name="workingDirectory"/>, with the same
+    /// isolation as the server, and waits for it to exit. Several runs may share one working directory, which is how a
+    /// test sees a second run reuse what the first built. The caller owns (and deletes) the directory.
+    /// </summary>
+    public static async Task<CommandResult> RunCommandAsync(IReadOnlyList<string> commandArguments, string workingDirectory, TimeSpan timeout)
+    {
+        var (startInfo, command) = CreateStartInfo(commandArguments, workingDirectory);
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException($"Could not start '{command}'.");
+
+        // A command reads nothing; closed stdin also means one that wrongly started the server would exit, not hang.
+        process.StandardInput.Close();
+
+        // Both streams are read concurrently: reading one to the end first can deadlock on the other's full pipe.
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        var stderr = process.StandardError.ReadToEndAsync();
+        using var cts = new CancellationTokenSource(timeout);
+        try
+        {
+            await process.WaitForExitAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            process.Kill(entireProcessTree: true);
+            throw new TimeoutException($"'{command}' did not exit within {timeout.TotalSeconds}s.");
+        }
+
+        return new CommandResult(process.ExitCode, await stdout, await stderr, command);
+    }
+
+    private static (ProcessStartInfo StartInfo, string Command) CreateStartInfo(IReadOnlyList<string> commandArguments, string workingDirectory)
     {
         var (fileName, arguments) = BuiltHost.Command();
-        var workingDirectory = Directory.CreateTempSubdirectory("dnd-mcp-stdio-").FullName;
 
         var utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
         var startInfo = new ProcessStartInfo(fileName)
@@ -73,18 +127,13 @@ public sealed class BuiltServerProcess : IAsyncDisposable
             StandardErrorEncoding = utf8,
             WorkingDirectory = workingDirectory,
         };
-        foreach (var argument in arguments)
+        foreach (var argument in arguments.Concat(commandArguments))
         {
             startInfo.ArgumentList.Add(argument);
         }
 
         IsolateUserData(startInfo.Environment, workingDirectory);
-
-        var command = string.Join(' ', [fileName, .. arguments]);
-        var process = Process.Start(startInfo)
-            ?? throw new InvalidOperationException($"Could not start '{command}'.");
-
-        return new BuiltServerProcess(process, workingDirectory, command);
+        return (startInfo, string.Join(' ', [fileName, .. arguments, .. commandArguments]));
     }
 
     /// <summary>
@@ -92,11 +141,11 @@ public sealed class BuiltServerProcess : IAsyncDisposable
     /// any other <c>DND_MCP_*</c> setting inherited from the test runner.
     /// </summary>
     /// <remarks>
-    /// The child inherits the developer's environment. PLAN.md's overrides (DND_MCP_DATA_DIR, DND_MCP_DB,
-    /// XDG_DATA_HOME, XDG_CACHE_HOME) exist precisely so a developer can export them — and a DND_MCP_DB left pointing
-    /// at the real campaigns.db would have this test's server open it once startup migrations exist (Phase 6).
-    /// Every inherited DND_MCP_* is removed first so an override added later is isolated without editing this.
-    /// StdoutPurityTests pins it.
+    /// The child inherits the developer's environment. PLAN.md's overrides (DND_MCP_DATA_DIR, DND_MCP_CACHE_DIR,
+    /// DND_MCP_DB, XDG_DATA_HOME, XDG_CACHE_HOME) exist precisely so a developer can export them — and a
+    /// DND_MCP_CACHE_DIR or DND_MCP_DB left pointing at the real files would have this test's server rebuild the user's
+    /// srd.db or open their campaigns.db. Every inherited DND_MCP_* is removed first so an override added later is
+    /// isolated without editing this. StdoutPurityTests pins it.
     /// </remarks>
     public static void IsolateUserData(IDictionary<string, string?> environment, string workingDirectory)
     {
@@ -105,6 +154,7 @@ public sealed class BuiltServerProcess : IAsyncDisposable
             environment.Remove(key);
         }
 
+        environment["DND_MCP_CACHE_DIR"] = Path.Combine(workingDirectory, "cache");
         environment["DND_MCP_DATA_DIR"] = Path.Combine(workingDirectory, "data");
         environment["DND_MCP_DB"] = Path.Combine(workingDirectory, "data", "campaigns.db");
         environment["XDG_DATA_HOME"] = Path.Combine(workingDirectory, "xdg-data");
@@ -311,6 +361,15 @@ public sealed class BuiltServerProcess : IAsyncDisposable
             _unreadLines.Writer.TryComplete();
         }
     }
+}
+
+/// <summary>How a command run of the built host ended: exit code and everything it wrote.</summary>
+public sealed record CommandResult(int ExitCode, string Stdout, string Stderr, string Command)
+{
+    /// <summary>The whole run, for assertion messages.</summary>
+    public string Describe() =>
+        $"{Environment.NewLine}Command: {Command}{Environment.NewLine}Exit code: {ExitCode}{Environment.NewLine}" +
+        $"stdout:{Environment.NewLine}{Stdout}{Environment.NewLine}stderr:{Environment.NewLine}{Stderr}";
 }
 
 /// <summary>

@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>DndMcp</RootNamespace>
     <AssemblyName>DndMcp</AssemblyName>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
 
     <!-- Framework-dependent builds keep running when only a newer major runtime is installed.
          The registered binary is published self-contained anyway (see README), so this only
@@ -43,6 +43,16 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
     <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
+  </ItemGroup>
+
+  <!-- The vendored SRD content (5e-database JSON + manifest, the 2024 Rules Glossary, licences) ships next to the
+       executable as content/, where the rules index reads it at startup. ExcludeFromSingleFile keeps it on disk in a
+       single-file publish: bundled content is invisible to File APIs unless extracted, and the index needs to hash
+       and read the real files. The provenance .md notes stay in the repo only. Content flows to the integration test
+       output through the project reference, so tests read exactly what ships. -->
+  <ItemGroup>
+    <None Include="..\content\**\*" Exclude="..\content\**\*.md" LinkBase="content"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 
   <!-- The integration tests call DndMcpServerRegistration directly so they exercise the exact
