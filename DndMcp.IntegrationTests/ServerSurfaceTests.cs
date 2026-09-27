@@ -33,6 +33,7 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     [
         "dice_odds",
         "dice_roll",
+        "encounter_difficulty",
         "rules_get",
         "rules_search",
     ];
@@ -48,6 +49,7 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
         {
             ["dice_odds"] = (true, false, true, false),
             ["dice_roll"] = (true, false, false, false),
+            ["encounter_difficulty"] = (true, false, true, false),
             ["rules_get"] = (true, false, true, false),
             ["rules_search"] = (true, false, true, false),
         };
@@ -59,6 +61,12 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     public static readonly IReadOnlyList<string> ExpectedResourceUris =
     [
         "rules://attribution",
+        "rules://tables/adventuring-day-xp-2014",
+        "rules://tables/cr-xp",
+        "rules://tables/encounter-multipliers-2014",
+        "rules://tables/monster-stats-by-cr-2014",
+        "rules://tables/xp-budget-2024",
+        "rules://tables/xp-thresholds-2014",
     ];
 
     // Claude Code truncates tool descriptions and server instructions here (CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH).
@@ -183,14 +191,28 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
         Assert.True(schema.TryGetProperty("properties", out var properties) && properties.ValueKind == JsonValueKind.Object,
             $"{name}'s input schema has no properties object.");
 
+        AssertPropertiesDescribed(name, properties);
+    }
+
+    // Every property, and every field of an object nested in it (encounter_difficulty's monsters items), has a valid name
+    // and a description: the description is the only hint the model gets about format ("2d6+3", "1-100", "1/2").
+    private static void AssertPropertiesDescribed(string path, JsonElement properties)
+    {
         foreach (var property in properties.EnumerateObject())
         {
             Assert.Matches(SchemaPropertyNameRegex(), property.Name);
 
-            // The parameter description is the only hint the model gets about format ("2d6+3", "1-100").
             var hasDescription = property.Value.TryGetProperty("description", out var description) &&
                                  !string.IsNullOrWhiteSpace(description.GetString());
-            Assert.True(hasDescription, $"{name}.{property.Name} has no description.");
+            Assert.True(hasDescription, $"{path}.{property.Name} has no description.");
+
+            foreach (var nested in new[] { property.Value, property.Value.TryGetProperty("items", out var items) ? items : default })
+            {
+                if (nested.ValueKind == JsonValueKind.Object && nested.TryGetProperty("properties", out var fields) && fields.ValueKind == JsonValueKind.Object)
+                {
+                    AssertPropertiesDescribed($"{path}.{property.Name}", fields);
+                }
+            }
         }
     }
 
@@ -243,6 +265,25 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
         var later = _server.Client.ServerInstructions!.Split('\n').Single(l => l.StartsWith("More tools arrive", StringComparison.Ordinal));
 
         Assert.DoesNotContain("rules", later, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ServerInstructions_LaterBuildsLine_NoLongerPromisesEncounterDifficulty()
+    {
+        var later = _server.Client.ServerInstructions!.Split('\n').Single(l => l.StartsWith("More tools arrive", StringComparison.Ordinal));
+
+        Assert.DoesNotContain("encounter", later, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task RulesTables_InstructionsAndBothToolDescriptions_SayHowToReachThem()
+    {
+        // The tables are resources, which Claude Desktop only attaches by hand; the model must be told rules_get serves them.
+        var tools = await _server.Client.ListToolsAsync();
+
+        Assert.Contains("rules_get ref \"rules://tables\"", _server.Client.ServerInstructions, StringComparison.Ordinal);
+        Assert.Contains("\"rules://tables\" lists the rules tables", tools.Single(t => t.Name == "rules_get").Description, StringComparison.Ordinal);
+        Assert.Contains("rules_get with ref \"rules://tables\"", tools.Single(t => t.Name == "encounter_difficulty").Description, StringComparison.Ordinal);
     }
 
     [Fact]

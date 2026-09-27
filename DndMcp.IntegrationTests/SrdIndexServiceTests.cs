@@ -597,7 +597,7 @@ public sealed class SrdIndexServiceTests
     }
 
     [Fact]
-    public async Task RulesTools_NoContent_ReturnTheReasonWhileDiceAndTheHandshakeWork()
+    public async Task RulesTools_NoContent_ReturnTheReasonWhileDiceTablesCrEncountersAndTheHandshakeWork()
     {
         using var content = new TempDirectory();
         var server = McpServerHarness.WithOptions(o => o.ContentRoot = content.Path);
@@ -605,7 +605,7 @@ public sealed class SrdIndexServiceTests
         try
         {
             Assert.False(string.IsNullOrWhiteSpace(server.Client.ServerInstructions));
-            Assert.Equal(4, (await server.Client.ListToolsAsync()).Count);
+            Assert.Equal(ServerSurfaceTests.ExpectedToolNames.Count, (await server.Client.ListToolsAsync()).Count);
 
             var expected = $"No content manifest at {Path.Combine(content.Path, "5e-database", "manifest.json")}. " +
                            "Vendor the data with scripts/fetch-5e-database.sh.";
@@ -616,6 +616,14 @@ public sealed class SrdIndexServiceTests
 
             var roll = await server.Client.CallToolAsync("dice_roll", new Dictionary<string, object?> { ["expression"] = "1d20" });
             Assert.StartsWith("**", server.SuccessText(roll), StringComparison.Ordinal);
+
+            // Nothing below needs srd.db: the tables are Domain data, and a monster given by CR needs no stat block.
+            var table = await server.Client.CallToolAsync("rules_get", new Dictionary<string, object?> { ["ref"] = "rules://tables/cr-xp" });
+            Assert.StartsWith("# Experience Points and Proficiency Bonus by Challenge Rating", server.SuccessText(table), StringComparison.Ordinal);
+            var byCr = await server.CallToolJsonAsync("encounter_difficulty", """{"party":[5,5,5,5],"monsters":[{"cr":"2","count":3}]}""");
+            Assert.Contains("## 2024 rules: Low", server.SuccessText(byCr), StringComparison.Ordinal);
+            var byName = await server.CallToolJsonAsync("encounter_difficulty", """{"party":[5,5,5,5],"monsters":[{"name":"Ogre","count":3}]}""");
+            Assert.Equal("An error occurred invoking 'encounter_difficulty': " + expected, server.ErrorText(byName));
         }
         finally
         {

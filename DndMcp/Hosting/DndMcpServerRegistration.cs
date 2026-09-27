@@ -91,6 +91,8 @@ internal static class DndMcpServerRegistration
             // Generic WithTools<T>() rather than WithToolsFromAssembly: explicit, and trim/AOT-safe.
             .WithTools<DiceTools>(McpJson.Options)
             .WithTools<RulesTools>(McpJson.Options)
-            .WithResources<RulesResources>();
+            .WithTools<EncounterTools>(McpJson.Options)
+            .WithResources<RulesResources>()
+            .WithResources(RulesTableResources.Create());
     }
 }

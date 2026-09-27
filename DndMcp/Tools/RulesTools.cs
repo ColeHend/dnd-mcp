@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using DndMcp.Domain.Core;
+using DndMcp.Formatting;
 using DndMcp.Formatting.Srd;
 using DndMcp.Hosting;
 using DndMcp.Repository.Sqlite;
@@ -40,7 +41,7 @@ namespace DndMcp.Tools;
 /// </para>
 /// <para>
 /// A query that finds srd.db deleted, replaced or damaged under the running server reopens the index and runs once more
-/// (see <see cref="SrdIndexService.Invalidate"/>), rather than failing every call until a restart the model cannot perform.
+/// (see <see cref="SrdIndexService.QueryAsync"/>), rather than failing every call until a restart the model cannot perform.
 /// </para>
 /// </summary>
 public sealed partial class RulesTools
@@ -99,7 +100,8 @@ public sealed partial class RulesTools
         "whole entry. Use it to find entries on a topic (\"grapple\", \"difficult terrain\") or when unsure of a name; for a known " +
         "name call rules_get with name directly. Not in the data (so no search finds them): the 2024 SRD's Playing the Game, " +
         "Character Creation and Gameplay Toolbox chapters, its Spells chapter's casting rules and Equipment chapter's prose, and " +
-        "the multiclassing rules in either edition.\n" +
+        "the multiclassing rules in either edition. The rules tables (XP by CR, both editions' encounter budgets and " +
+        "thresholds) are not searched either: rules_get ref \"rules://tables\" lists them.\n" +
         "- query: the words to find. Every word must match; end a word with * for a prefix (fire*). An entry whose name is the " +
         "query comes first. If no entry has every word, entries matching any word are returned and the result says so.\n" +
         "- edition: \"2024\" (default), \"2014\", or \"both\" to search both SRDs.\n" +
@@ -144,12 +146,15 @@ public sealed partial class RulesTools
         "a spell, a class with its level table, a subclass, species/race, feat, background, item, condition or rule (2024 " +
         "rules are the SRD 5.2.1 Rules Glossary). With edition \"both\" it shows the entry from each edition side by side, " +
         "with a comparison table for spells and monsters. Quote rules from here rather than from memory. Not in the data: the " +
-        "2024 SRD's Playing the Game, Character Creation and Gameplay Toolbox chapters, its Spells chapter's casting rules and " +
-        "Equipment chapter's prose, and the multiclassing rules in either edition (a class shows only its multiclassing " +
+        "2024 SRD's Playing the Game, Character Creation and Gameplay Toolbox chapters (apart from its encounter budget, a " +
+        "rules table), its Spells chapter's casting rules and Equipment chapter's prose, and the multiclassing rules in either " +
+        "edition (a class shows only its multiclassing " +
         "prerequisites); say a rule is not in this server's data rather than quoting it from memory.\n" +
         "Give exactly one of:\n" +
         "- ref: an entry's ref from rules_search or an earlier result, e.g. \"2024/spell/fireball\"; \"spell/fireball\" uses " +
-        "edition; an API URL like \"/api/2014/monsters/goblin\" works too. \"rules://attribution\" gives the SRD licence text.\n" +
+        "edition; an API URL like \"/api/2014/monsters/goblin\" works too. \"rules://attribution\" gives the SRD licence text; " +
+        "\"rules://tables\" lists the rules tables (XP by CR, encounter budgets and thresholds, DMG monster statistics by CR), " +
+        "each also by its name, e.g. name \"XP Budget per Character\".\n" +
         "- name: the entry's name, e.g. \"Fireball\", \"Adult Red Dragon\", \"Grappled\". Case and punctuation don't matter, and " +
         "the other edition's name for a renamed entry works (\"Thug\" finds the 2024 Tough).\n" +
         "Optional:\n" +
@@ -181,11 +186,22 @@ public sealed partial class RulesTools
         var chosenEdition = GetEdition(edition);
         var kindText = string.IsNullOrWhiteSpace(kind) ? null : kind;
 
-        // The licence text is a resource, which Claude Desktop only attaches by hand; every resource is also reachable
-        // through a tool.
+        // The licence text and the rules tables are resources, which Claude Desktop only attaches by hand; every resource
+        // is also reachable through a tool. A table answers to its URI and to its names (none of which any SRD entry has;
+        // RulesTablesTests pins that), and needs no index, so it works while srd.db is still building.
         if (hasRef ? IsAttributionRef(@ref!) : kindText is null && AttributionNames.Contains(SrdNames.Key(name!)))
         {
             return new RulesResources(_options).Attribution();
+        }
+
+        if (hasRef && RulesTables.IsTablesUri(@ref!))
+        {
+            return RulesTables.Answer(@ref!);
+        }
+
+        if (!hasRef && kindText is null && RulesTables.FindByName(name!) is { } table)
+        {
+            return table.Render();
         }
 
         return hasRef
@@ -283,33 +299,10 @@ public sealed partial class RulesTools
             cancellationToken);
     }
 
-    /// <summary>
-    /// Runs <paramref name="query"/> on the index, once more on a freshly opened one if the first raised
-    /// <see cref="SrdIndexUnavailableException"/>: srd.db was deleted, replaced by a different build or damaged in place
-    /// while this server ran. The README promises deleting the cache is always safe, and "restart the server" is advice
-    /// the model cannot follow, so the call reopens (or rebuilds) the index itself. A second failure is real and reaches
-    /// the model.
-    /// </summary>
-    private async Task<T> QueryAsync<T>(
-        Func<SrdIndex, T> query, IProgress<ProgressNotificationValue>? progress, CancellationToken cancellationToken)
-    {
-        var index = await _indexService.GetIndexAsync(progress, cancellationToken);
-        try
-        {
-            return query(index);
-        }
-        catch (SrdIndexUnavailableException)
-        {
-            _indexService.Invalidate(index);
-            var reopened = await _indexService.GetIndexAsync(progress, cancellationToken);
-            if (ReferenceEquals(reopened, index))
-            {
-                throw;
-            }
-
-            return query(reopened);
-        }
-    }
+    // SrdIndexService.QueryAsync reopens the index once when srd.db was deleted or replaced under the running server.
+    private Task<T> QueryAsync<T>(
+        Func<SrdIndex, T> query, IProgress<ProgressNotificationValue>? progress, CancellationToken cancellationToken) =>
+        _indexService.QueryAsync(query, progress, cancellationToken);
 
     /// <summary>
     /// The edition-conflict error, offering a ref in the asked edition only when one exists: the ref's recorded

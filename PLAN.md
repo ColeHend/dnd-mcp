@@ -351,7 +351,7 @@ mod    := (kh|kl|k|dh|dl)[INT] | r[cmp]INT | ro[cmp]INT | ![cmp INT] | !![cmp IN
 
 **2024 algorithm**
 - The budget is the sum of each character's value.
-- The label is the highest band whose budget ≤ total XP.
+- ~~The label is the highest band whose budget ≤ total XP.~~ **Superseded in Phase 3:** the label is the lowest band whose budget the total fits (≥ total), because the SRD's own worked examples classify that way; see Implementation status → Phase 3.
 - Both rules are **interpretations** (mixed-level parties, classifying an existing encounter), so flag them in the output.
 - Emit the SRD 5.2 troubleshooting warnings: more than 2 creatures per PC, a creature CR above the party level, CR 0 overuse, more than 2–3 stat blocks.
 
@@ -437,7 +437,7 @@ mod    := (kh|kl|k|dh|dl)[INT] | r[cmp]INT | ro[cmp]INT | ![cmp INT] | !![cmp IN
 - GWF applies to rider dice (no)
 - Savage Attacker works on doubled crit dice (no)
 - 2024 mixed-level budget (sum per character)
-- 2024 classification bands (highest band ≤ total)
+- 2024 classification bands (lowest band whose budget ≥ total; Phase 3 replaced "highest band ≤ total")
 - 2014 "significantly lower CR" exclusion (off)
 - Initiative ties (higher modifier, then seeded roll-off; "PCs win ties" optional)
 
@@ -774,6 +774,58 @@ Try each of these:
 
 ## Implementation status (updated 2026-09-27)
 
+**Phase 3 — done.** The exit criterion is met: the table parity tests pass, and so do the worked examples.
+- **Parity, read as text.** The 2024 XP Budget per Character equals the SRD 5.2 markdown table cell for cell, and XP and proficiency bonus by CR equal both SRD markdown tables (the SRD 5.1 one where it has rows). The tests read verbatim excerpts committed under `DndMcp.Tests/Encounters/Fixtures/`, and `SrdTableFixtureTests` re-checks each excerpt byte for byte against serving-solid-characters when it is checked out beside this repo.
+- **2014 tables** (DMG-only) are pinned as independently typed columns, plus the two dndR errors: level 3 Deadly is 400, and only levels 1, 2 and 4 fit "Easy × 2 / × 3 / × 4". The 15+ multiplier is × 5 / × 4 / × 3. CR→XP includes CR 9–13 and 26–30.
+- **Worked examples**: SRD 5.2.1's three examples (six encounters) through the Domain and through the tool; the DMG's multiplier example (four monsters, 500 XP → 1,000); PLAN's "3 ogres vs four level-5s" (2014 Medium at 2,700 adjusted XP; 2024 Low).
+- **Data truth.** Every monster in srd.db, both editions, has the XP its CR is worth, and every 2024 in-lair XP is the next CR's (29 monsters). Five upstream records did not, and are now corrected (see Corrections below).
+- Published as **0.3.0** and installed at `~/.local/share/dnd-mcp/bin` (binary and `content/` replaced by rename; `DndMcp srd-build` passes; `claude mcp list` shows ✔ Connected). The published single-file binary passes the stdout-purity test.
+- Manual end-to-end check: two headless `claude -p` runs on the installed server, both correct, the tools found from the server instructions alone.
+  - "Is 3 ogres Deadly for four level-5s in 2014, and what is it in 2024?": 2014 Medium (2,700 adjusted XP), 2024 Low (1,350 of a 2,000 budget), in 3 turns.
+  - 2014 thresholds for a level 7 character, then a beholder and 4 goblins against four level 10s in 2024: the table by ref; the beholder refused by name, then given by CR from memory (the model said so); High at 10,200 XP with the powerful-creature warning.
+
+**Tests: 4,767 passing** (2,761 unit + 2,006 integration), 0 build warnings.
+- Reviewed through two independent lenses as in Phases 0–1, each in its own copy of the repo.
+  - **Correctness/data truth:** re-checked every table cell, the five corrections, and all 675 monsters' CR, XP and in-lair XP against the SRD markdown (no other errors). It agreed with the 2024 classification reading. It found 1 bug (two CR-only items with the same label shared a stat-block key, hiding the troubleshooting warnings) and 6 misleading texts: "same XP total" beside differing totals; no mention that the editions classify in opposite directions; lair with cr asking for a CR that does not exist; "Vampire" and the lycanthropes reported as not in the SRD; not-found hints ignoring the other edition; 2024 CR 0 shown as a flat 10. Plus nits. All fixed and pinned.
+  - **Conventions + mutation:** 126 mutants, 73 killed by the first tests, 53 survived. The review's killing tests (merged into the existing classes) kill 46; 5 are equivalent and 2 lived in dead code (`AlsoNamed`, removed). Convention fixes: one validation path and one vocabulary ("monsters item 2") for the tool, the Domain and the guard; the formatter no longer depends on the Tools layer; text derived from constants; one level-bounds constant; stale guard docs; the instructions' "Gameplay Toolbox not in the data" now excepts the encounter budget. One mutant that survived the fixes themselves (a label-only stat-block key, masked by judging each group's highest CR) got its own killing test.
+
+**What exists now**
+- **Domain/Encounters**
+  - `ChallengeRating`: the 34 CRs as eighths; parses "1/8", 0.125, "½", "CR 1/8"; refuses anything between rows rather than rounding onto one.
+  - `ChallengeRatingTables`: XP by CR (CR 0 = 10 by default, "0 or 10" by stat block), PB by CR, and the DMG 2014 Monster Statistics by Challenge Rating (every row; CR 0's AC, attack and DC are ceilings).
+  - `EncounterTables2014`: thresholds, the multiplier ladder with the party-size shift, Adventuring Day XP. `EncounterTables2024`: the budget.
+  - `Encounter2014` / `Encounter2024`: the two methods, plus `Encounter2024.Troubleshoot` (the SRD's troubleshooting advice). `EncounterLimits` holds the input checks, `EffectiveParty` the offset.
+- **Repository:** `SrdMonsterChallenge.Read(SrdDocument)` reads CR, XP and in-lair XP from srd.db (corrections applied), never from the vendored files.
+- **Host**
+  - `encounter_difficulty{party, monsters[{ref | name | cr (+ name as label), count, exclude, lair}], edition, effective_level_offset}` (`EncounterTools`, rendered by `EncounterMarkdown`).
+  - `rules://tables/{cr-xp, xp-budget-2024, xp-thresholds-2014, encounter-multipliers-2014, adventuring-day-xp-2014, monster-stats-by-cr-2014}`: six static resources (`RulesTableResources`, from the `RulesTables` catalog), rendered from the Domain tables, each naming its source. `rules_get` serves them by URI, lists them for `rules://tables`, and finds them by name ("XP Budget per Character").
+  - `rules://attribution` gains a "Not SRD text" section naming the four DMG tables.
+  - `SrdIndexService.QueryAsync`: the reopen-once retry, moved from `RulesTools` so every index-reading tool shares it.
+  - `ToolArgumentGuard` now checks inside object arguments and object items: unknown fields (refused, because System.Text.Json would silently ignore `"qty": 3`), field types, integer ranges of fields and of array items, recursively, capped at five problems per argument; then a test-deserialize backstop that names the failing field from `JsonException.Path`.
+
+**Decisions made while implementing** (the plan is silent or differs)
+- **2024 classification is "the lowest difficulty whose budget the XP fits"**, not the plan's "highest band ≤ total". The SRD only describes building to a budget ("spend as much of your XP budget as you can without going over"), and its own worked examples call 150 XP against a 200 budget Low and 1,100 XP (Low 750, Moderate 1,125) Moderate; the plan's reading calls both one band lower and leaves everything under the Low budget unnamed. Above High the label is "Beyond High", flagged as not an SRD term. The output states the reading.
+- **2014 exclusion** (`exclude: true`): the monster leaves the count that picks the multiplier; its XP still counts (the cautious reading of "don't count any monsters whose challenge rating is significantly below…"). Never automatic. When CRs differ and nothing is excluded, the 2014 section mentions the rule.
+- **2014 below Easy is "Trivial"**, flagged as not a DMG term. The 2014 section also gives the adventuring-day share (adjusted XP ÷ the party's Adventuring Day XP) and the XP earned; the multiplier never changes the award.
+- **Mixed levels** sum each character's thresholds or budget in both editions (the DMG does; the 2024 SRD multiplies one party level, which is the same for a one-level party), flagged for 2024.
+- **Troubleshooting** is judged at printed levels (an offset does not raise a level-1 character's hit points). Limits: more than 2 creatures per character; CR above a character's level (fractional CRs compared as values); more than 2 CR 0 creatures, or any worth 0 XP; more than 3 stat blocks (two lines with one ref count once). "Adjustments" and "Unusual Features" need judgement and are not checked.
+- **Monsters** (messages count them as "monsters item N", like the argument guard): `ref` (a ref; one without a slash is read as a name), `name` (looked up in both editions), or `cr` (any monster the SRD lacks, with `name` as its label). One edition uses a ref as given, even the other edition's (a 2014 stat block in a 2024 game); `both` pairs each side with its recorded counterpart, then falls back to the same stat block with a note. A name missing from the asked edition uses the other edition's counterpart or stat block, with a note. `lair` uses the 2024 in-lair XP; 2014 stat blocks have none (said in a note); with `cr` it is the next CR's XP in 2024 (as every SRD 5.2.1 in-lair XP is), the CR unchanged. `cr` is untyped in the schema so "1/2" and 0.5 both work; a number is read by its JSON text, so 1e1 is refused like "1e1".
+- **Split stat blocks**: a name the data splits into forms ("Vampire" is "Vampire, Vampire Form", "…, Bat Form", "…, Mist Form"; each lycanthrope likewise) resolves to the form named after the creature, else the first, when every form shares CR and XP (they all do), with a note.
+- **2024 CR 0**: 26 of the 28 SRD 5.2.1 CR 0 stat blocks print "XP 0 or 10" and upstream stores 10; the output says so for those.
+- **Not found**: the error lists close SRD names from both editions (resolution falls back to the other one) and says to pass one's ref, before offering the CR route, so a model does not guess a CR for a monster the SRD has. A ref missing from its edition names the same slug in the other edition.
+- **Output wording**: every label comes with the numbers either side of it; percentages round down ("under 1%" for a sliver), and an uneven share of XP says "about N each". "The editions compared" computes the band equalities for the party's levels, states the opposite classification directions, and names the monsters whose XP differs between editions.
+- `effective_level_offset` is a whole number from −10 to +10; each character's effective level is held to 1–20 and the output says how many were.
+- `party` is levels only: `"campaign"` waits for Phase 6, and `edition` defaults to 2024 until then (as for the rules tools).
+- **Tables are static resources**, one per table, not a `rules://tables/{name}` template: a template moves to resources/templates/list, where Claude Code may not offer it (`ServerSurfaceTests` still pins that there are no templates). The DMG's Monster Statistics by CR is included now (Phase 4 needs it for targets); GWF expected values and AoE target counts wait for Phase 4's maths.
+- Table names are checked before the SRD index, so no table name may equal an SRD name; `RulesTablesTests` pins that none does, in either edition.
+- No FluentValidation yet: the inputs are simple and the checks throw `DndInputException` directly, as in Phases 1–2. Phase 4's build DSL is where validators arrive.
+
+**Corrections found while implementing**
+- **Five upstream XP values contradicted their stat blocks**, now corrected in `srd-corrections.json` (306 entries: 256 in 2024, 50 in 2014): 2014 Brass Dragon Wyrmling 100 → 200, Deep Gnome 50 → 100, Dretch 25 → 50, Riding Horse 25 → 50; 2024 Archmage 8,000 → 8,400. Every other monster's CR and XP was checked against its SRD markdown stat block (the shape-changer forms against their shared block, the 2014 insect swarms against Swarm of Insects).
+- CR 0 is "0 or 10" XP. Four stat blocks are worth 0 (2014 Frog and Sea Horse, 2024 Seahorse and Shrieker Fungus); the SRD 5.2 markdown prints the 2024 Frog as "XP 0 or 10" and upstream gives 10.
+- 2024 "XP N, or M in lair" is always the next CR's XP (29 monsters); 2014 records carry no lair XP.
+- **Tooling:** `dotnet test DndMcp.sln` and once `dotnet build` aborted with "Internal CLR error (0x80131506)" (a crash in the CLI process, twice while a reviewer's builds ran concurrently); the same command passed on the next run. Check the build log's "Build succeeded" before trusting `--no-build` test results.
+
 **Phase 2 — done.** The exit criterion is met: `rules_search` and `rules_get` work in both editions and with `edition: "both"`, and the import counts match the vendored data.
 - srd.db holds **4,602 documents**: 2,415 for 2014 and 2,187 for 2024 (174 of them the Rules Glossary). Every (edition, kind) count is pinned: monsters 334 / 341, spells 319 / 339, feats 1 / 17, rules 137 / 174, levels 290 / 287, and the rest. Every stored record is checked value for value against the vendored JSON (or its correction).
 - A cold build takes about 0.6 s and a reopen about 0.1 s. srd.db is 13.8 MB.
@@ -1014,9 +1066,21 @@ Everything below is fixed inline above, and each item is pinned by a test.
 - The publish ships `content/`, `AddDndMcpServer` takes content, cache and data directories, and the harness isolates them.
 - The converter note still applies to any future converter. Phase 2 added none: the index stores each record's raw JSON.
 
-**Phase 3 (from Phase 2)**
-- `rules://tables/{name}` is still to come. Make every such resource reachable through a tool too (rules_get already serves `rules://attribution`).
-- Monster CR and XP for encounters: read them from srd.db documents, which include the corrections, not from the vendored files.
+**Phase 3 (from Phase 2)** (both done)
+- `rules://tables/{name}`: six static resources, each also served by `rules_get` (by URI and by name).
+- Monster CR and XP come from srd.db documents (`SrdMonsterChallenge`), which include the corrections.
+
+**Phase 4 (from Phase 3)**
+- `ChallengeRatingTables.MonsterStats` (DMG 2014, every row) is ready for "target the CR = L row" (AC, attack bonus, save DC). The tomedunn save-bonus column is not in it; add it as its own table if used.
+- GWF expected values and AoE target counts are still to come as `rules://tables/*`: add a `RulesTables` catalog entry (resources and `rules_get` pick it up) and give it names no SRD entry has (`RulesTablesTests` checks).
+- `ToolArgumentGuard` already checks object arguments and nested objects: unknown fields refused, field types, integer ranges, required fields, recursion into nested arrays, and a test-deserialize backstop that names the failing field. The test-only `echo_shape` tool pins those paths. Build objects get all of this; FluentValidation is still needed for semantic rules.
+- The server instructions are at 2,002 of 2,048 characters. Adding the balance tools needs a rewrite (the rules_get paragraph is the longest), and `ServerSurfaceTests` pins the limit.
+
+**Phase 6 (from Phase 3)**
+- `encounter_difficulty`: accept `party: "campaign"`, default `edition` to the campaign's ruleset, and default `effective_level_offset` from the campaign's balance profile. Update the description, which says 2024 is the default.
+
+**Phase 7 (from Phase 3)**
+- `combat add{srd}` can reuse the encounter tool's monster resolution: ref, name, forms, counterparts, the other edition's fallback, and cr for anything else.
 
 **Phase 5 (from Phase 2)**
 - **Read corrected records.** `srd-corrections.json` is applied when srd.db is built. The typed models (`SrdJson.ReadArray<Monster2024>` …) read the vendored files unchanged, so a normalizer built on them would simulate the uncorrected 2024 Mule (the Octopus's actions) and a Pirate Captain without Captain's Charm. Build combatants from srd.db documents (`SrdDocument.Json`), or run records through `SrdCorrections.Apply` before deserialising. `SrdCorrectedTypedModelTests` pins that every corrected monster and spell still deserialises strictly into its typed model.

@@ -3470,6 +3470,14 @@
       "source": "SRD 5.2 markdown 10_MagicItems.md › Well of Many Worlds"
     },
     {
+      "ref": "2024/monster/archmage",
+      "set": {
+        "xp": 8400
+      },
+      "reason": "Upstream gives 8,000 XP; CR 12 is worth 8,400 XP, as the SRD prints.",
+      "source": "SRD 5.2 markdown 12_MonstersA-Z.md › Archmage › CR"
+    },
+    {
       "ref": "2024/monster/mule",
       "set": {
         "special_abilities": [
@@ -4639,6 +4647,14 @@
       "source": "SRD 5.1 markdown 10_Monsters/Monsters_Each/Black_Bear_(Creature).md › Black Bear › Bite, Claws"
     },
     {
+      "ref": "2014/monster/brass-dragon-wyrmling",
+      "set": {
+        "xp": 200
+      },
+      "reason": "Upstream gives 100 XP; Challenge 1 is worth 200 XP, as the SRD prints.",
+      "source": "SRD 5.1 markdown 10_Monsters/Monsters_Each/Wyrmling_Brass_Dragon_(Metallic).md › Brass Dragon Wyrmling › Challenge"
+    },
+    {
       "ref": "2014/monster/brown-bear",
       "set": {
         "actions": [
@@ -4693,6 +4709,22 @@
       },
       "reason": "Upstream gives Bite and Claws +5 to hit; with Strength 19 and proficiency +2 they are +6, as the SRD prints.",
       "source": "SRD 5.1 markdown 10_Monsters/Monsters_Each/Brown_Bear_(Creature).md › Brown Bear › Bite, Claws"
+    },
+    {
+      "ref": "2014/monster/deep-gnome-svirfneblin",
+      "set": {
+        "xp": 100
+      },
+      "reason": "Upstream gives 50 XP; Challenge 1/2 is worth 100 XP, as the SRD prints.",
+      "source": "SRD 5.1 markdown 10_Monsters/Monsters_Each/Gnome,_Deep_(Svirfneblin).md › Gnome, Deep (Svirfneblin) › Challenge"
+    },
+    {
+      "ref": "2014/monster/dretch",
+      "set": {
+        "xp": 50
+      },
+      "reason": "Upstream gives 25 XP; Challenge 1/4 is worth 50 XP, as the SRD prints.",
+      "source": "SRD 5.1 markdown 10_Monsters/Monsters_Each/Dretch_(Demon).md › Dretch › Challenge"
     },
     {
       "ref": "2014/monster/efreeti",
@@ -5211,6 +5243,14 @@
       },
       "reason": "Upstream gives Bite and Tail Stinger +9 to hit; with Strength 28 and proficiency +5 they are +14, as the SRD prints.",
       "source": "SRD 5.1 markdown 10_Monsters/Monsters_Each/Purple_Worm.md › Purple Worm › Bite, Tail Stinger"
+    },
+    {
+      "ref": "2014/monster/riding-horse",
+      "set": {
+        "xp": 50
+      },
+      "reason": "Upstream gives 25 XP; Challenge 1/4 is worth 50 XP, as the SRD prints.",
+      "source": "SRD 5.1 markdown 10_Monsters/Monsters_Each/Riding_Horse_(Creature).md › Riding Horse › Challenge"
     },
     {
       "ref": "2014/monster/solar",

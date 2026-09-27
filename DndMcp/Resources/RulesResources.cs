@@ -44,6 +44,17 @@ public sealed class RulesResources
         "available at https://www.dndbeyond.com/srd. The SRD 5.2.1 is licensed under the Creative Commons Attribution 4.0 " +
         "International License, available at https://creativecommons.org/licenses/by/4.0/legalcode.";
 
+    /// <summary>
+    /// The served tables that are not from either SRD. The CC-BY statements above cover only SRD text, and a reader of this
+    /// page must not take the 2014 DMG's encounter tables for it (PLAN.md, open question 1: included for personal use).
+    /// </summary>
+    public const string NotSrdText =
+        "The 2014 encounter-building tables (`rules://tables/xp-thresholds-2014`, `rules://tables/encounter-multipliers-2014`, " +
+        "`rules://tables/adventuring-day-xp-2014`) and the Monster Statistics by Challenge Rating table " +
+        "(`rules://tables/monster-stats-by-cr-2014`) come from the Dungeon Master's Guide (2014), the first three also from " +
+        "the free 2014 Basic Rules, not from SRD 5.1, so the licence above does not cover them. They are served for personal " +
+        "use, and every result that uses them names that source.";
+
     /// <summary>The 5e-database licence, relative to the content root.</summary>
     public static readonly string MitNoticeRelativePath = Path.Combine("LICENSES", "5e-database-MIT.txt");
 
@@ -57,7 +68,8 @@ public sealed class RulesResources
     [McpServerResource(UriTemplate = AttributionUri, Name = "attribution", Title = "SRD attribution and licences", MimeType = "text/markdown")]
     [Description(
         "Licence statements for the SRD 5.1 (2014) and SRD 5.2.1 (2024) text that rules_search and rules_get return, the " +
-        "5e-database MIT notice, the exact data versions served, and the curated corrections applied to them.")]
+        "5e-database MIT notice, the exact data versions served, the curated corrections applied to them, and which served " +
+        "tables are not SRD text.")]
     public string Attribution()
     {
         var contentRoot = _options.ContentRoot;
@@ -71,6 +83,7 @@ public sealed class RulesResources
             .Append("- ").Append(DatabaseProvenance(contentRoot)).Append('\n')
             .Append("- ").Append(GlossaryProvenance(contentRoot)).Append('\n')
             .Append("- ").Append(CorrectionsProvenance(contentRoot)).Append("\n\n")
+            .Append("## Not SRD text\n\n").Append(NotSrdText).Append("\n\n")
             .Append("## 5e-database licence (MIT)\n\n")
             .Append(MitNotice(contentRoot));
 

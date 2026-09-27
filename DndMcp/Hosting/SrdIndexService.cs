@@ -140,6 +140,35 @@ public sealed class SrdIndexService : IDisposable
     }
 
     /// <summary>
+    /// Runs <paramref name="query"/> on the index, once more on a freshly opened one if the first raised
+    /// <see cref="SrdIndexUnavailableException"/>: srd.db was deleted, replaced by a different build or damaged in place
+    /// while this server ran. The README promises deleting the cache is always safe, and "restart the server" is advice
+    /// the model cannot follow, so the call reopens (or rebuilds) the index itself. A second failure is real and reaches
+    /// the model. Every tool that reads the index goes through here, so none can forget the retry.
+    /// </summary>
+    public async Task<T> QueryAsync<T>(
+        Func<SrdIndex, T> query, IProgress<ProgressNotificationValue>? progress, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        var index = await GetIndexAsync(progress, cancellationToken);
+        try
+        {
+            return query(index);
+        }
+        catch (SrdIndexUnavailableException)
+        {
+            Invalidate(index);
+            var reopened = await GetIndexAsync(progress, cancellationToken);
+            if (ReferenceEquals(reopened, index))
+            {
+                throw;
+            }
+
+            return query(reopened);
+        }
+    }
+
+    /// <summary>
     /// Stops handing out <paramref name="index"/> after a query on it raised <see cref="SrdIndexUnavailableException"/>
     /// (srd.db deleted, or replaced by a different build), so the next <see cref="GetIndexAsync"/> opens a current srd.db
     /// or rebuilds one. Does nothing when <paramref name="index"/> is no longer the current index: parallel calls that all

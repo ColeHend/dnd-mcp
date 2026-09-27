@@ -1,7 +1,10 @@
 using System.Buffers;
 using System.Globalization;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.AI;
 using ModelContextProtocol;
 
@@ -18,12 +21,15 @@ namespace DndMcp.Hosting;
 /// message that names the argument and lists what the tool accepts.
 /// </para>
 /// <para>
-/// Deliberately shallow: required-ness and the JSON type of each top-level argument, plus the type of each item of an
-/// array argument (<c>kinds: ["spell", 3]</c> fails in the binder just as a wrong top-level type does). <b>Nested objects
-/// are not checked yet</b>, and FluentValidation in Domain cannot stand in for that: a malformed object fails in the SDK's
-/// binder before any validator runs, and the model gets the bare generic error. The first object parameter (Phase 4
-/// builds, Phase 6 campaign operations) needs this guard to test-deserialize the argument with <c>McpJson.Options</c> and
-/// report the <c>JsonException.Path</c>; only then can FluentValidation's rules reach the model.
+/// It checks required-ness and the JSON type of each top-level argument, the type of each item of an array argument
+/// (<c>kinds: ["spell", 3]</c> fails in the binder just as a wrong top-level type does), and, inside object arguments and
+/// object items (<c>encounter_difficulty</c>'s <c>monsters</c>), every field against the schema: unknown fields, wrong
+/// types, integers out of the property's CLR range, recursively. A malformed object otherwise fails in the SDK's binder
+/// before any tool code runs, and the model gets the bare generic error. <b>Unknown fields are refused</b>, although
+/// System.Text.Json would ignore them: <c>{"monster": "Ogre", "qty": 3}</c> would bind as an empty entry with count 1,
+/// and a misspelt count silently becomes 1. Last, any object argument that passed is test-deserialized with
+/// <c>McpJson.Options</c>, so whatever the schema cannot express still comes back as a message naming the field (from
+/// <c>JsonException.Path</c>), not the generic error.
 /// </para>
 /// <para>
 /// Whatever this accepts, the SDK's binder must also accept — anything accepted here and refused there
@@ -35,7 +41,7 @@ namespace DndMcp.Hosting;
 /// (refusing what the binder would take) only costs the model a retry and is allowed for "NaN"/"Infinity".
 /// </para>
 /// </summary>
-internal static class ToolArgumentGuard
+internal static partial class ToolArgumentGuard
 {
     private static readonly SearchValues<char> NumberCharacters = SearchValues.Create("0123456789+-.eE");
 
@@ -54,8 +60,10 @@ internal static class ToolArgumentGuard
     };
 
     /// <param name="method">
-    /// The tool's C# method (the SDK puts it first in <c>McpServerTool.Metadata</c>), used only for the
-    /// integer range check. Null skips that check rather than guessing a range.
+    /// The tool's C# method (the SDK puts it first in <c>McpServerTool.Metadata</c>). Its parameter types give the
+    /// integer ranges (top level, array items and object fields), the field and element types nested checks recurse
+    /// with, and the type the test-deserialize backstop binds. Null skips those three checks rather than guessing; the
+    /// schema checks still run. The SDK always supplies it.
     /// </param>
     public static void Validate(string toolName, JsonElement inputSchema, IDictionary<string, JsonElement>? arguments, MethodInfo? method = null)
     {
@@ -99,14 +107,27 @@ internal static class ToolArgumentGuard
                     continue;
                 }
 
+                var clrType = parameterTypes?.GetValueOrDefault(name);
                 if (value.ValueKind == JsonValueKind.Array)
                 {
-                    problems.AddRange(ItemProblems(name, property, value));
+                    var itemProblems = ItemProblems(name, property, value).ToList();
+                    if (itemProblems.Count == 0)
+                    {
+                        itemProblems = Capped(name, ItemValueProblems(name, property, value, ElementType(clrType)));
+                    }
+
+                    problems.AddRange(itemProblems.Count > 0 ? itemProblems : BindingProblems(name, value, clrType));
                     continue;
                 }
 
-                if (parameterTypes is not null &&
-                    parameterTypes.TryGetValue(name, out var clrType) &&
+                if (value.ValueKind == JsonValueKind.Object)
+                {
+                    var fieldProblems = Capped(name, FieldProblems($"argument '{name}'", property, value, clrType));
+                    problems.AddRange(fieldProblems.Count > 0 ? fieldProblems : BindingProblems(name, value, clrType));
+                    continue;
+                }
+
+                if (clrType is not null &&
                     IntegerRanges.TryGetValue(clrType, out var range) &&
                     IsIntegerShaped(value) &&
                     OutOfRange(value, range) is { } direction)
@@ -131,9 +152,9 @@ internal static class ToolArgumentGuard
     /// </summary>
     /// <remarks>
     /// Every item is held to the same type rules as a top-level value (numeric strings for integers, and so on), because
-    /// the binder reads each item with the same System.Text.Json converter it uses for a scalar parameter. The integer
-    /// range check is not applied to items: no array parameter has integer items yet, and the first one needs the element
-    /// type looked up the way <see cref="ParameterTypesBySchemaName"/> looks up a parameter's.
+    /// the binder reads each item with the same System.Text.Json converter it uses for a scalar parameter. Ranges and the
+    /// fields of object items are checked afterwards, by <see cref="ItemValueProblems"/>, once every item has the right
+    /// type.
     /// </remarks>
     private static IEnumerable<string> ItemProblems(string name, JsonElement property, JsonElement array)
     {
@@ -177,6 +198,206 @@ internal static class ToolArgumentGuard
         {
             yield return $"argument '{name}' has {unreported.ToString(CultureInfo.InvariantCulture)} more item(s) of the wrong type";
         }
+    }
+
+    /// <summary>
+    /// What is wrong inside each item of an array argument whose items are all the right JSON type: an integer outside
+    /// the element's CLR range (<c>party: [5, 99999999999]</c>), and every field problem of an object item ("argument
+    /// 'monsters' item 2 field 'count' should be integer but was the string \"three\""), in item order.
+    /// </summary>
+    private static IEnumerable<string> ItemValueProblems(string name, JsonElement property, JsonElement array, Type? itemType)
+    {
+        if (!property.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Object)
+        {
+            yield break;
+        }
+
+        var position = 0;
+        foreach (var item in array.EnumerateArray())
+        {
+            position++;
+            foreach (var problem in ValueProblems($"argument '{name}' item {position.ToString(CultureInfo.InvariantCulture)}", items, item, itemType))
+            {
+                yield return problem;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Every problem with the fields of <paramref name="value"/>, an object checked against <paramref name="schema"/>:
+    /// fields the schema does not list, missing required fields, wrong JSON types (as for a top-level value, without
+    /// "or null" in the message), integers outside the CLR property's range, and the same again inside nested objects
+    /// and arrays. <paramref name="clrType"/> supplies the ranges; null skips only that check.
+    /// </summary>
+    private static IEnumerable<string> FieldProblems(string label, JsonElement schema, JsonElement value, Type? clrType)
+    {
+        if (!schema.TryGetProperty("properties", out var properties) || properties.ValueKind != JsonValueKind.Object)
+        {
+            yield break;
+        }
+
+        var fieldTypes = JsonPropertyTypes(clrType);
+        foreach (var (field, fieldValue) in value.EnumerateObject().Select(p => (p.Name, p.Value)))
+        {
+            if (!properties.TryGetProperty(field, out var fieldSchema))
+            {
+                var known = string.Join(", ", properties.EnumerateObject().Select(p => p.Name));
+                yield return $"{label} has unknown field '{Truncate(field)}' (fields: {known})";
+                continue;
+            }
+
+            foreach (var problem in ValueProblems($"{label} field '{field}'", fieldSchema, fieldValue, fieldTypes?.GetValueOrDefault(field)))
+            {
+                yield return problem;
+            }
+        }
+
+        if (schema.TryGetProperty("required", out var required) && required.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var field in required.EnumerateArray().Select(r => r.GetString()).OfType<string>())
+            {
+                if (!value.TryGetProperty(field, out _))
+                {
+                    yield return $"{label} is missing required field '{field}'";
+                }
+            }
+        }
+    }
+
+    private static IEnumerable<string> ValueProblems(string label, JsonElement schema, JsonElement value, Type? clrType)
+    {
+        var allowed = AllowedTypes(schema);
+        if (allowed.Count > 0 && !allowed.Any(type => Matches(type, value)))
+        {
+            yield return $"{label} should be {string.Join(" or ", allowed.Where(t => t != "null").DefaultIfEmpty("null"))} but was {Describe(value)}";
+            yield break;
+        }
+
+        var underlying = clrType is null ? null : Nullable.GetUnderlyingType(clrType) ?? clrType;
+        if (underlying is not null && IntegerRanges.TryGetValue(underlying, out var range) && IsIntegerShaped(value) &&
+            OutOfRange(value, range) is { } direction)
+        {
+            yield return $"{label} was {Describe(value)}, which is too {direction} to be valid";
+            yield break;
+        }
+
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var problem in FieldProblems(label, schema, value, clrType))
+            {
+                yield return problem;
+            }
+        }
+        else if (value.ValueKind == JsonValueKind.Array && schema.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Object)
+        {
+            var position = 0;
+            foreach (var item in value.EnumerateArray())
+            {
+                position++;
+                foreach (var problem in ValueProblems($"{label} item {position.ToString(CultureInfo.InvariantCulture)}", items, item, ElementType(clrType)))
+                {
+                    yield return problem;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// At most <see cref="MaxItemProblems"/> problems for one argument, then a count of the rest, so one badly wrong
+    /// array cannot bury the parameter list the message ends with.
+    /// </summary>
+    private static List<string> Capped(string name, IEnumerable<string> problems)
+    {
+        var all = problems.ToList();
+        if (all.Count <= MaxItemProblems)
+        {
+            return all;
+        }
+
+        var rest = all.Count - MaxItemProblems;
+        return [.. all.Take(MaxItemProblems), $"argument '{name}' has {rest.ToString(CultureInfo.InvariantCulture)} more problem(s)"];
+    }
+
+    /// <summary>
+    /// The backstop for object and array arguments the schema checks passed: deserialize with the options the SDK binds
+    /// with, and report where it failed ("argument 'monsters' item 1 field 'count' could not be read"). Everything the
+    /// schema can express is caught above with a better message; this keeps the rest off the generic error.
+    /// </summary>
+    private static IEnumerable<string> BindingProblems(string name, JsonElement value, Type? clrType)
+    {
+        if (clrType is null || clrType == typeof(JsonElement) || clrType == typeof(object))
+        {
+            yield break;
+        }
+
+        string? problem = null;
+        try
+        {
+            JsonSerializer.Deserialize(value, clrType, McpJson.Options);
+        }
+        catch (JsonException ex)
+        {
+            problem = $"argument '{name}'{PathText(ex.Path)} could not be read as the tool expects";
+        }
+
+        if (problem is not null)
+        {
+            yield return problem;
+        }
+    }
+
+    // "$[0].count" → " item 1 field 'count'"; "$" or null → "".
+    private static string PathText(string? path)
+    {
+        if (string.IsNullOrEmpty(path) || path == "$")
+        {
+            return string.Empty;
+        }
+
+        var text = new StringBuilder();
+        foreach (Match segment in PathSegment().Matches(path))
+        {
+            if (segment.Groups[1].Success)
+            {
+                text.Append(" item ").Append((int.Parse(segment.Groups[1].Value, CultureInfo.InvariantCulture) + 1).ToString(CultureInfo.InvariantCulture));
+            }
+            else
+            {
+                var field = segment.Groups[2].Success ? segment.Groups[2].Value : segment.Groups[3].Value;
+                text.Append(" field '").Append(Truncate(field)).Append('\'');
+            }
+        }
+
+        return text.ToString();
+    }
+
+    // The JSON name → CLR type of each property the serializer reads, or null for a type with no properties (a scalar,
+    // object, JsonElement): the same names and types the SDK's binder uses.
+    private static Dictionary<string, Type>? JsonPropertyTypes(Type? type)
+    {
+        if (type is null || type == typeof(object) || type == typeof(string) || type == typeof(JsonElement) || type.IsPrimitive)
+        {
+            return null;
+        }
+
+        var info = McpJson.Options.GetTypeInfo(Nullable.GetUnderlyingType(type) ?? type);
+        return info.Kind == JsonTypeInfoKind.Object
+            ? info.Properties.ToDictionary(p => p.Name, p => p.PropertyType, StringComparer.Ordinal)
+            : null;
+    }
+
+    private static Type? ElementType(Type? type)
+    {
+        if (type is null || type == typeof(string))
+        {
+            return null;
+        }
+
+        return type.IsArray
+            ? type.GetElementType()
+            : type.GetInterfaces().Append(type)
+                .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>))
+                ?.GetGenericArguments()[0];
     }
 
     private static List<string> AllowedTypes(JsonElement property)
@@ -274,7 +495,8 @@ internal static class ToolArgumentGuard
         double.IsFinite(number);
 
     /// <summary>
-    /// C# parameter types keyed by the name the model sees in the schema, for the integer range check.
+    /// C# parameter types keyed by the name the model sees in the schema: for the integer range checks, the nested
+    /// field and element types, and the backstop's target type.
     /// </summary>
     /// <remarks>
     /// [AIParameterName] renames a parameter in both the schema and the binder. Keying by the C# name would
@@ -345,4 +567,8 @@ internal static class ToolArgumentGuard
 
     private static string Truncate(string? text) =>
         text is null ? string.Empty : text.Length <= 40 ? text : text[..40] + "…";
+
+    // One JsonException.Path segment: "[3]", ".count" or "['odd key']".
+    [GeneratedRegex(@"\[(\d+)\]|\.([^.\[]+)|\['([^']*)'\]")]
+    private static partial Regex PathSegment();
 }

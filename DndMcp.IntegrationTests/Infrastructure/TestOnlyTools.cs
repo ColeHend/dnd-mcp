@@ -63,6 +63,26 @@ public sealed class TestOnlyTools
         [Description("A floating-point number.")] double ratio = 0) =>
         string.Create(CultureInfo.InvariantCulture, $"round_cap={roundCap}; ratio={ratio:R}");
 #pragma warning restore MEAI001
+
+    [McpServerTool(Name = "echo_shape", Title = "Echo shape (test only)", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
+    [Description("Test only: echoes an object argument and an array of objects, as bound.")]
+    public string EchoShape(
+        [Description("An object argument.")] EchoShapeInput shape,
+        [Description("An array of objects.")] EchoShapeInput[]? more = null) =>
+        $"name={shape.Name}; more={more?.Length ?? 0}";
+}
+
+/// <summary>An object parameter with a required field, a field the schema cannot fully check, and a nested array.</summary>
+public sealed class EchoShapeInput
+{
+    [Description("Required.")]
+    public required string Name { get; init; }
+
+    [Description("A date: the schema says string, only the binder knows the format.")]
+    public DateOnly? When { get; init; }
+
+    [Description("Tags.")]
+    public string[]? Tags { get; init; }
 }
 
 /// <summary>

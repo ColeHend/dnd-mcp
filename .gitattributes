@@ -9,3 +9,6 @@ content/5e-database/** -text
 # The 2024 Rules Glossary is pinned by sha256 in RulesGlossaryTests and is part of srd.db's staleness key,
 # so it gets the same opaque-bytes treatment.
 content/rules-glossary-2024.json -text
+
+# Verbatim SRD markdown excerpts, compared byte for byte with their source by SrdTableFixtureTests.
+DndMcp.Tests/Encounters/Fixtures/srd5*.md -text

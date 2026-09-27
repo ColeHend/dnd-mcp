@@ -47,13 +47,13 @@ public sealed partial class SrdCorrectionsTests
     [InlineData("2024/feature", 24)]
     [InlineData("2024/equipment-category", 6)]
     [InlineData("2024/feat", 2)]
-    [InlineData("2024/monster", 3)]
+    [InlineData("2024/monster", 4)]
     [InlineData("2024/rule", 1)]
     [InlineData("2024/species", 1)]
     [InlineData("2024/trait", 2)]
     [InlineData("2014/spell", 25)]
     [InlineData("2014/magic-item", 7)]
-    [InlineData("2014/monster", 14)]
+    [InlineData("2014/monster", 18)]
     public void Entries_PerEditionAndKind_MatchTheReviewedCount(string editionAndKind, int expected)
     {
         Assert.Equal(expected, Shipped.Entries.Count(e => $"{e.Target.Edition}/{e.Target.Kind}" == editionAndKind));
@@ -424,6 +424,13 @@ public sealed partial class SrdCorrectionsTests
     [InlineData("2014/monster/adult-gold-dragon", "actions", "\"name\":\"Change Shape\",\"desc\":\"The dragon magically polymorphs into a humanoid or beast", null)]
     [InlineData("2014/monster/adult-silver-dragon", "actions", "\"name\":\"Change Shape\"", null)]
     [InlineData("2014/monster/adult-bronze-dragon", "actions", "\"name\":\"Change Shape\"", null)]
+    // Phase 3: XP that contradicts the stat block's own CR. Encounter difficulty reads XP from srd.db, so each of these
+    // misjudged every encounter it was in.
+    [InlineData("2024/monster/archmage", "xp", "8400", null)]
+    [InlineData("2014/monster/brass-dragon-wyrmling", "xp", "200", null)]
+    [InlineData("2014/monster/deep-gnome-svirfneblin", "xp", "100", null)]
+    [InlineData("2014/monster/dretch", "xp", "50", null)]
+    [InlineData("2014/monster/riding-horse", "xp", "50", null)]
     public void Corrected_Value_HasTheSrdValueAndNotTheDamage(string reference, string property, string present, string? absent)
     {
         var json = Corrected(reference).GetProperty(property).GetRawText();

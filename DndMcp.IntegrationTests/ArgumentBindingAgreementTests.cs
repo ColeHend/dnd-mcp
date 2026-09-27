@@ -164,4 +164,29 @@ public sealed class ArgumentBindingAgreementTests : IClassFixture<TestOnlyToolsS
 
     // The decoded string, so a test name never carries a raw control character (a NUL breaks TRX output).
     private static string JsonString(string json) => JsonDocument.Parse(json).RootElement.GetString()!;
+
+    private const string EchoShapePrefix = "An error occurred invoking 'echo_shape': Invalid arguments: ";
+
+    // Object arguments and objects nested in arrays (echo_shape, test-only): a required field, a field only the binder can
+    // check (DateOnly), and a nested array. encounter_difficulty's monsters reaches the item-field path; these reach the
+    // rest, which Phase 4's build objects will use.
+    [Theory]
+    [InlineData("""{"shape":{"when":"2024-01-01"}}""", "argument 'shape' is missing required field 'name'")]
+    [InlineData("""{"shape":{"name":"a","when":"not a date"}}""", "argument 'shape' field 'when' could not be read as the tool expects")]
+    [InlineData("""{"shape":{"name":"a"},"more":[{"name":"b"},{"name":"c","when":"x"}]}""", "argument 'more' item 2 field 'when' could not be read as the tool expects")]
+    [InlineData("""{"shape":{"name":"a","tags":["x",3]}}""", "argument 'shape' field 'tags' item 2 should be string but was the number 3")]
+    public async Task CallTool_ObjectArgument_GuardNamesTheField(string arguments, string problem)
+    {
+        var text = _server.ErrorText(await _server.CallToolJsonAsync("echo_shape", arguments));
+
+        Assert.StartsWith(EchoShapePrefix + problem + ". echo_shape accepts:", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_WellFormedObject_Binds()
+    {
+        var text = _server.SuccessText(await _server.CallToolJsonAsync("echo_shape", """{"shape":{"name":"a","when":"2024-01-01","tags":["x"]},"more":[{"name":"b"}]}"""));
+
+        Assert.Equal("name=a; more=1", text);
+    }
 }
