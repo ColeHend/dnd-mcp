@@ -33,6 +33,7 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     [
         "balance_compare",
         "balance_dpr",
+        "balance_simulate",
         "dice_odds",
         "dice_roll",
         "encounter_difficulty",
@@ -44,13 +45,14 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     /// THE hints each tool declares (readOnly, destructive, idempotent, openWorld), as PLAN.md's tool table gives them.
     /// Claude Code decides what it auto-approves or warns about from these, so a flipped hint must be a deliberate diff
     /// here: checking only that each is set let openWorld become true or idempotent false with every test green.
-    /// dice_roll is the one tool that is not idempotent: the same call rolls again.
+    /// dice_roll and balance_simulate are the tools that are not idempotent: without a seed the same call rolls again.
     /// </summary>
     public static readonly IReadOnlyDictionary<string, (bool ReadOnly, bool Destructive, bool Idempotent, bool OpenWorld)> ExpectedAnnotations =
         new Dictionary<string, (bool, bool, bool, bool)>
         {
             ["balance_compare"] = (true, false, true, false),
             ["balance_dpr"] = (true, false, true, false),
+            ["balance_simulate"] = (true, false, false, false),
             ["dice_odds"] = (true, false, true, false),
             ["dice_roll"] = (true, false, false, false),
             ["encounter_difficulty"] = (true, false, true, false),
@@ -72,6 +74,7 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
         "rules://tables/encounter-multipliers-2014",
         "rules://tables/gwf-expected-values",
         "rules://tables/monster-stats-by-cr-2014",
+        "rules://tables/monster-stats-by-cr-empirical",
         "rules://tables/xp-budget-2024",
         "rules://tables/xp-thresholds-2014",
     ];
@@ -293,9 +296,33 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
         Assert.Contains("campaign tracking", later, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void ServerInstructions_LaterBuildsLine_NamesOnlyCampaignTracking()
+    {
+        // balance_simulate exists now; "Monte Carlo combat simulation arrives in later builds" would tell the model it doesn't.
+        var later = _server.Client.ServerInstructions!.Split('\n').Single(l => l.StartsWith("More tools arrive", StringComparison.Ordinal));
+
+        Assert.Equal("More tools arrive in later builds: campaign tracking.", later);
+    }
+
+    [Fact]
+    public void ServerInstructions_SimulationAndCombatantFormat_AreNamedWithWhatTheyAnswer()
+    {
+        // Under tool search the instructions decide whether "can my party survive this?" reaches balance_simulate at all,
+        // and whether a surprising result leads to the stat block as the simulator read it.
+        var instructions = _server.Client.ServerInstructions!;
+
+        Assert.Contains("- balance_simulate: Monte Carlo fights", instructions, StringComparison.Ordinal);
+        Assert.Contains("class archetypes", instructions, StringComparison.Ordinal);
+        Assert.Contains("format \"combatant\" shows a monster as the simulator reads it", instructions, StringComparison.Ordinal);
+        // F's Phase 4 fix: a verdict compares against the official option.
+        Assert.Contains("for a verdict, baseline = the official option (a feat: the ASI it replaces)", instructions, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("balance_dpr", "build", "target", "levels", "ac_range", "horizon", "rounds", "rest_preset", "encounters_per_day", "short_rests", "rulings")]
     [InlineData("balance_compare", "baseline", "variant", "feature", "target", "levels", "horizon", "rounds", "rest_preset", "encounters_per_day", "short_rests", "rulings")]
+    [InlineData("balance_simulate", "party", "enemies", "iterations", "seed", "round_cap", "edition", "surprise", "enemy_hp", "precision", "replay", "policies", "compare", "rulings")]
     public async Task BalanceTools_Description_NamesEveryArgumentAndGivesAnExample(string name, params string[] arguments)
     {
         // MCP has no input_examples: the description is where the model learns each argument and sees one whole call.
@@ -346,6 +373,48 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
         Assert.False(variant.TryGetProperty("type", out _));
         Assert.Contains("same fields as baseline", variant.GetProperty("description").GetString(), StringComparison.Ordinal);
         Assert.True(schema.GetRawText().Length < 32_000, $"balance_compare's input schema is {schema.GetRawText().Length} characters.");
+    }
+
+    [Fact]
+    public async Task BalanceSimulate_EnemiesAndCompare_ArePublishedUntypedAndTheSchemaStaysUnder32K()
+    {
+        // enemies has party's shape (SameShapeAsAttribute) and compare's feature is a whole build's worth of attacks and
+        // modifiers (CheckedAsAttribute): typed, the two made the definition 31.8 KB of its 32 KB budget. The argument guard
+        // checks both exactly as typed parameters (ToolErrorTests); pinned here so the copies do not creep back.
+        var schema = (await GetToolAsync("balance_simulate")).JsonSchema;
+        var properties = schema.GetProperty("properties");
+
+        foreach (var untyped in new[] { "enemies", "compare" })
+        {
+            Assert.False(properties.GetProperty(untyped).TryGetProperty("properties", out _), untyped);
+            Assert.False(properties.GetProperty(untyped).TryGetProperty("type", out _), untyped);
+        }
+
+        Assert.Contains("same fields as party", properties.GetProperty("enemies").GetProperty("description").GetString(), StringComparison.Ordinal);
+        Assert.Contains("attacks, modifiers", properties.GetProperty("compare").GetProperty("description").GetString(), StringComparison.Ordinal);
+        Assert.Equal(["enemies", "party"], schema.GetProperty("required").EnumerateArray().Select(r => r.GetString()!).Order(StringComparer.Ordinal));
+        Assert.True(schema.GetRawText().Length < 24_000, $"balance_simulate's input schema is {schema.GetRawText().Length} characters.");
+    }
+
+    [Fact]
+    public async Task BalanceSimulate_Description_NamesEveryArchetype()
+    {
+        // The archetypes are how "simulate this fight for a level 5 party" avoids four hand-written builds; a model that
+        // is not told the names guesses them. The description is a constant, so this pins it to the catalogue.
+        var description = (await GetToolAsync("balance_simulate")).Description;
+
+        Assert.All(DndMcp.Domain.Simulation.Archetypes.ArchetypeCatalog.Names, name => Assert.Contains(name, description, StringComparison.Ordinal));
+        Assert.Contains("{\"monster\": \"ogre\", \"count\": 3}", description, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RulesGet_Description_ListsEveryFormatFromOnePlace()
+    {
+        // The formats, the description and the format error share SrdMarkdown.FormatsText, so they cannot disagree.
+        var description = (await GetToolAsync("rules_get")).Description;
+
+        Assert.Contains("- format: " + DndMcp.Formatting.Srd.SrdMarkdown.FormatsText + ".", description, StringComparison.Ordinal);
+        Assert.All(DndMcp.Formatting.Srd.SrdMarkdown.Formats, f => Assert.Contains($"\"{f}\"", DndMcp.Formatting.Srd.SrdMarkdown.FormatsText, StringComparison.Ordinal));
     }
 
     [Fact]

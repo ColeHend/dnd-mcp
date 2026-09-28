@@ -303,7 +303,7 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>
     [InlineData("balance_dpr", """{"build":{"name":"F","level":5,"modifiers":[{"kind":"lucky","attacks":"A"}]}}""",
         "argument 'build' field 'modifiers' item 1 field 'attacks' should be array but was the string \"A\"", BalanceDprParameters)]
     [InlineData("balance_dpr", """{"build":{"name":"F","level":5},"target":{"armor":15}}""",
-        "argument 'target' has unknown field 'armor' (fields: ac, cr, save_bonus, saves, hp, resistances, vulnerabilities, immunities, " +
+        "argument 'target' has unknown field 'armor' (fields: monster, ac, cr, profile, save_bonus, saves, hp, resistances, vulnerabilities, immunities, " +
         "magic_resistance, evasion, condition, cover, legendary_resistance, save_dice, second_target_rate)", BalanceDprParameters)]
     [InlineData("balance_dpr", """{"build":{"name":"F","level":5},"rulings":{"hew_gets_pb":"yes"}}""",
         "argument 'rulings' field 'hew_gets_pb' should be boolean but was the string \"yes\"", BalanceDprParameters)]
@@ -351,6 +351,66 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>
 
         var good = _server.SuccessText(await _server.CallToolJsonAsync("balance_dpr", $$"""{"build":{{Fighter}}}"""));
         Assert.StartsWith("# Damage per round: F", good, StringComparison.Ordinal);
+    }
+
+    private const string BalanceSimulateParameters =
+        "balance_simulate accepts: party (array of object, required), enemies (array of object, required), iterations (integer, " +
+        "optional), seed (integer, optional), round_cap (integer, optional), edition (string, optional), surprise (string, " +
+        "optional), enemy_hp (string, optional), precision (number, optional), replay (integer, optional), policies (object, " +
+        "optional), compare (object, optional), rulings (object, optional).";
+
+    private const string Ogre = """{"monster":"ogre"}""";
+
+    [Theory]
+    [InlineData("""{"party":[OGRE]}""", "missing required argument 'enemies'")]
+    [InlineData("""{"enemies":[OGRE]}""", "missing required argument 'party'")]
+    // enemies is published untyped (party's shape) and checked by the guard exactly as party is.
+    [InlineData("""{"party":[OGRE],"enemies":[{"monster":"ogre","cuont":3}]}""",
+        "argument 'enemies' item 1 has unknown field 'cuont' (fields: name, monster, build, archetype, level, edition, hp, ac, " +
+        "save_proficiencies, saves, initiative_bonus, position, count, death_saves)")]
+    [InlineData("""{"party":[{"monster":"ogre","cuont":3}],"enemies":[OGRE]}""",
+        "argument 'party' item 1 has unknown field 'cuont' (fields: name, monster, build, archetype, level, edition, hp, ac, " +
+        "save_proficiencies, saves, initiative_bonus, position, count, death_saves)")]
+    [InlineData("""{"party":[OGRE],"enemies":{"monster":"ogre"}}""", "argument 'enemies' should be array but was an object")]
+    [InlineData("""{"party":[OGRE],"enemies":["ogre"]}""", "argument 'enemies' item 1 should be object but was the string \"ogre\"")]
+    [InlineData("""{"party":[OGRE],"enemies":[{"monster":"ogre","count":"three"}]}""", "argument 'enemies' item 1 field 'count' should be integer but was the string \"three\"")]
+    [InlineData("""{"party":[OGRE],"enemies":[{"monster":"ogre","build":{"name":"B","attacks":[{"name":"A","cuont":2}]}}]}""",
+        "argument 'enemies' item 1 field 'build' field 'attacks' item 1 has unknown field 'cuont' (fields: name, count, action, to_hit, " +
+        "damage, damage_type, ability_to_damage, properties, offhand, mastery, cantrip, from_level, until_level)")]
+    // compare is published untyped (its feature is a build's worth of schema) and checked as CompareSpec.
+    [InlineData("""{"party":[OGRE],"enemies":[OGRE],"compare":"GWM"}""", "argument 'compare' should be object but was the string \"GWM\"")]
+    [InlineData("""{"party":[OGRE],"enemies":[OGRE],"compare":{"member":"one"}}""", "argument 'compare' field 'member' should be integer but was the string \"one\"")]
+    [InlineData("""{"party":[OGRE],"enemies":[OGRE],"compare":{"membr":1}}""", "argument 'compare' has unknown field 'membr' (fields: member, feature)")]
+    [InlineData("""{"party":[OGRE],"enemies":[OGRE],"compare":{"member":1,"feature":{"name":"X","modifiers":[{"knd":"lucky"}]}}}""",
+        "argument 'compare' field 'feature' field 'modifiers' item 1 has unknown field 'knd'")]
+    // seed is a ulong: 0 to 18446744073709551615, as a number or a decimal string.
+    [InlineData("""{"party":[OGRE],"enemies":[OGRE],"seed":-1}""", "argument 'seed' was the number -1, which is too small to be valid")]
+    [InlineData("""{"party":[OGRE],"enemies":[OGRE],"seed":"18446744073709551616"}""", "argument 'seed' was the string \"18446744073709551616\", which is too large to be valid")]
+    [InlineData("""{"party":[OGRE],"enemies":[OGRE],"seed":1.5}""", "argument 'seed' should be integer or null but was the number 1.5")]
+    [InlineData("""{"party":[OGRE],"enemies":[OGRE],"seed":"lucky"}""", "argument 'seed' should be integer or null but was the string \"lucky\"")]
+    [InlineData("""{"party":[OGRE],"enemies":[OGRE],"policies":{"party":"focus_fire","enemy":"spread"}}""",
+        "argument 'policies' has unknown field 'enemy' (fields: party, enemies, legendary_resistance, healing, finish_downed, pcs_win_ties)")]
+    public async Task CallTool_BalanceSimulateArgumentOfTheWrongShape_NamesTheFieldAndListsAcceptedParameters(string template, string problem)
+    {
+        var text = _server.ErrorText(await _server.CallToolJsonAsync("balance_simulate", template.Replace("OGRE", Ogre, StringComparison.Ordinal)));
+
+        Assert.StartsWith("An error occurred invoking 'balance_simulate': Invalid arguments: " + problem, text, StringComparison.Ordinal);
+        Assert.EndsWith(". " + BalanceSimulateParameters, text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    // HUGE is 100,000 characters. A monster name is echoed cut, and the lookup's close names do not grow with it.
+    [InlineData("""{"party":[{"monster":"ogre"}],"enemies":[{"monster":"HUGE"}]}""")]
+    [InlineData("""{"party":[{"monster":"ogre"}],"enemies":[{"monster":"ogre","name":"HUGE"}],"iterations":0}""")]
+    [InlineData("""{"party":[{"monster":"ogre"}],"enemies":[{"monster":"ogre"}],"surprise":"HUGE"}""")]
+    public async Task CallTool_HugeArgumentInASimulateError_IsEchoedShortened(string argumentsTemplate)
+    {
+        var argumentsJson = argumentsTemplate.Replace("HUGE", new string('x', 100_000), StringComparison.Ordinal);
+
+        var error = _server.ErrorText(await _server.CallToolJsonAsync("balance_simulate", argumentsJson));
+
+        Assert.True(error.Length < 1_500, $"{error.Length} characters: {error[..Math.Min(300, error.Length)]}");
+        Assert.Contains("…", error, StringComparison.Ordinal);
     }
 
     [Theory]

@@ -133,7 +133,7 @@ public sealed class BuildSpecValidationTests
     [InlineData("""[{ "name": "A", "damage": true }]""", "damage must be dice such as \"2d6\" or \"1d8+1\", or a step map by level such as {\"1\": \"1d8\", \"5\": \"2d8\"}, but was the boolean true.")]
     [InlineData("""[{ "name": "A", "damage": {"1": "1d8", "5": "2d6kh1"} }]""", "damage at level 5 \"2d6kh1\" keeps or drops dice")]
     [InlineData("""[{ "name": "A", "damage": "1d8", "damage_type": "sonic" }]""", "damage_type \"sonic\" is not a damage type; give acid, bludgeoning")]
-    [InlineData("""[{ "name": "A", "damage": "1d8", "properties": ["magic"] }]""", "properties has \"magic\", which is not an attack property; they are melee, ranged, spell, heavy, light, finesse, two-handed, versatile, reach, thrown.")]
+    [InlineData("""[{ "name": "A", "damage": "1d8", "properties": ["magic"] }]""", "properties has \"magic\", which is not an attack property; they are melee, ranged, spell, heavy, light, finesse, two-handed, versatile, reach, thrown, magical, silvered, adamantine.")]
     [InlineData("""[{ "name": "A", "damage": "1d8", "properties": ["melee", "ranged"] }]""", "properties has both melee and ranged; an attack is one or the other")]
     [InlineData("""[{ "name": "A", "damage": "1d8", "mastery": "bleed" }]""", "mastery \"bleed\" is not a weapon mastery; give graze, vex, topple, sap, cleave, nick, push or slow.")]
     [InlineData("""[{ "name": "A", "damage": "1d8", "cantrip": "levels" }]""", "cantrip \"levels\" is not a cantrip scaling; give dice or beams.")]
@@ -143,6 +143,40 @@ public sealed class BuildSpecValidationTests
     public void Validate_BadAttack_IsRefusedWithWhereAndWhy(string attacks, string why)
     {
         Assert.Contains(why, Problem(With(attacks)), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("""[{ "name": "A", "damage": "2d6+str" }]""", "attacks item 1 (A): damage \"2d6+str\" has \"str\": the ability modifier is added for you (to_hit ability; ability_to_damage, default true)")]
+    [InlineData("""[{ "name": "A", "damage": "1d8+PB" }]""", "has \"PB\": the ability modifier is added for you (to_hit ability; ability_to_damage, default true); proficiency bonus is a bonus_damage modifier with amount \"pb\"")]
+    [InlineData("""[{ "name": "A", "damage": "1d10 force" }]""", "has \"force\": the ability modifier is added for you (to_hit ability; ability_to_damage, default true); proficiency bonus is a bonus_damage modifier with amount \"pb\"; the damage type goes in damage_type. Damage is plain dice and whole numbers joined by + or -, e.g. \"2d6\", \"1d8+1\" or \"1d10+1d6\".")]
+    [InlineData("""[{ "name": "A", "damage": {"1": "1d8", "5": "2d6+str"} }]""", "attacks item 1 (A): damage at level 5 \"2d6+str\" has \"str\": the ability modifier is added for you")]
+    public void Validate_WordInAttackDamage_SaysWhereItBelongs(string attacks, string why)
+    {
+        Assert.Contains(why, Problem(With(attacks)), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("""{ "kind": "extra_damage", "dice": "1d6 fire" }""", "dice \"1d6 fire\" has \"fire\": a flat bonus, \"pb\" or an ability modifier goes in amount; the damage type goes in type.")]
+    [InlineData("""{ "kind": "extra_damage", "dice": "1d6+pb" }""", "dice \"1d6+pb\" has \"pb\": a flat bonus, \"pb\" or an ability modifier goes in amount")]
+    [InlineData("""{ "kind": "save_effect", "ability": "dex", "dc": 13, "dice": "8d6 fire", "action_cost": "none" }""", "has \"fire\": a flat bonus, \"pb\" or an ability modifier goes in amount; the damage type goes in type.")]
+    [InlineData("""{ "kind": "to_hit", "dice": "1d4+pb" }""", "dice \"1d4+pb\" has \"pb\": put a flat bonus in amount. These dice are plain dice joined by + or -")]
+    public void Validate_WordInModifierDice_SaysWhereItBelongs(string modifier, string why)
+    {
+        var message = Problem(WithModifier(modifier));
+
+        Assert.Contains(why, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("damage_type", message, StringComparison.Ordinal); // a modifier's type field is "type"
+    }
+
+    [Fact]
+    public void Validate_DamageSyntaxError_DropsTheDiceGrammarsRefusedExamples()
+    {
+        // The dice_roll grammar's examples ("4d6kh3", "adv+5", "8d6>=30") are all forms this field refuses: replaced by its own.
+        var message = Problem(With("""[{ "name": "A", "damage": "2d6 +" }]"""));
+
+        Assert.Contains("Damage is plain dice and whole numbers joined by + or -, e.g. \"2d6\", \"1d8+1\" or \"1d10+1d6\".", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("adv+5", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("4d6kh3", message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -240,6 +274,17 @@ public sealed class BuildSpecValidationTests
     [InlineData("""{ "kind": "condition_on_hit", "condition": "prone", "ability": "str", "when": "on_crit" }""", "when \"on_crit\" is not a when; give every_hit or first_hit_per_turn.")]
     [InlineData("""{ "kind": "condition_on_hit", "condition": "prone", "ability": "str", "dc_bonus": 1 }""", "(condition_on_hit): does not take \"dc_bonus\"")]
     [InlineData("""{ "kind": "resistance", "type": "sonic" }""", "type \"sonic\" is not a damage type")]
+    [InlineData("""{ "kind": "heal" }""", "modifiers item 1 (heal): heal needs dice (e.g. \"2d4\" for Healing Word) or amount")]
+    [InlineData("""{ "kind": "heal", "dice": "2d4", "action_cost": "none" }""", "action_cost \"none\" is not an action_cost; give action or bonus_action.")]
+    [InlineData("""{ "kind": "heal", "dice": "2d4", "targets": 7 }""", "targets is 7; it is 1 to 6.")]
+    [InlineData("""{ "kind": "heal", "dice": "2d4", "self_only": true, "targets": 2 }""", "self_only heals only the creature itself, so it takes no targets above 1")]
+    [InlineData("""{ "kind": "heal", "dice": "2d4", "setup": "action" }""", "heal takes no setup: it is used when it is needed")]
+    [InlineData("""{ "kind": "heal", "dice": "2d4", "when": "every_hit" }""", "(heal): does not take \"when\"; heal takes dice, amount, action_cost, targets, self_only, resource")]
+    [InlineData("""{ "kind": "heal", "dice": "2d4+wis" }""", "dice \"2d4+wis\" has \"wis\": a flat bonus, \"pb\" or an ability modifier (\"wis\") goes in amount.")]
+    [InlineData("""{ "kind": "condition_on_hit", "condition": "prone", "ability": "str", "duration": "forever" }""", "duration \"forever\" is not a duration; give start_of_next_turn, end_of_next_turn, save_ends or fight.")]
+    [InlineData("""{ "kind": "save_effect", "ability": "dex", "dc": 13, "dice": "1d6", "duration": "fight", "action_cost": "none" }""", "duration is how long its condition lasts, so it needs a condition")]
+    [InlineData("""{ "kind": "extra_damage", "dice": "1d6", "duration": "fight" }""", "(extra_damage): does not take \"duration\"")]
+    [InlineData("""{ "kind": "extra_attack", "attack": "Longbow", "action": "reaction", "trigger": "crit_or_kill", "trigger_probability": 0.5 }""", "trigger \"crit_or_kill\" is only for bonus_action extra attacks")]
     public void Validate_BadModifier_IsRefusedWithWhereAndWhy(string modifier, string why)
     {
         Assert.Contains(why, Problem(WithModifier(modifier)), StringComparison.Ordinal);
@@ -265,6 +310,11 @@ public sealed class BuildSpecValidationTests
     [InlineData("""{ "kind": "condition_on_hit", "condition": "stunned", "ability": "con", "dc_ability": "wis", "when": "first_hit_per_turn", "policy": "crits_only", "magical": true, "resource": {"uses": 5, "per": "short_rest"} }""")]
     [InlineData("""{ "kind": "ignore_cover", "attacks": ["Longbow"] }""")]
     [InlineData("""{ "kind": "temp_hp", "amount": {"1": 5, "10": 10}, "resource": {"uses": 1, "per": "short_rest"} }""")]
+    [InlineData("""{ "kind": "heal", "name": "Mass Healing Word", "dice": {"1": "1d4", "9": "2d4"}, "amount": "wis", "action_cost": "Bonus Action", "targets": 6, "resource": {"uses": 1, "per": "long_rest"}, "concentration": false }""")]
+    [InlineData("""{ "kind": "heal", "name": "Second Wind", "dice": "1d10", "amount": {"1": 1, "5": 5}, "self_only": true, "targets": 1 }""")]
+    [InlineData("""{ "kind": "condition_on_hit", "condition": "stunned", "ability": "con", "dc": 15, "duration": "End of Next Turn" }""")]
+    [InlineData("""{ "kind": "save_effect", "ability": "wis", "dc": 15, "condition": "paralyzed", "duration": "save_ends", "action_cost": "bonus_action" }""")]
+    [InlineData("""{ "kind": "extra_attack", "attack": "Greatsword", "action": "bonus_action", "trigger": "crit_or_kill" }""")]
     public void Validate_EveryKindAtItsFullest_IsAccepted(string modifier)
     {
         BuildResolver.Validate(WithModifier(modifier));

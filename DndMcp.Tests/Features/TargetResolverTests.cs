@@ -1,6 +1,7 @@
 using DndMcp.Domain.Core;
 using DndMcp.Domain.Encounters;
 using DndMcp.Domain.Features;
+using DndMcp.Domain.Simulation;
 using Xunit;
 using static DndMcp.Tests.Features.FeatureTestBuilds;
 
@@ -9,7 +10,10 @@ namespace DndMcp.Tests.Features;
 /// <summary>
 /// Invariant: a target resolves to concrete numbers with their sources — with nothing given, the DMG 2014 row for
 /// CR = level and the typical save bonus for that CR (cited as The Finished Book's, never as the DMG's); a given cr picks
-/// its row; a given ac keeps saves on the CR = level row and says so; cover stays separate from AC and saves.
+/// its row; a given ac keeps saves on the CR = level row and says so; cover stays separate from AC and saves. A stat block
+/// target takes every number from the stat block (qualified adjustments whole, the non-lair Legendary Resistance), each
+/// field given overrides it in one note, and a monster named without its stat block is refused. The empirical profiles
+/// are the edition's SRD medians for the CR, rounded half up, with a note giving the unrounded medians and the DMG row.
 /// </summary>
 public sealed class TargetResolverTests
 {
@@ -37,6 +41,8 @@ public sealed class TargetResolverTests
         Assert.Equal(ChallengeRating.Parse(level.ToString(System.Globalization.CultureInfo.InvariantCulture)), target.ChallengeRating);
         Assert.Equal(ac, target.Row!.ArmorClass);
         Assert.Null(target.HitPoints);
+        Assert.Equal("dmg2014", target.Profile);
+        Assert.Null(target.Monster);
         Assert.Empty(target.Notes);
     }
 
@@ -246,5 +252,297 @@ public sealed class TargetResolverTests
             Assert.Single(warnings));
         Assert.Empty(TargetResolver.Warnings(build, TargetResolver.Resolve(null, 5)));
         Assert.Empty(TargetResolver.Warnings(BuildResolver.Resolve(Build(Fighter2014GwmJson), 5), TargetResolver.Resolve(Target("""{ "immunities": ["fire"] }"""), 5)));
+    }
+
+    [Fact]
+    public void Warnings_UntypedRiderOnTypedAttacksOnly_IsNotWarned()
+    {
+        // The rider deals each attack's own type (settled), so the resistance applies to it: nothing to warn about.
+        var build = BuildResolver.Resolve(With(
+            """[{ "name": "Sword", "damage": "1d8", "damage_type": "slashing" }, { "name": "Bow", "damage": "1d8", "damage_type": "piercing", "properties": ["ranged"] }]""",
+            """[{ "kind": "extra_damage", "name": "Hunter's Mark", "dice": "1d6" }]"""), 5);
+
+        Assert.Empty(TargetResolver.Warnings(build, TargetResolver.Resolve(Target("""{ "resistances": ["slashing"] }"""), 5)));
+    }
+
+    // ------------------------------------------------------------------------------------------------------------------
+    // Stat block targets
+    // ------------------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Resolve_StatBlock_TakesEveryNumberFromIt()
+    {
+        var target = TargetResolver.Resolve(Target("""{ "monster": "werewolf" }"""), 5, TargetStatBlocks.WerewolfLike());
+
+        Assert.Equal((11, "Werewolf stat block"), (target.ArmorClass, target.ArmorClassSource));
+        Assert.Equal([2, 1, 2, 0, 0, 0], DslValues.Abilities.All.Select(target.SaveBonus));
+        Assert.Equal("Werewolf stat block", target.SaveBonusSource);
+        Assert.Equal(58, target.HitPoints);
+        Assert.Equal(["cold"], target.Resistances);
+        Assert.Equal(["bludgeoning", "piercing", "slashing"], target.QualifiedResistances.Select(r => r.DamageType));
+        Assert.Equal("Werewolf (2014 SRD stat block)", target.MonsterLabel);
+        Assert.Equal("3", target.ChallengeRating.ToString());
+        Assert.Null(target.Row);
+        Assert.Null(target.Profile);
+        Assert.False(target.MagicResistance);
+        Assert.Equal(0, target.LegendaryResistance);
+        Assert.Contains("Werewolf's stat block also gives AC 12 in wolf or hybrid form; its first AC, 11, is used (give ac for another).", target.Notes);
+        Assert.Contains(
+            "Werewolf is CR 3, below level 5: the level's reference target (CR = level, the DMG 2014 row for CR 5) has AC 15 and +2 on every save.",
+            target.Notes);
+    }
+
+    [Theory]
+    [InlineData(false, false, false, true)]
+    [InlineData(true, false, false, false)]
+    [InlineData(false, true, false, false)]
+    [InlineData(false, false, true, true)]
+    [InlineData(true, true, true, false)]
+    public void IsResistant_QualifiedEntry_AppliesOnlyToWhatTheQualifierAdmits(bool magical, bool silvered, bool adamantine, bool resisted)
+    {
+        var target = TargetResolver.Resolve(null, 5, TargetStatBlocks.WerewolfLike());
+        var properties = new DamageProperties(magical, silvered, adamantine);
+
+        Assert.Equal(resisted, target.IsResistant("slashing", properties));
+        Assert.True(target.IsResistant("cold", properties)); // unqualified: always
+        Assert.False(target.IsResistant("fire", properties));
+        Assert.False(target.IsResistant(null, properties));
+        Assert.True(target.IsResistant("piercing")); // the one-argument form asks about plain damage
+    }
+
+    [Fact]
+    public void Resolve_LegendaryCaster_ReadsTraitsAndTheNonLairLegendaryResistance()
+    {
+        var target = TargetResolver.Resolve(null, 9, TargetStatBlocks.LegendaryCaster());
+
+        Assert.True(target.MagicResistance);
+        Assert.False(target.Evasion);
+        Assert.Equal(3, target.LegendaryResistance);
+        Assert.Equal(["frightened"], target.ConditionImmunities);
+        Assert.True(target.IsImmuneToCondition("frightened"));
+        Assert.False(target.IsImmuneToCondition("stunned"));
+        Assert.Contains("Archlich's Legendary Resistance is 3 a day (4 in its lair); the target is not in its lair here, so it has 3.", target.Notes);
+        Assert.Contains(target.Notes, n => n.StartsWith("Archlich is CR 17, above level 9:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Resolve_EvasionTrait_GivesEvasion()
+    {
+        var rogue = TargetStatBlocks.Create(
+            "Spy", "2014", "1", ac: 12, hp: 27, abilities: new ResolvedAbilities(10, 15, 10, 12, 14, 16),
+            traits: [new StatBlockTrait { Name = "Evasion", Kind = StatBlockValues.TraitKinds.Evasion, Text = "Evasion." }]);
+
+        var target = TargetResolver.Resolve(null, 1, rogue);
+
+        Assert.True(target.Evasion);
+        Assert.DoesNotContain(target.Notes, n => n.Contains("is CR", StringComparison.Ordinal)); // CR 1 at level 1: no reference note
+    }
+
+    [Fact]
+    public void Resolve_ExplicitFields_OverrideTheStatBlockInOneNote()
+    {
+        var target = TargetResolver.Resolve(Target("""
+            { "monster": "werewolf", "ac": 13, "save_bonus": 3, "saves": {"dex": 7}, "hp": 100, "resistances": ["fire"],
+              "immunities": ["poison"], "magic_resistance": true, "evasion": true, "legendary_resistance": 2 }
+            """), 3, TargetStatBlocks.WerewolfLike());
+
+        Assert.Equal((13, "given"), (target.ArmorClass, target.ArmorClassSource));
+        Assert.Equal((7, 3), (target.SaveBonus("dex"), target.SaveBonus("wis")));
+        Assert.Equal("given per ability; the rest save_bonus +3", target.SaveBonusSource);
+        Assert.Equal(100, target.HitPoints);
+        Assert.Equal(["fire"], target.Resistances);
+        Assert.Empty(target.QualifiedResistances);
+        Assert.False(target.IsResistant("slashing"));
+        Assert.Equal(["poison"], target.Immunities);
+        Assert.Equal((true, true, 2), (target.MagicResistance, target.Evasion, target.LegendaryResistance));
+        Assert.Contains(
+            "Given, overriding the Werewolf stat block: ac 13 (stat block 11); save_bonus +3 (stat block Str +2, Dex +1, Con +2, Int +0, " +
+            "Wis +0, Cha +0); saves dex +7 (stat block +1); hp 100 (stat block 58); resistances fire (stat block cold; bludgeoning, " +
+            "piercing and slashing from nonmagical attacks that aren't silvered); immunities poison (stat block none); " +
+            "magic_resistance true (stat block false); evasion true (stat block false); legendary_resistance 2 (stat block 0).",
+            target.Notes);
+        Assert.DoesNotContain(target.Notes, n => n.StartsWith("Werewolf's stat block also gives AC", StringComparison.Ordinal)); // ac given
+        Assert.DoesNotContain(target.Notes, n => n.Contains("is CR 3", StringComparison.Ordinal)); // CR 3 at level 3
+    }
+
+    [Fact]
+    public void Resolve_StartingConditionTheStatBlockIsImmuneTo_IsKeptWithANote()
+    {
+        var target = TargetResolver.Resolve(Target("""{ "condition": "stunned" }"""), 4, TargetStatBlocks.StunImmune());
+
+        Assert.Equal("stunned", target.Condition);
+        Assert.Contains(target.Notes, n => n.StartsWith("Helmed Horror is immune to the stunned condition, but condition stunned was given", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Resolve_MonsterWithoutItsStatBlock_IsRefusedNotDefaulted()
+    {
+        var ex = Assert.Throws<DndInputException>(() => TargetResolver.Resolve(Target("""{ "monster": "ogre", "ac": 11 }"""), 5));
+
+        Assert.StartsWith("target monster \"ogre\" was not looked up: this call has no stat block for it", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Resolve_StatBlockPassedWithCrButNoMonsterText_IsRefused()
+    {
+        var ex = Assert.Throws<DndInputException>(() => TargetResolver.Resolve(Target("""{ "cr": 5 }"""), 5, TargetStatBlocks.Ogre()));
+
+        Assert.Equal("Invalid target: the Ogre stat block replaces the cr row; give ac, saves or save_bonus to change its numbers instead.", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("""{ "monster": "ogre", "cr": 2 }""", "give monster or cr, not both: the stat block has its own CR")]
+    [InlineData("""{ "monster": "ogre", "profile": "dmg2014" }""", "give monster or profile, not both")]
+    [InlineData("""{ "monster": "" }""", "monster \"\" is not a monster ref or name; give one line of at most 100 characters")]
+    [InlineData("""{ "monster": "ogre\nand a note" }""", "monster \"ogre\\nand a note\" is not a monster ref or name")]
+    [InlineData("""{ "profile": "mm2025" }""", "profile \"mm2025\" is not a profile; give dmg2014, mm2014 or mm2024.")]
+    public void Validate_MonsterAndProfile_AreRefusedWithWhy(string json, string why)
+    {
+        var ex = Assert.Throws<DndInputException>(() => TargetResolver.Validate(Target(json)));
+
+        Assert.StartsWith("Invalid target: " + why, ex.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("dmg2014")]
+    [InlineData("DMG-2014")]
+    public void Resolve_Dmg2014Profile_IsTheDefaultTarget(string profile)
+    {
+        var given = TargetResolver.Resolve(Target($$"""{ "profile": "{{profile}}" }"""), 7);
+        var none = TargetResolver.Resolve(null, 7);
+
+        Assert.Equal((none.ArmorClass, none.ArmorClassSource, none.SaveBonusSource), (given.ArmorClass, given.ArmorClassSource, given.SaveBonusSource));
+        Assert.Equal("dmg2014", given.Profile);
+        Assert.Equal(none.Row, given.Row);
+    }
+
+    [Theory]
+    [InlineData("mm2024", 5, 15, 1, "2024 SRD monster medians for CR 5 (25 monsters; CR = level 5)", "the median of the 2024 SRD's CR 5 monsters' mean save bonuses (0.83, rounded)")]
+    [InlineData("mm2014", 5, 15, 1, "2014 SRD monster medians for CR 5 (25 monsters; CR = level 5)", "the median of the 2014 SRD's CR 5 monsters' mean save bonuses (0.83, rounded)")]
+    [InlineData("mm2014", 4, 12, 1, "2014 SRD monster medians for CR 4 (11 monsters; CR = level 4)", "the median of the 2014 SRD's CR 4 monsters' mean save bonuses (0.67, rounded)")]
+    [InlineData("mm2014", 1, 12, 0, "2014 SRD monster medians for CR 1 (25 monsters; CR = level 1)", "the median of the 2014 SRD's CR 1 monsters' mean save bonuses (0.33, rounded)")]
+    [InlineData("mm2024", 20, 20, 6, "2024 SRD monster medians for CR 20 (3 monsters; CR = level 20)", "the median of the 2024 SRD's CR 20 monsters' mean save bonuses (6.33, rounded)")]
+    [InlineData("mm2024", 18, 19, 7, "2024 SRD monster medians for CR 18 (no 2024 SRD monster has CR 18: interpolated between CR 17 and CR 19; CR = level 18)", "the 2024 SRD monsters' median mean save bonus interpolated to CR 18 (6.75, rounded)")]
+    public void Resolve_EmpiricalProfile_IsTheEditionsMediansRounded(string profile, int level, int ac, int save, string acSource, string saveText)
+    {
+        var target = TargetResolver.Resolve(Target($$"""{ "profile": "{{profile}}" }"""), level);
+
+        Assert.Equal((ac, acSource), (target.ArmorClass, target.ArmorClassSource));
+        Assert.All(DslValues.Abilities.All, a => Assert.Equal(save, target.SaveBonus(a)));
+        Assert.Equal($"{(save >= 0 ? "+" : "")}{save}, {saveText}", target.SaveBonusSource);
+        Assert.Equal(profile, target.Profile);
+        Assert.Null(target.Row); // no DMG row: results cite the empirical table instead
+        Assert.NotNull(target.ProfileRow!.EmpiricalRow);
+        Assert.True(target.CrFollowsLevel);
+        Assert.Equal(level.ToString(System.Globalization.CultureInfo.InvariantCulture), target.ChallengeRating.ToString());
+    }
+
+    [Fact]
+    public void Resolve_EmpiricalProfile_MatchesTheTableForEveryCr()
+    {
+        foreach (var edition in new[] { "2014", "2024" })
+        {
+            foreach (var cr in ChallengeRating.All)
+            {
+                var row = MonsterStatsEmpirical.MonsterStats(edition, cr);
+                var target = TargetResolver.Resolve(Target($$"""{ "profile": "mm{{edition}}", "cr": "{{cr}}" }"""), 1);
+
+                Assert.Equal(TargetProfiles.RoundMedian(row.ArmorClass), target.ArmorClass);
+                Assert.Equal(TargetProfiles.RoundMedian(row.MeanSaveBonus), target.SaveBonus("wis"));
+                Assert.Equal(row.IsInterpolated, target.ProfileRow!.Basis!.StartsWith("no ", StringComparison.Ordinal));
+                Assert.False(target.CrFollowsLevel);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(14.5, 15)]
+    [InlineData(14.49, 14)]
+    [InlineData(0.5, 1)]
+    [InlineData(-0.5, 0)]
+    [InlineData(-0.51, -1)]
+    [InlineData(0.8333, 1)]
+    [InlineData(-1.3333, -1)]
+    [InlineData(12.0, 12)]
+    public void RoundMedian_HalfRoundsTowardTheHarderTarget(double median, int expected)
+    {
+        Assert.Equal(expected, TargetProfiles.RoundMedian(median));
+    }
+
+    [Fact]
+    public void Resolve_EmpiricalProfile_NotesTheUnroundedMediansAndTheDmgRow()
+    {
+        var target = TargetResolver.Resolve(Target("""{ "profile": "mm2014" }"""), 4);
+
+        Assert.Equal(
+            "Target profile mm2014: AC 12 (median 12) and +1 on every save (median mean save bonus 0.67), from the 2014 SRD monster " +
+            "medians for CR 4 (11 monsters), each rounded to a whole number with a half rounded up. The default profile, the DMG 2014 " +
+            "row for CR 4, gives AC 14 and +2 on saves.",
+            Assert.Single(target.Notes));
+    }
+
+    [Fact]
+    public void Resolve_EmpiricalProfileWithAcGiven_TakesOnlyTheSavesFromTheTable()
+    {
+        var target = TargetResolver.Resolve(Target("""{ "profile": "mm2024", "ac": 17, "saves": {"dex": 4} }"""), 9);
+
+        Assert.Equal((17, "given"), (target.ArmorClass, target.ArmorClassSource));
+        Assert.Equal((4, 4), (target.SaveBonus("dex"), target.SaveBonus("wis"))); // CR 9 median mean save bonus 4.33
+        Assert.StartsWith("given per ability; the rest +4, the median of the 2024 SRD's CR 9 monsters' mean save bonuses (4.33, rounded)", target.SaveBonusSource, StringComparison.Ordinal);
+        Assert.Contains(
+            "Target profile mm2024: +4 on the saves not given (median mean save bonus 4.33), from the 2024 SRD monster medians for CR 9 " +
+            "(8 monsters), each rounded to a whole number with a half rounded up. The default profile, the DMG 2014 row for CR 9, gives +4 on saves.",
+            target.Notes);
+        Assert.Contains(target.Notes, n => n.StartsWith("Only ac was given, so the saves use CR 9", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Resolve_Dmg2014Profile_HasNoProfileNote()
+    {
+        Assert.Empty(TargetResolver.Resolve(Target("""{ "profile": "dmg2014" }"""), 4).Notes);
+    }
+
+    [Fact]
+    public void Resolve_EmpiricalProfileWithEverythingGiven_NeedsNoTable()
+    {
+        var target = TargetResolver.Resolve(Target("""{ "profile": "mm2024", "ac": 15, "save_bonus": 2 }"""), 5);
+
+        Assert.Equal((15, 2), (target.ArmorClass, target.SaveBonus("con")));
+        Assert.Null(target.Profile);
+        Assert.Null(target.ChallengeRating);
+    }
+
+    [Fact]
+    public void DamageQualifierText_Describe_GroupsTypesByQualifier()
+    {
+        IReadOnlyList<DamageAdjustment> qualified =
+        [
+            new("bludgeoning", StatBlockValues.DamageQualifiers.Nonmagical, "b"),
+            new("piercing", StatBlockValues.DamageQualifiers.Nonmagical, "p"),
+            new("slashing", StatBlockValues.DamageQualifiers.NonmagicalNotAdamantine, "s"),
+            new("fire", StatBlockValues.DamageQualifiers.Other, "fire while in dim light"),
+        ];
+
+        Assert.Equal(
+            "cold and lightning; bludgeoning and piercing from nonmagical attacks; slashing from nonmagical attacks that aren't adamantine; " +
+            "fire (\"fire while in dim light\", applied always)",
+            DamageQualifierText.Describe(["cold", "lightning"], qualified));
+        Assert.Equal("none", DamageQualifierText.Describe([], []));
+    }
+
+    [Fact]
+    public void Resolve_OtherQualifier_AlwaysAppliesAndIsNoted()
+    {
+        var odd = TargetStatBlocks.Create(
+            "Shade", "2014", "2", ac: 12, hp: 20, abilities: new ResolvedAbilities(10, 10, 10, 10, 10, 10),
+            resistances: [new DamageAdjustment("slashing", StatBlockValues.DamageQualifiers.Other, "slashing while in dim light")]);
+        var build = BuildResolver.Resolve(Build(Fighter2014GwmJson), 2);
+
+        var target = TargetResolver.Resolve(null, 2, odd);
+
+        Assert.True(target.IsResistant("slashing", new DamageProperties(true, true, true)));
+        Assert.Equal(
+            "Resistance to slashing (\"slashing while in dim light\", applied always): its condition is not modelled, so it applies to Greatsword every time.",
+            Assert.Single(TargetResolver.AdjustmentNotes(build, target)));
     }
 }

@@ -1,0 +1,87 @@
+{
+  "acid-arrow": {
+    "damage": [{"dice": "4d4", "type": "acid"}, {"dice": "2d4", "type": "acid"}],
+    "upcast": [{"dice": "1d4", "type": "acid"}, {"dice": "1d4", "type": "acid"}],
+    "note": "The 2d4 acid damage at the end of the target's next turn is dealt with the hit; a miss's half damage is not simulated."
+  },
+  "blade-barrier": {
+    "approximation": "The wall (100 feet long, counted as a line) damages creatures that enter or start their turn in it; the simulator deals its damage once, when it is cast."
+  },
+  "blindness-deafness": {
+    "kind": "save", "save": "con", "on_success": "none",
+    "condition": {"condition": "blinded", "duration": "save_ends", "rounds": 10},
+    "upcast_targets": 1,
+    "note": "The caster blinds rather than deafens: deafness has no effect in the simulator."
+  },
+  "cloudkill": {
+    "approximation": "The fog lingers and damages creatures that enter or start their turn in it; the simulator deals its damage once, when it is cast."
+  },
+  "disintegrate": {
+    "no_area": true,
+    "note": "One creature: the record's 10-foot cube is the portion of a Huge object it destroys."
+  },
+  "eldritch-blast": {
+    "cantrip": "beams"
+  },
+  "entangle": {
+    "kind": "save", "save": "str", "on_success": "none",
+    "condition": {"condition": "restrained", "duration": "until_escape"},
+    "approximation": "The plants restrain creatures in the area when it is cast; the escape check is Strength only in the text, where the simulator lets the target use its better of Strength and Dexterity."
+  },
+  "flame-strike": {
+    "area": {"shape": "cylinder", "size": 10},
+    "note": "A 10-foot-radius cylinder: the record's 40 is its height."
+  },
+  "guiding-bolt": {
+    "note": "The advantage it grants on the next attack roll against the target is not simulated."
+  },
+  "hold-monster": {
+    "kind": "save", "save": "wis", "on_success": "none",
+    "condition": {"condition": "paralyzed", "duration": "save_ends", "rounds": 10},
+    "upcast_targets": 1,
+    "note": "It has no effect on undead; the simulator does not check creature types."
+  },
+  "hold-person": {
+    "kind": "save", "save": "wis", "on_success": "none",
+    "condition": {"condition": "paralyzed", "duration": "save_ends", "rounds": 10},
+    "upcast_targets": 1,
+    "note": "It targets humanoids only; the simulator does not check creature types."
+  },
+  "insect-plague": {
+    "approximation": "The swarm lingers and damages creatures that enter or stay in it; the simulator deals its damage once, when it is cast."
+  },
+  "magic-missile": {
+    "kind": "auto_hit",
+    "damage": [{"dice": "1d4+1", "type": "force"}],
+    "targets": 3, "upcast_targets": 1,
+    "note": "Each dart hits a creature automatically; the darts are spread over the targets the policy picks."
+  },
+  "scorching-ray": {
+    "kind": "attack", "attack": "ranged",
+    "damage": [{"dice": "2d6", "type": "fire"}],
+    "targets": 3, "upcast_targets": 1,
+    "note": "One attack roll per ray."
+  },
+  "shield": {
+    "kind": "parry", "ac_bonus": 5,
+    "note": "Its +5 AC lasts until the start of the caster's next turn; the simulator applies it to the triggering attack only."
+  },
+  "spirit-guardians": {
+    "kind": "save", "save": "wis", "on_success": "half",
+    "damage": [{"dice": "3d8", "type": "radiant"}],
+    "upcast": [{"dice": "1d8", "type": "radiant"}],
+    "area": {"shape": "emanation", "size": 15},
+    "approximation": "The spirits damage creatures that enter or start their turn within 15 feet for the duration; the simulator deals the damage once, when it is cast (radiant; an evil caster's is necrotic)."
+  },
+  "spiritual-weapon": {
+    "note": "Cast as a bonus action; its repeat attacks on later turns are not simulated."
+  },
+  "wall-of-fire": {
+    "approximation": "The wall (60 feet long, counted as a line) damages creatures that stay near it; the simulator deals its damage once, when it is cast."
+  },
+  "web": {
+    "kind": "save", "save": "dex", "on_success": "none",
+    "condition": {"condition": "restrained", "duration": "until_escape"},
+    "approximation": "The webs restrain creatures on the turn it is cast only; creatures entering later are not simulated."
+  }
+}

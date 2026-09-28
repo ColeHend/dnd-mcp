@@ -2,7 +2,9 @@ namespace DndMcp.Hosting;
 
 /// <summary>
 /// Marks an untyped (<c>object?</c>) tool parameter whose value must have the shape of another parameter of the same tool,
-/// named by its schema name: <c>balance_compare</c>'s <c>variant</c> is a whole build, exactly like its <c>baseline</c>.
+/// named by its schema name: <c>balance_compare</c>'s <c>variant</c> is a whole build, exactly like its <c>baseline</c>;
+/// <c>balance_simulate</c>'s <c>enemies</c> is a list of entries exactly like its <c>party</c> (the guard then checks it
+/// item by item). A parameter whose shape no sibling has uses <see cref="CheckedAsAttribute"/> instead.
 ///
 /// <para>
 /// <b>Why not just type it.</b> The SDK writes every typed parameter's full schema into the tool's input schema. A build's

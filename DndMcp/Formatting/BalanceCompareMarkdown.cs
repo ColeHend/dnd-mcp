@@ -1,5 +1,6 @@
 using System.Globalization;
 using DndMcp.Domain.Dpr;
+using DndMcp.Domain.Features;
 using DndMcp.Formatting.Srd;
 using static DndMcp.Formatting.BalanceMarkdownText;
 
@@ -18,6 +19,13 @@ namespace DndMcp.Formatting;
 /// must be able to answer from the result.
 /// </para>
 /// <para>
+/// <b>What the band is measured against.</b> The level-equivalent is damage-only and relative to the baseline as given;
+/// on the feature path that is the feature's whole worth over adding nothing, while the homebrew-balance bands read a
+/// level-equivalent against a target (the official option for the slot). So the headline says which, and puts two
+/// yardsticks beside it: an ASI on the same slope (a general feat replaces one; never printed as the verdict), and for
+/// limited-use features the day's figure, since the fight horizon hands out their uses fresh every fight.
+/// </para>
+/// <para>
 /// <b>Said once, where it applies.</b> The Domain's call-level notes repeat two things this renders in place: the slope
 /// fallback's reason (on the slope's line) and the Bonus Action or Reaction opportunity cost (in the action-economy
 /// section). Those notes are dropped from the notes list rather than printed twice.
@@ -25,7 +33,8 @@ namespace DndMcp.Formatting;
 /// </summary>
 internal static class BalanceCompareMarkdown
 {
-    public static string Format(ComparisonReport report)
+    /// <param name="lookupNotes">The host's notes on how target.monster was found, first among the notes (as balance_dpr's).</param>
+    public static string Format(ComparisonReport report, IReadOnlyList<string>? lookupNotes = null)
     {
         var detail = report.Detail;
         var level = Number(detail.Level);
@@ -37,6 +46,8 @@ internal static class BalanceCompareMarkdown
         {
             $"# Build comparison: {report.VariantName} vs {report.BaselineName}",
             Headline(report),
+            AsiLine(report),
+            LimitedUsesLine(report),
             Levels(report),
             Slopes(report, inPlace),
             Horizons(report),
@@ -46,7 +57,8 @@ internal static class BalanceCompareMarkdown
             Build("Baseline", detail.Baseline, level),
             Build("Variant", detail.Variant, level),
             Assumptions(report),
-            Notes(report.Notes
+            Notes((lookupNotes ?? [])
+                .Concat(report.Notes)
                 .Concat(baseline.Notes)
                 .Concat(variant.Notes)
                 .Where(n => !inPlace.Any(p => n.Contains(p, StringComparison.Ordinal)))),
@@ -72,7 +84,60 @@ internal static class BalanceCompareMarkdown
             $"{what}: **{SignedDpr(detail.Delta)}** damage per round ({SignedPercent(detail.RelativeDelta)}; " +
             $"{Dpr(detail.Baseline.DamagePerRound)} → {Dpr(detail.Variant.DamagePerRound)}) at level {Number(detail.Level)} against " +
             $"{TargetShort(detail.Baseline.Evaluation.Target, detail.Baseline.Evaluation.Build)} — {report.Horizon.Label}. That is a level-equivalent of " +
-            $"**{LevelEquivalentText(le)}**: **{BalanceBands.Display(le.Band)}** ({BandRule(le.Band)}). {BandScale}";
+            $"**{LevelEquivalentText(le)}**: **{BalanceBands.Display(le.Band)}** ({BandRule(le.Band)}). {BandScale} " +
+            (report.FeatureName is not null ? FeatureCaveat : VariantCaveat);
+    }
+
+    /// <summary>
+    /// The feature path's caveat: its level-equivalent is the feature's whole worth over nothing, and the skill's bands
+    /// read one against a target, so a verdict needs the official option as the baseline.
+    /// </summary>
+    public const string FeatureCaveat =
+        "This is the feature's whole damage worth over the same build without it; the homebrew-balance bands read a " +
+        "level-equivalent against a target, so for a verdict on homebrew, give the official option it should match as the " +
+        "baseline and the homebrew as the variant (e.g. the same build with Great Weapon Master for a heavy-weapon feat).";
+
+    /// <summary>The variant path's caveat: damage only, against the baseline as given.</summary>
+    public const string VariantCaveat = "The level-equivalent is damage only, measured against the baseline as given.";
+
+    // "For scale: an Ability Score Improvement here (Str 18 → 20) adds +2.80 (LE 1.4 on the same slope). If this feature
+    // takes an ASI's place (a general feat), what it adds beyond that is +2.04, LE 1.1." The net figure is conditional:
+    // never the verdict for an origin feat, a class feature, an item or a boon.
+    private static string AsiLine(ComparisonReport report)
+    {
+        var asi = report.Asi;
+        if (asi.SkipReason is { } reason)
+        {
+            return $"For scale: no Ability Score Improvement figure here, because {reason}.";
+        }
+
+        var what = report.FeatureName is not null ? "this feature" : "the variant";
+        return
+            $"For scale: an Ability Score Improvement here ({Domain.Features.DslValues.Abilities.Display(asi.Ability!)} {Number(asi.From)} → {Number(asi.To)}) adds " +
+            $"{SignedDpr(asi.Delta)} ({Dpr(report.Detail.Baseline.DamagePerRound)} → {Dpr(asi.AsiDamagePerRound)}; LE " +
+            $"{LevelEquivalentText(asi.LevelEquivalent!)} on the same slope). If {what} takes an ASI's place (a general feat at an ASI level), " +
+            $"judge what it adds beyond that: {SignedDpr(asi.NetDelta)}, LE {LevelEquivalentText(asi.NetLevelEquivalent!)} " +
+            $"({BalanceBands.Display(asi.NetLevelEquivalent!.Band)}). An origin feat, a class feature, an item or a boon replaces no ASI.";
+    }
+
+    // Limited uses on a fight or round1 headline: the day's Δ and its own level-equivalent and band, said once here.
+    private static string? LimitedUsesLine(ComparisonReport report)
+    {
+        if (report.LimitedUses is not { } limited)
+        {
+            return null;
+        }
+
+        var features = string.Join(", ", limited.Features.Select(f => $"{f.Name}: {ResourceText(f.Resource)}"));
+        var horizon = report.Horizon.Horizon == DprHorizons.Round1
+            ? "round 1 (the nova) spends them freely"
+            : $"the {Number(report.Horizon.Rounds)}-round fight gives them fresh every fight";
+        var le = limited.DayLevelEquivalent;
+        var who = report.FeatureName is not null ? "the feature" : "the variant";
+        return
+            $"Limited uses ({features}): {horizon}. Over {report.Horizon.DayLabel} {who} adds " +
+            $"{SignedDpr(limited.DayDelta)}, a level-equivalent of {LevelEquivalentText(le)} on the baseline's day slope: " +
+            $"{BalanceBands.Display(le.Band)} ({BandRule(le.Band)}). Pass horizon \"day\" to judge it on the day.";
     }
 
     /// <summary>The whole scale, so every band printed can be placed against its neighbours.</summary>
@@ -131,7 +196,13 @@ internal static class BalanceCompareMarkdown
             return text + ".";
         });
 
-        return "**Level-equivalent** = Δ ÷ the damage per round one level adds in that tier (the same horizon and target):\n" + Bullets(lines);
+        // Under an empirical profile the default target at each slope level is that level's SRD-median row, which is worth
+        // saying: the slope is how the baseline keeps up with that edition's typical monsters, not with the DMG's.
+        var target = report.Detail.Baseline.Evaluation.Target;
+        var which = target is { Profile: { } profile, CrFollowsLevel: true } && TargetProfiles.Edition(profile) is { } edition
+            ? $"the same horizon and target; under profile {profile} the target at each level is the {edition} SRD medians for CR = that level"
+            : "the same horizon and target";
+        return $"**Level-equivalent** = Δ ÷ the damage per round one level adds in that tier ({which}):\n" + Bullets(lines);
     }
 
     private static string Horizons(ComparisonReport report)
@@ -194,16 +265,21 @@ internal static class BalanceCompareMarkdown
         }
 
         var rounds = rows[0].Effect.Rounds;
-        return $"## Signature effects at level {Number(report.DetailLevel)} (a {Number(rounds)}-round fight)\n\n" + SrdMarkdownText.Table(
+        var table = $"## Signature effects at level {Number(report.DetailLevel)} (a {Number(rounds)}-round fight)\n\n" + SrdMarkdownText.Table(
             ["Effect", "Build", "Condition", "Lands in a turn", "At least once in the fight"],
             rows.Select(r => (IReadOnlyList<string>)
             [
                 r.Effect.Name,
                 r.Build,
                 r.Effect.Condition,
-                Percent(r.Effect.LandChancePerTurn),
-                Percent(r.Effect.LandChancePerFight),
+                Percent(r.Effect.LandChancePerTurn) + (r.Effect.Immune ? " (immune)" : string.Empty),
+                Percent(r.Effect.LandChancePerFight) + (r.Effect.Immune ? " (immune)" : string.Empty),
             ]));
+        var legendary = report.Detail.Baseline.Evaluation.Target.LegendaryResistance;
+        return legendary == 0 || rows.All(r => r.Effect.Immune)
+            ? table
+            : table + $"\n\nThese chances ignore the target's {Plural(legendary, "Legendary Resistance")}: every failed save is counted as landing. " +
+              "A creature that spends one on each failure refuses the first of them (see each build's expected casts or attempts to land).";
     }
 
     // One build at the detail level, as balance_dpr shows it, one heading level down.

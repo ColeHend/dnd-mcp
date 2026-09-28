@@ -18,9 +18,16 @@ namespace DndMcp.Domain.Features;
 /// <para>
 /// <b>Sugar is expanded here, edition-aware</b>, so the engine never sees a fighting style: <c>gwf</c> becomes the
 /// edition's remap on two-handed or versatile melee weapon attacks (2014 reroll 1–2 once; 2024 1–2 count as 3),
-/// <c>archery</c> a +2 to-hit part on ranged weapon attacks (not with to_hit.total), <c>dueling</c> a +2 damage part on
-/// melee weapon attacks without Two-Handed (not while the build makes an offhand attack, since Dueling needs no other
-/// weapon), <c>twf</c> the ability modifier on offhand attacks. A preset is expanded first (<see cref="BuildPresets"/>).
+/// <c>archery</c> a +2 to-hit part on ranged weapon attacks (not with to_hit.total, and not on a thrown weapon, which is
+/// a melee weapon thrown: javelin, dagger, handaxe), <c>dueling</c> a +2 damage part on melee weapon attacks without
+/// Two-Handed, thrown ones included (not while the build makes an offhand attack, since Dueling needs no other weapon),
+/// <c>twf</c> the ability modifier on offhand attacks. A preset is expanded first (<see cref="BuildPresets"/>).
+/// </para>
+/// <para>
+/// <b>Defaults the rules would not pick are noted, not changed</b> (contract §3.3): to_hit.ability defaults to Str and
+/// ability_to_damage to true for every attack, so a ranged or finesse weapon attack with a better Dex, a spell attack,
+/// and a spell attack that adds its modifier to damage by default (or twice, beside an Agonizing Blast-style bonus) each
+/// get a note saying what to give instead.
 /// </para>
 /// </summary>
 public static class BuildResolver
@@ -28,17 +35,27 @@ public static class BuildResolver
     /// <summary>The build at one level. Validates for that level only.</summary>
     /// <param name="subject">What the build is, for the error's first words: "build", "baseline", "variant".</param>
     /// <exception cref="DndInputException">The spec is not valid at that level; every problem found (up to five) is listed.</exception>
-    public static ResolvedBuild Resolve(BuildSpec spec, int level, RulingsSpec? rulings = null, string subject = "build") =>
-        Resolve(spec, [level], rulings, subject)[0];
+    /// <param name="use">Which engine the build is for; the simulator allows what one DPR turn cannot (see <see cref="BuildUse"/>).</param>
+    public static ResolvedBuild Resolve(BuildSpec spec, int level, RulingsSpec? rulings = null, string subject = "build", BuildUse use = BuildUse.Dpr) =>
+        Resolve(spec, [level], rulings, subject, use)[0];
 
     /// <summary>
     /// The build at each of <paramref name="levels"/> (in the order given); with no levels, at the spec's own level.
     /// Validation covers all of them first.
     /// </summary>
     /// <exception cref="DndInputException">A level outside 1–20, or the spec is not valid at some level.</exception>
-    public static IReadOnlyList<ResolvedBuild> Resolve(BuildSpec spec, IReadOnlyList<int>? levels, RulingsSpec? rulings = null, string subject = "build")
+    public static IReadOnlyList<ResolvedBuild> Resolve(
+        BuildSpec spec, IReadOnlyList<int>? levels, RulingsSpec? rulings = null, string subject = "build", BuildUse use = BuildUse.Dpr) =>
+        Resolve(spec, levels, rulings, subject, use, ItemNames.Positional);
+
+    /// <summary>
+    /// The same, naming items in messages by <paramref name="names"/>: a baseline + feature merge names each item in the
+    /// list the model wrote it in (<see cref="FeatureMerge.MergeWithOrigins"/>).
+    /// </summary>
+    internal static IReadOnlyList<ResolvedBuild> Resolve(
+        BuildSpec spec, IReadOnlyList<int>? levels, RulingsSpec? rulings, string subject, BuildUse use, ItemNames names)
     {
-        var (compiled, evaluated) = Compile(spec, levels, subject);
+        var (compiled, evaluated) = Compile(spec, levels, subject, use, names);
         var resolvedRulings = ResolvedRulings.From(rulings);
         return evaluated.Select(level => ResolveLevel(compiled, level, resolvedRulings)).ToList();
     }
@@ -48,7 +65,8 @@ public static class BuildResolver
     /// <c>balance_compare</c> runs on the baseline before merging a feature into it.
     /// </summary>
     /// <exception cref="DndInputException">Every problem found, up to five, in one message.</exception>
-    public static void Validate(BuildSpec spec, IReadOnlyList<int>? levels = null, string subject = "build") => Compile(spec, levels, subject);
+    public static void Validate(BuildSpec spec, IReadOnlyList<int>? levels = null, string subject = "build", BuildUse use = BuildUse.Dpr) =>
+        Compile(spec, levels, subject, use, ItemNames.Positional);
 
     /// <summary>
     /// Whether the build changes with level beyond its proficiency bonus: a step value with two or more steps, a
@@ -56,12 +74,13 @@ public static class BuildResolver
     /// does not is evaluated at many levels.
     /// </summary>
     /// <exception cref="DndInputException">The spec fails level-independent validation.</exception>
-    public static bool ScalesWithLevel(BuildSpec spec) => CompileStructure(spec, "build").ScalesWithLevel;
+    public static bool ScalesWithLevel(BuildSpec spec) => CompileStructure(spec, "build", ItemNames.Positional).ScalesWithLevel;
 
-    private static (CompiledBuild Build, IReadOnlyList<int> Levels) Compile(BuildSpec spec, IReadOnlyList<int>? levels, string subject)
+    private static (CompiledBuild Build, IReadOnlyList<int> Levels) Compile(
+        BuildSpec spec, IReadOnlyList<int>? levels, string subject, BuildUse use, ItemNames names)
     {
         ArgumentNullException.ThrowIfNull(spec);
-        var compiled = CompileStructure(spec, subject);
+        var compiled = CompileStructure(spec, subject, names);
         var evaluated = levels is { Count: > 0 } ? levels : [compiled.Level];
         var outside = evaluated.Where(l => l is < DslLimits.MinLevel or > DslLimits.MaxLevel).Distinct().ToList();
         if (outside.Count > 0)
@@ -71,15 +90,15 @@ public static class BuildResolver
                 $"levels are {DslLimits.MinLevel} to {DslLimits.MaxLevel}.");
         }
 
-        var input = new BuildLevels(compiled, evaluated);
+        var input = new BuildLevels(compiled, evaluated, use, names);
         DslProblems.ThrowIfAny(DslProblems.Messages(StepCoverageValidator.Instance.Validate(input)), subject);
         DslProblems.ThrowIfAny(DslProblems.Messages(BuildLevelValidator.Instance.Validate(input)), subject);
         return (compiled, evaluated);
     }
 
-    private static CompiledBuild CompileStructure(BuildSpec spec, string subject)
+    private static CompiledBuild CompileStructure(BuildSpec spec, string subject, ItemNames names)
     {
-        DslProblems.ThrowIfAny(DslProblems.Messages(BuildSpecValidator.Instance.Validate(spec)), subject);
+        DslProblems.ThrowIfAny(DslProblems.Messages(BuildSpecValidator.Instance.Validate(names.Attach(spec))), subject);
         return CompiledBuild.Compile(BuildPresets.Expand(spec));
     }
 
@@ -115,6 +134,7 @@ public static class BuildResolver
             Defensive = context.Modifiers.Where(m => V.Kinds.Defensive.Contains(m.Kind))
                 .Select(m => new ResolvedDefensive(m.Ref, m.Kind, m.Amount?.At(level).Resolve(context.ProficiencyBonus, context.Abilities), m.DamageType, context.Resource(m)))
                 .ToList(),
+            Heals = context.OfKind(V.Kinds.Heal).Select(context.ResolveHeal).ToList(),
             Rulings = rulings,
             ScalesWithLevel = build.ScalesWithLevel,
             Notes = context.Notes(attacks),
@@ -283,11 +303,14 @@ public static class BuildResolver
             return parts;
         }
 
+        // Archery: "ranged weapons" (a thrown weapon is a melee weapon thrown; the dart is given without thrown).
         private bool TakesArchery(CompiledAttack attack) =>
-            _build.FightingStyle == V.FightingStyles.Archery && attack.IsRanged && attack.IsWeapon && attack.ToHitTotal is null;
+            _build.FightingStyle == V.FightingStyles.Archery && attack.IsRanged && attack.IsWeapon && !attack.IsThrownMeleeWeapon &&
+            attack.ToHitTotal is null;
 
+        // Dueling: "a melee weapon in one hand and no other weapons", thrown melee weapons included.
         private bool TakesDueling(CompiledAttack attack) =>
-            _build.FightingStyle == V.FightingStyles.Dueling && attack.IsMelee && attack.IsWeapon &&
+            _build.FightingStyle == V.FightingStyles.Dueling && attack.IsWeapon && (attack.IsMelee || attack.IsThrownMeleeWeapon) &&
             !attack.Properties.Contains(V.Properties.TwoHanded) && !HasOffhand;
 
         public ResolvedRider ResolveRider(CompiledModifier modifier) => new()
@@ -346,13 +369,26 @@ public static class BuildResolver
                 Size = modifier.Size,
                 Magical = modifier.Magical,
                 Condition = modifier.Condition,
+                Duration = modifier.Duration,
                 ActionCost = modifier.ActionCost!,
                 Resource = Resource(modifier),
                 Concentration = modifier.Concentration,
                 CantripMultiplier = multiplier,
+                IsCantrip = modifier.Cantrip,
+                DcAbility = modifier.Dc is null ? modifier.DcAbility : null,
                 ElementalAdeptTypes = elementalAdept,
             };
         }
+
+        public ResolvedHeal ResolveHeal(CompiledModifier modifier) => new()
+        {
+            Source = modifier.Ref,
+            Healing = (modifier.Dice?.At(_level) ?? DamageFormula.Zero).Plus(DamageFormula.Constant(Amount(modifier))),
+            ActionCost = modifier.ActionCost!,
+            Targets = modifier.Targets ?? 1,
+            SelfOnly = modifier.SelfOnly,
+            Resource = Resource(modifier),
+        };
 
         public ResolvedConditionOnHit ResolveConditionOnHit(CompiledModifier modifier) => new()
         {
@@ -367,6 +403,7 @@ public static class BuildResolver
                 })
                 .ToList(),
             When = modifier.When!,
+            Duration = modifier.Duration,
             Policy = modifier.Policy!,
             UseValue = modifier.UseValue,
             Magical = modifier.Magical,
@@ -452,6 +489,13 @@ public static class BuildResolver
                 notes.Add($"{modifier.Label} ({modifier.Kind}) is defensive: kept for the simulator, it does not change damage dealt.");
             }
 
+            foreach (var modifier in OfKind(V.Kinds.Heal))
+            {
+                notes.Add($"{modifier.Label} (heal) is healing: kept for the simulator (balance_simulate), it does not change damage dealt.");
+            }
+
+            AbilityNotes(notes);
+
             foreach (var modifier in OfKind(V.Kinds.SaveEffect).Where(m => m.Condition is not null && !V.Conditions.IsMechanical(m.Condition)))
             {
                 notes.Add($"{modifier.Label}: {modifier.Condition} is shown as a label; nothing here models its effect.");
@@ -469,29 +513,122 @@ public static class BuildResolver
 
         private void StyleNotes(List<string> notes, string level)
         {
+            var thrown = Attacks.Where(a => a.IsThrownMeleeWeapon).Select(a => a.Name).ToList();
             switch (_build.FightingStyle)
             {
                 case V.FightingStyles.Gwf when !Attacks.Any(a => a.TakesGreatWeaponFighting):
                     notes.Add($"fighting_style gwf applies to no attack at level {level}: it needs a melee weapon attack with two-handed or versatile.");
                     break;
-                case V.FightingStyles.Archery when !Attacks.Any(TakesArchery):
-                    notes.Add(Attacks.Any(a => a.IsRanged && a.IsWeapon)
-                        ? "fighting_style archery is not added to attacks with to_hit total (the total is the whole bonus)."
-                        : $"fighting_style archery applies to no attack at level {level}: it needs a ranged weapon attack.");
+                case V.FightingStyles.Archery:
+                    if (!Attacks.Any(TakesArchery))
+                    {
+                        if (Attacks.Any(a => a.IsRanged && a.IsWeapon && !a.IsThrownMeleeWeapon))
+                        {
+                            notes.Add("fighting_style archery is not added to attacks with to_hit total (the total is the whole bonus).");
+                        }
+                        else if (thrown.Count == 0)
+                        {
+                            notes.Add($"fighting_style archery applies to no attack at level {level}: it needs a ranged weapon attack.");
+                        }
+                    }
+
+                    if (thrown.Count > 0)
+                    {
+                        notes.Add(
+                            $"fighting_style archery is not added to {string.Join(", ", thrown)}: a thrown weapon is taken to be a melee " +
+                            "weapon, and Archery is for ranged weapons. A dart is a ranged weapon: leave out thrown to give it Archery.");
+                    }
+
                     break;
                 case V.FightingStyles.Dueling when HasOffhand:
                     notes.Add("fighting_style dueling is not applied: Dueling needs no other weapon, and this build makes an offhand attack.");
                     break;
                 case V.FightingStyles.Dueling when !Attacks.Any(TakesDueling):
-                    notes.Add($"fighting_style dueling applies to no attack at level {level}: it needs a melee weapon attack without two-handed.");
+                    notes.Add($"fighting_style dueling applies to no attack at level {level}: it needs a melee weapon (thrown ones included) without two-handed.");
                     break;
                 case V.FightingStyles.Dueling:
                     notes.Add("Dueling's +2 assumes the weapon is held in one hand and no other weapon is wielded.");
+                    var thrownDueling = Attacks.Where(a => a.IsThrownMeleeWeapon && TakesDueling(a)).Select(a => a.Name).ToList();
+                    if (thrownDueling.Count > 0)
+                    {
+                        notes.Add(
+                            $"Dueling's +2 is added to thrown {string.Join(", ", thrownDueling)}: a thrown melee weapon is still a melee weapon " +
+                            "(a dart is a ranged weapon: leave out thrown if it should not take Dueling).");
+                    }
+
                     break;
                 case V.FightingStyles.Twf when !HasOffhand:
                     notes.Add($"fighting_style twf changes nothing at level {level}: no attack is offhand.");
                     break;
             }
         }
+
+        /// <summary>
+        /// Attacks whose ability defaults the rules would not pick (contract §3.3 keeps the defaults; these say what to give
+        /// instead): a ranged or finesse weapon on the default Str while Dex is higher; a spell attack on the default Str
+        /// while a casting ability is higher; a spell attack that adds its modifier to damage only by default, or adds it
+        /// twice beside a bonus_damage of the same ability (Eldritch Blast with Agonizing Blast).
+        /// </summary>
+        private void AbilityNotes(List<string> notes)
+        {
+            var str = Abilities.Modifier(V.Abilities.Str);
+            var dex = Abilities.Modifier(V.Abilities.Dex);
+            foreach (var attack in Attacks)
+            {
+                var finesse = attack.Properties.Contains(V.Properties.Finesse);
+                if (!attack.AbilityGiven && attack.IsWeapon && dex > str)
+                {
+                    if (finesse)
+                    {
+                        notes.Add(
+                            $"{attack.Name} is a finesse weapon but uses Str {Signed(str)} (the default) while Dex is {Signed(dex)}; Finesse " +
+                            "may use Dex for attack and damage: give to_hit {\"ability\": \"dex\"}.");
+                    }
+                    else if (attack.IsRanged && !attack.Properties.Contains(V.Properties.Thrown))
+                    {
+                        notes.Add(
+                            $"{attack.Name} is a ranged weapon attack but uses Str {Signed(str)} (the default) while Dex is {Signed(dex)}; ranged " +
+                            "weapon attacks use Dex: give to_hit {\"ability\": \"dex\"}.");
+                    }
+                }
+
+                if (!attack.IsSpell)
+                {
+                    continue;
+                }
+
+                if (!attack.AbilityGiven && new[] { V.Abilities.Int, V.Abilities.Wis, V.Abilities.Cha }.Any(a => Abilities.Modifier(a) > str))
+                {
+                    notes.Add(
+                        $"{attack.Name} is a spell attack but uses Str (the default); a spell attack uses the spellcasting ability: give " +
+                        "to_hit ability int, wis or cha.");
+                }
+
+                var modifier = Abilities.Modifier(attack.Ability);
+                var addsAbility = attack.Ability != V.Abilities.None && (attack.AbilityToDamage ?? !attack.Offhand) && !attack.Offhand && modifier != 0;
+                if (!addsAbility)
+                {
+                    continue;
+                }
+
+                var display = V.Abilities.Display(attack.Ability);
+                if (attack.AbilityToDamage is null)
+                {
+                    notes.Add(
+                        $"{attack.Name}: a spell attack, so {display} {Signed(modifier)} is added to its damage only because ability_to_damage " +
+                        "defaults to true. Most spell attacks add no modifier (Fire Bolt, Eldritch Blast): give ability_to_damage false; " +
+                        "Spiritual Weapon does add it.");
+                }
+
+                foreach (var bonus in Applying(V.Kinds.BonusDamage, attack).Where(m => m.Amount?.At(_level).Reference == attack.Ability))
+                {
+                    notes.Add(
+                        $"{attack.Name} adds {display} twice: its own modifier (ability_to_damage) and {bonus.Label}. Give ability_to_damage " +
+                        "false.");
+                }
+            }
+        }
+
+        private static string Signed(int value) => value >= 0 ? $"+{DslText.Number(value)}" : DslText.Number(value);
     }
 }

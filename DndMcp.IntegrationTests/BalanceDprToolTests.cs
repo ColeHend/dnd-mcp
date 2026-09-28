@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.RegularExpressions;
 using DndMcp.Domain.Core;
 using DndMcp.Domain.Dpr;
+using DndMcp.Domain.Encounters;
 using DndMcp.Domain.Features;
 using DndMcp.IntegrationTests.Infrastructure;
 using Xunit;
@@ -233,10 +234,14 @@ public sealed partial class BalanceDprToolTests : IClassFixture<McpServerHarness
         Assert.Equal(published, rows.Select(r => r[2])); // round 1
         Assert.Equal(published, rows.Select(r => r[5])); // the reference curve beside it
         Assert.Contains("| 4 | 8.90 | 8.90 | 14 | 10.83 | 8.90 | ASI: Cha 16 → 18 |", text, StringComparison.Ordinal);
-        Assert.Contains("| **5** | 17.80 | 17.80 | 15 | 12.08 | 17.80 | Extra Attack: Eldritch Blast 1 → 2 attacks |", text, StringComparison.Ordinal);
-        Assert.Contains("| 17 | 38.20 | 38.20 | 19 | 27.08 | 38.20 | Extra Attack: Eldritch Blast 3 → 4 attacks |", text, StringComparison.Ordinal);
+        // Eldritch Blast's beams are its Cantrip Upgrade, and it is cast with the Magic action: never "Extra Attack" or the
+        // "Attack action", rules terms a model would repeat.
+        Assert.Contains("| **5** | 17.80 | 17.80 | 15 | 12.08 | 17.80 | Cantrip Upgrade: Eldritch Blast 1 → 2 beams |", text, StringComparison.Ordinal);
+        Assert.Contains("| 17 | 38.20 | 38.20 | 19 | 27.08 | 38.20 | Cantrip Upgrade: Eldritch Blast 3 → 4 beams |", text, StringComparison.Ordinal);
         Assert.Contains("## The build as read: level 5, 2024 rules", text, StringComparison.Ordinal);
-        Assert.Contains("| Eldritch Blast | 2 × Attack action | +7 (Cha +4, proficiency +3) | 1d10 force +4 (Agonizing Blast) | ranged, spell; cantrip beams ×2 |", text, StringComparison.Ordinal);
+        Assert.Contains("| Eldritch Blast | 2 × Magic action | +7 (Cha +4, proficiency +3) | 1d10 force +4 (Agonizing Blast) | ranged, spell; cantrip beams ×2 |", text, StringComparison.Ordinal);
+        Assert.Contains("| Eldritch Blast | Magic action | 2 | +7 vs AC 15 |", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Extra Attack: Eldritch Blast", text, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -281,6 +286,19 @@ public sealed partial class BalanceDprToolTests : IClassFixture<McpServerHarness
         Assert.Contains("For scale at level 5: RPGBOT's target 12.08, the warlock baseline 17.80.", text, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("mm2024", "AC 15 (2024 SRD monster medians for CR 5 (25 monsters; CR = level 5)). Saves +1 on every save (the median of the 2024 SRD's CR 5 monsters' mean save bonuses (0.83, rounded)).")]
+    [InlineData("MM-2014", "AC 15 (2014 SRD monster medians for CR 5 (25 monsters; CR = level 5)). Saves +1 on every save (the median of the 2014 SRD's CR 5 monsters' mean save bonuses (0.83, rounded)).")]
+    public async Task CallTool_EmpiricalProfile_IsTheSrdMediansAndSaysWhoseTheyAre(string profile, string target)
+    {
+        var text = await Success($$$"""{"build": {{{Fighter2024()}}}, "target": {"profile": "{{{profile}}}"}}""");
+
+        Assert.Contains("## Target at level 5\n\n" + target, text, StringComparison.Ordinal);
+        Assert.Contains("- Target profile mm20", text, StringComparison.Ordinal);
+        Assert.Contains($"{MonsterStatsEmpirical.Source} (the 20", text, StringComparison.Ordinal);
+        Assert.Contains("target for CR 5).", text, StringComparison.Ordinal); // the warlock reference follows the profile
+    }
+
     [Fact]
     public async Task CallTool_TargetWithHp_GivesTheRound1SpreadAndKillChance()
     {
@@ -300,8 +318,10 @@ public sealed partial class BalanceDprToolTests : IClassFixture<McpServerHarness
     }
 
     [Fact]
-    public async Task CallTool_TypelessDamageAgainstAResistingTarget_IsWarned()
+    public async Task CallTool_UntypedRiderOnATypedAttack_TakesTheAttacksTypeAndIsNotWarned()
     {
+        // Sneak Attack without a type deals the Rapier's piercing, so the resistance halves it (settled decision; 2024 SRD
+        // "The extra damage's type is the same as the weapon's type"): 6.3875 exactly, as with "type": "piercing".
         var text = await Success("""
             {"build": {"name": "Rogue", "level": 5, "abilities": {"dex": 18},
                        "attacks": [{"name": "Rapier", "to_hit": {"ability": "dex"}, "damage": "1d8", "damage_type": "piercing", "properties": ["finesse"]}],
@@ -309,7 +329,24 @@ public sealed partial class BalanceDprToolTests : IClassFixture<McpServerHarness
              "target": {"ac": 15, "resistances": ["piercing"]}}
             """);
 
-        Assert.Contains("- Sneak Attack has no damage type, so the target's resistances, vulnerabilities and immunities never apply to it", text, StringComparison.Ordinal);
+        Assert.StartsWith("# Damage per round: Rogue\n\n**6.39** damage per round", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("has no damage type", text, StringComparison.Ordinal);
+        Assert.Contains("Sneak Attack (extra_damage): 3d6 (the attack's damage type), first hit each turn", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("typeless", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_TypelessDamageAgainstAResistingTarget_IsWarned()
+    {
+        // An attack without damage_type (and an untyped rider on it) is typeless, which no resistance touches: warned.
+        var text = await Success("""
+            {"build": {"name": "Rogue", "level": 5, "abilities": {"dex": 18},
+                       "attacks": [{"name": "Rapier", "to_hit": {"ability": "dex"}, "damage": "1d8", "properties": ["finesse"]}],
+                       "modifiers": [{"kind": "extra_damage", "name": "Sneak Attack", "dice": "3d6", "when": "first_hit_per_turn"}]},
+             "target": {"ac": 15, "resistances": ["piercing"]}}
+            """);
+
+        Assert.Contains("- Rapier, Sneak Attack have no damage type, so the target's resistances, vulnerabilities and immunities never apply to them", text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -420,5 +457,163 @@ public sealed partial class BalanceDprToolTests : IClassFixture<McpServerHarness
         var text = await Error($$"""{"build": {{Fighter2014()}}{{extra}}}""");
 
         Assert.Equal(Prefix + message, text);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------------
+    // Phase 4 review fixes, as the model reads them.
+    // ------------------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task CallTool_FireBoltAddingIntByDefault_SaysSoInTheNotes()
+    {
+        var text = await Success(Round1("""
+            { "name": "Wizard", "level": 5, "abilities": {"int": 18},
+              "attacks": [{ "name": "Fire Bolt", "to_hit": {"ability": "int"}, "damage": "1d10", "damage_type": "fire", "properties": ["ranged", "spell"], "cantrip": "dice" }] }
+            """));
+
+        Assert.Contains(
+            "- Fire Bolt: a spell attack, so Int +4 is added to its damage only because ability_to_damage defaults to true. Most spell " +
+            "attacks add no modifier (Fire Bolt, Eldritch Blast): give ability_to_damage false; Spiritual Weapon does add it.",
+            text[text.IndexOf("**Notes:**", StringComparison.Ordinal)..],
+            StringComparison.Ordinal);
+        Assert.Contains("| Fire Bolt | 1 × Magic action |", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_LongbowOnTheDefaultStr_KeepsTheDefaultAndSaysSo()
+    {
+        // Str 10 (+0) and proficiency: +3 vs AC 15, two arrows of 1d8: 2 × (0.40 × 4.5 + 0.05 × 9) = 4.50.
+        var text = await Success(Round1("""
+            { "name": "Archer", "level": 5, "abilities": {"dex": 18},
+              "attacks": [{ "name": "Longbow", "count": 2, "damage": "1d8", "damage_type": "piercing", "properties": ["ranged", "heavy", "two-handed"] }] }
+            """));
+
+        Assert.Contains("**4.50** damage per round at level 5 against AC 15", text, StringComparison.Ordinal);
+        Assert.Contains(
+            "- Longbow is a ranged weapon attack but uses Str +0 (the default) while Dex is +4; ranged weapon attacks use Dex: give to_hit {\"ability\": \"dex\"}.",
+            text,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_FireballWithoutAResource_SaysItIsCastEveryRound()
+    {
+        var text = await Success($$$"""{"build": {{{Fireball2014}}}, "target": {"saves": {"dex": 2}, "hp": 7}}""");
+
+        Assert.Contains(
+            "- Fireball: no resource, so it is used every round of every fight (it counts the same in round 1, a fight and a day). If it " +
+            "spends spell slots or limited uses, give resource {\"uses\": n, \"per\": \"long_rest\"} for the fight and day figures.",
+            text,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_RiderTable_SaysTheAttackDamageAlreadyIncludesIt()
+    {
+        var withRider = await Success(Round1(Fighter2014("""{ "kind": "extra_damage", "name": "Hex", "dice": "1d6", "type": "necrotic" }""")));
+        var without = await Success(Round1(Fighter2014("")));
+
+        var riderTable = withRider.IndexOf("| Rider | When |", StringComparison.Ordinal);
+        Assert.True(riderTable > 0);
+        Assert.Contains(
+            "Each attack's Damage already includes its riders (and damage rerolls); the rider table breaks that share out, so do not add the two tables.",
+            withRider[riderTable..],
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("already includes its riders", without, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_2024EvasionOnAStunnedTarget_TakesTheFullRoll()
+    {
+        var text = await Success(Round1(
+            """{ "name": "Wizard", "level": 5, "modifiers": [{ "kind": "save_effect", "name": "Fireball", "ability": "dex", "dc": 15, "dice": "8d6", "type": "fire", "resource": {"uses": 3, "per": "long_rest"} }] }""",
+            """{ "save_bonus": 2, "evasion": true, "condition": "stunned" }"""));
+
+        Assert.Contains("P(a target fails) 100%; 28.00 damage per target", text, StringComparison.Ordinal);
+        Assert.Contains("- 2024 Evasion: not while Incapacitated (stunned, paralyzed or unconscious); such a target takes full damage on its failed save.", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_StunningStrike_SaysTheConditionLastsTheTurnAndLabelsTheChance()
+    {
+        var build = Fighter2014("""{ "kind": "condition_on_hit", "name": "Stunning Strike", "condition": "stunned", "ability": "con", "dc": 15, "when": "first_hit_per_turn" }""");
+        var text = await Success($$$"""{"build": {{{build}}}, "target": {"ac": 15, "saves": {"con": 2}, "legendary_resistance": 3}}""");
+
+        Assert.Contains(
+            "- Stunning Strike: the stunned condition counts only for the rest of the turn it lands in; the target starts each later turn without it, so " +
+            "your later turns' attacks, allies' attacks and the target's lost turns are not counted (balance_simulate carries its duration). " +
+            "It lasts into your next turn (2014 Stunning Strike: until the end of your next turn), so a fight's DPR and the feature's value are understated here.",
+            text,
+            StringComparison.Ordinal);
+        Assert.Contains("the target is stunned for the rest of a turn ", text, StringComparison.Ordinal);
+        Assert.Contains("(ignoring Legendary Resistance); expected attempts to land it past 3 Legendary Resistances: 6.67.", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_HoldPersonAgainstLegendaryResistance_NeverPrintsABareLandingChanceBesideTheCasts()
+    {
+        var text = await Success("""
+            {"build": {"name": "Cleric", "level": 5, "abilities": {"wis": 18}, "modifiers": [{"kind": "save_effect", "name": "Hold Person", "ability": "wis", "dc": 15, "condition": "paralyzed", "resource": {"uses": 2, "per": "long_rest"}}]},
+             "target": {"saves": {"wis": 2}, "legendary_resistance": 3}}
+            """);
+
+        Assert.Contains(
+            "Paralyzed: lands on the main target in a turn 40% (ignoring Legendary Resistance); at least once in the fight 84% (ignoring Legendary " +
+            "Resistance); expected casts to land it past 3 Legendary Resistances: 6.67.",
+            text,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("at least once in the fight 84%;", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    // A javelin thrown at +7 (Str +4, PB +3; Archery does not apply to a thrown melee weapon) vs AC 15: 2 × (0.60 × 7.5 +
+    // 0.05 × 3.5) = 10.10; with Dueling's +2 (it does apply): 2 × (0.60 × 9.5 + 0.05 × 3.5) = 12.70. Both editions.
+    [InlineData("2014", "archery", "10.10")]
+    [InlineData("2024", "archery", "10.10")]
+    [InlineData("2014", "dueling", "12.70")]
+    [InlineData("2024", "dueling", "12.70")]
+    public async Task CallTool_ThrownJavelin_IsAMeleeWeaponForTheFightingStyles(string edition, string style, string dpr)
+    {
+        var text = await Success(Round1($$"""
+            { "name": "Thrower", "edition": "{{edition}}", "level": 5, "abilities": {"str": 18}, "fighting_style": "{{style}}",
+              "attacks": [{ "name": "Javelin", "count": 2, "damage": "1d6", "damage_type": "piercing", "properties": ["ranged", "thrown"] }] }
+            """));
+
+        Assert.Contains($"**{dpr}** damage per round at level 5 against AC 15", text, StringComparison.Ordinal);
+        Assert.Contains("| Javelin | Attack action | 2 | +7 vs AC 15 | 65% |", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_HealAndDurations_AreEchoedAsSimulatorOnly()
+    {
+        var text = await Success(Round1(Fighter2014("""
+            { "kind": "condition_on_hit", "name": "Trip", "condition": "prone", "ability": "str", "dc": 15, "duration": "start_of_next_turn" },
+            { "kind": "heal", "name": "Second Wind", "dice": "1d10", "amount": 5, "action_cost": "bonus_action", "self_only": true, "resource": {"uses": 2, "per": "short_rest"} }
+            """)));
+
+        Assert.Contains("- Trip (condition_on_hit): prone on a failed Str save, DC 15, every hit, policy any_hit, duration start_of_next_turn (balance_simulate).", text, StringComparison.Ordinal);
+        Assert.Contains("- Second Wind (heal): 1d10+5 healing, itself only, uses the Bonus Action, healing: kept for the simulator (balance_simulate), no effect on damage dealt; 2 per short rest.", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_WordInTheDamage_SaysWhereItBelongs()
+    {
+        var text = await Error("""{"build": {"name": "F", "level": 5, "attacks": [{"name": "Greatsword", "damage": "2d6+str"}]}}""");
+
+        Assert.Equal(
+            Prefix + "Invalid build: attacks item 1 (Greatsword): damage \"2d6+str\" has \"str\": the ability modifier is added for you " +
+            "(to_hit ability; ability_to_damage, default true); proficiency bonus is a bonus_damage modifier with amount \"pb\"; the damage " +
+            "type goes in damage_type. Damage is plain dice and whole numbers joined by + or -, e.g. \"2d6\", \"1d8+1\" or \"1d10+1d6\".",
+            text);
+    }
+
+    [Fact]
+    public async Task CallTool_GwfTable_SaysWhichDiceTheRulesCoverAndWhatIsARuling()
+    {
+        var text = _server.SuccessText(await _server.CallToolJsonAsync("rules_get", """{"ref": "rules://tables/gwf-expected-values"}"""));
+
+        Assert.Contains("they do not settle whether dice that another feature adds to the hit (smites, Hex) count, which is a table ruling", text, StringComparison.Ordinal);
+        Assert.Contains("gwf_on_riders", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Both apply to the weapon's own dice", text, StringComparison.Ordinal);
     }
 }

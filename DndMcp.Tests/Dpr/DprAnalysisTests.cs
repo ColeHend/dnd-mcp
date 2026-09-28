@@ -120,10 +120,29 @@ public sealed class DprAnalysisTests
         double[] published = [6.30, 8.25, 8.25, 8.90, 17.80, 17.80, 17.80, 19.10, 20.50, 19.10, 28.65, 28.65, 28.65, 28.65, 28.65, 28.65, 38.20, 38.20, 38.20, 38.20];
         Assert.Equal(published, report.Levels.Select(l => Math.Round(l.DamagePerRound, 9)));
         Assert.Equal(
-            ["4 asi ASI: Cha 16 → 18", "5 extra_attack Extra Attack: Eldritch Blast 1 → 2 attacks", "8 asi ASI: Cha 18 → 20",
-             "11 extra_attack Extra Attack: Eldritch Blast 2 → 3 attacks", "17 extra_attack Extra Attack: Eldritch Blast 3 → 4 attacks"],
+            ["4 asi ASI: Cha 16 → 18", "5 cantrip_upgrade Cantrip Upgrade: Eldritch Blast 1 → 2 beams", "8 asi ASI: Cha 18 → 20",
+             "11 cantrip_upgrade Cantrip Upgrade: Eldritch Blast 2 → 3 beams", "17 cantrip_upgrade Cantrip Upgrade: Eldritch Blast 3 → 4 beams"],
             report.Marks.Select(m => $"{m.Level} {m.Kind} {m.Text}"));
         Assert.Empty(report.Notes);
+    }
+
+    [Fact]
+    public void Analyze_DiceCantripAndExtraAttackTogether_AreMarkedApart()
+    {
+        // A cantrip's rise is its "Cantrip Upgrade" (2024 spell text), not Extra Attack; an attack whose own count rises is
+        // Extra Attack, even when it is also a beams cantrip.
+        const string build = """
+            { "name": "Caster", "level": 5, "abilities": {"int": 16},
+              "attacks": [{ "name": "Fire Bolt", "to_hit": {"ability": "int"}, "damage": "1d10", "damage_type": "fire", "ability_to_damage": false, "properties": ["ranged", "spell"], "cantrip": "dice" },
+                          { "name": "Beam", "count": {"1": 1, "5": 2}, "to_hit": {"ability": "int"}, "damage": "1d10", "damage_type": "force", "ability_to_damage": false, "properties": ["ranged", "spell"], "cantrip": "beams" }] }
+            """;
+
+        var report = Analyze(build, levels: [4, 5]);
+
+        Assert.Equal(
+            ["5 cantrip_upgrade Cantrip Upgrade: Beam 1 → 4 beams", "5 cantrip_upgrade Cantrip Upgrade: Fire Bolt 1d10 → 2d10",
+             "5 extra_attack Extra Attack: Beam 1 → 2 attacks"],
+            report.Marks.Select(m => $"{m.Level} {m.Kind} {m.Text}").Order(StringComparer.Ordinal));
     }
 
     [Fact]
@@ -371,4 +390,36 @@ public sealed class DprAnalysisTests
         Assert.True(clock.Elapsed < TimeSpan.FromSeconds(horizon == "day" ? 10 : 5), $"the {horizon} grid took {clock.Elapsed}");
         Assert.All(report.Grid.Rows, row => Assert.True(row.Cells[0].DamagePerRound >= row.Cells[^1].DamagePerRound, $"level {row.Level}"));
     }
+
+    [Theory]
+    [InlineData("mm2014", 1)]
+    [InlineData("mm2014", 20)]
+    [InlineData("mm2024", 3)]
+    [InlineData("mm2024", 18)] // an interpolated row
+    public void Analyze_EmpiricalProfile_ReadsTheWarlockBaselineAgainstTheSameProfile(string profile, int level)
+    {
+        // The reference curve is the preset against the profile's CR = level target, so the headline compares like with like;
+        // RPGBOT's target is the DMG hit points ÷ 12 under every profile.
+        var target = $$"""{ "profile": "{{profile}}" }""";
+        var report = Analyze(Scaler, target, [level]);
+        var warlock = Analyze(WarlockJson(level), target, [level]);
+
+        var reference = Assert.Single(report.Levels).Reference;
+        Assert.Equal(profile, reference.Profile);
+        Assert.Equal(warlock.Detail.DamagePerRound, reference.WarlockBaseline, Exact);
+        Assert.Equal(ReferenceCurves.RpgbotTarget(level), reference.RpgbotTarget, Exact);
+    }
+
+    [Fact]
+    public void Analyze_EmpiricalProfile_MovesTheWarlockBaselineOnlyWhereTheTargetDiffers()
+    {
+        // 2014 SRD CR 1 median AC 12 (DMG 13): the warlock hits more often; 2024 CR 1 median AC 13 = the DMG's, the same curve.
+        Assert.True(ReferenceCurves.At(1, "mm2014").WarlockBaseline > ReferenceCurves.At(1).WarlockBaseline);
+        Assert.Equal(ReferenceCurves.At(1).WarlockBaseline, ReferenceCurves.At(1, "mm2024").WarlockBaseline, Exact);
+        Assert.Equal(17.8, ReferenceCurves.At(5, "dmg2014").WarlockBaseline, Exact); // the pinned curve, unchanged
+        Assert.Equal("dmg2014", Assert.Single(Analyze(Scaler, """{ "ac": 15 }""").Levels).Reference.Profile);
+    }
+
+    // The warlock_baseline preset at a level, as a build the analysis reads.
+    private static string WarlockJson(int level) => $$"""{ "name": "Warlock baseline", "level": {{level}}, "preset": "warlock_baseline" }""";
 }

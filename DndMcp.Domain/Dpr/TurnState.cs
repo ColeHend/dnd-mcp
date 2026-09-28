@@ -9,8 +9,8 @@ namespace DndMcp.Domain.Dpr;
 /// <b>Why each field is here.</b> <see cref="Spent"/>: once-per-turn riders, Savage Attacker, first-hit conditions and
 /// Cleave, used or not. <see cref="Uses"/>: resources left (8 bits a slot, <see cref="Unlimited"/> for a slot that never
 /// runs out). <see cref="Flags"/>: Vex pending on the next attack roll, the Bonus Action still free, the hit/crit
-/// triggers seen (Hew, the 2014 GWM bonus attack), a Sap hit, the conditions imposed this turn and the save effects that
-/// landed (both for "P(lands)"), and the first round (setup costs). Leaving any of these out would merge states whose
+/// triggers seen (Hew, the 2014 GWM bonus attack), a Sap hit, the first round (setup costs), whether the Attack action was
+/// taken (the offhand attack), the conditions imposed this turn and the save effects that landed (both for "P(lands)"). Leaving any of these out would merge states whose
 /// futures differ; adding anything else (damage so far) would only multiply states with identical futures.
 /// </para>
 /// </summary>
@@ -29,6 +29,13 @@ internal readonly record struct TurnState(int Segment, int Position, int CleaveL
     public const int CritTriggerFlag = 1 << 3;
     public const int SapFlag = 1 << 4;
     public const int FirstRoundFlag = 1 << 5;
+
+    /// <summary>
+    /// The Attack action was taken this turn with at least one weapon attack (or an Action Surge's): what lets the Light
+    /// weapon's offhand attack follow (2014 Two-Weapon Fighting, 2024 Light). Set only for a build with an offhand
+    /// bonus_action attack, so no other build's state count changes.
+    /// </summary>
+    public const int AttackActionFlag = 1 << 6;
 
     /// <summary>Conditions imposed this turn: <see cref="TurnPlan.ProneBit"/>… shifted here.</summary>
     public const int ConditionShift = 8;

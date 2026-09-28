@@ -69,6 +69,9 @@ public static class DslLimits
 
     public const int MaxTargets = 20;
 
+    /// <summary>Creatures one heal restores (Mass Healing Word: up to six).</summary>
+    public const int MaxHealTargets = 6;
+
     /// <summary>An area's size in feet.</summary>
     public const int MaxAreaSize = 1000;
 
@@ -89,6 +92,12 @@ public static class DslLimits
     public const int MaxTargetHp = 5000;
 
     public const int MaxLegendaryResistance = 5;
+
+    /// <summary>
+    /// target.monster: one line, a ref ("2024/monster/adult-red-dragon") or a name. Longer text is not a monster, and the
+    /// host's lookup would only echo it back.
+    /// </summary>
+    public const int MaxMonsterTextLength = 100;
 
     /// <summary>Problems one error message lists before "and N more".</summary>
     public const int MaxReportedProblems = 5;

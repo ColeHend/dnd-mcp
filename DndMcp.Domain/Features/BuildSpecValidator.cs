@@ -82,7 +82,7 @@ public sealed class BuildSpecValidator : AbstractValidator<BuildSpec>
             var build = context.InstanceToValidate;
             if (attacks is { Count: > DslLimits.MaxAttacks })
             {
-                problems.Add($"attacks has {DslText.Number(attacks.Count)} items; at most {DslLimits.MaxAttacks} are accepted.");
+                problems.Add(ItemNames.From(context).TooMany("attacks", attacks.Count, DslLimits.MaxAttacks));
             }
 
             if (build.Preset is null && (attacks ?? []).Count == 0 && (build.Modifiers ?? []).Count == 0)
@@ -97,8 +97,7 @@ public sealed class BuildSpecValidator : AbstractValidator<BuildSpec>
         {
             if (modifiers is { Count: > DslLimits.MaxModifiers })
             {
-                new Problems<BuildSpec>(context, string.Empty).Add(
-                    $"modifiers has {DslText.Number(modifiers.Count)} items; at most {DslLimits.MaxModifiers} are accepted.");
+                new Problems<BuildSpec>(context, string.Empty).Add(ItemNames.From(context).TooMany("modifiers", modifiers.Count, DslLimits.MaxModifiers));
             }
         });
 
@@ -178,7 +177,7 @@ internal sealed class AttackItemValidator : AbstractValidator<AttackItem>
         {
             if (spec is null)
             {
-                new Problems<AttackItem>(context, context.InstanceToValidate.Where).Add(
+                new Problems<AttackItem>(context, Where(context)).Add(
                     "is null; give an attack, e.g. {\"name\": \"Longsword\", \"damage\": \"1d8\", \"properties\": [\"melee\"]}.");
             }
         });
@@ -188,7 +187,7 @@ internal sealed class AttackItemValidator : AbstractValidator<AttackItem>
             RuleFor(i => i.Spec!.Name).Custom((name, context) =>
             {
                 var item = context.InstanceToValidate;
-                var problems = new Problems<AttackItem>(context, item.Where);
+                var problems = new Problems<AttackItem>(context, Where(context));
                 if (string.IsNullOrWhiteSpace(name))
                 {
                     problems.Add("name is required: modifiers refer to the attack by it, e.g. \"Greatsword\".");
@@ -205,7 +204,7 @@ internal sealed class AttackItemValidator : AbstractValidator<AttackItem>
 
             RuleFor(i => i.Spec!).Custom((spec, context) =>
             {
-                var problems = new Problems<AttackItem>(context, context.InstanceToValidate.Where);
+                var problems = new Problems<AttackItem>(context, Where(context));
                 problems.Parse(() => LevelValue.ParseInt(spec.Count, "count", 1, DslLimits.MaxAttackCount));
                 problems.Known(V.AttackActions.Set, "action", spec.Action);
 
@@ -222,7 +221,7 @@ internal sealed class AttackItemValidator : AbstractValidator<AttackItem>
                 }
                 else
                 {
-                    problems.Parse(() => LevelValue.ParseDamage(spec.Damage, "damage"));
+                    problems.Parse(() => LevelValue.ParseDamage(spec.Damage, "damage", hint: DamageFormula.AttackHint));
                 }
 
                 problems.Known(V.DamageTypes.Set, "damage_type", spec.DamageType);
@@ -233,6 +232,9 @@ internal sealed class AttackItemValidator : AbstractValidator<AttackItem>
             });
         });
     }
+
+    // The item as this validation names it: by position, or in a merged variant by the list it came from.
+    private static string Where(ValidationContext<AttackItem> context) => ItemNames.From(context).One(ItemRef.Of(context.InstanceToValidate));
 
     /// <summary>from_level and until_level: each 1–20, and not reversed.</summary>
     internal static void LevelRangeProblems<T>(int? from, int? until, Problems<T> problems)
@@ -319,7 +321,7 @@ internal sealed class ModifierItemValidator : AbstractValidator<ModifierItem>
     {
         RuleFor(i => i.Spec).Custom((spec, context) =>
         {
-            var problems = new Problems<ModifierItem>(context, context.InstanceToValidate.Where);
+            var problems = new Problems<ModifierItem>(context, Where(context));
             if (spec is null)
             {
                 problems.Add("is null; give a modifier with a kind, e.g. {\"kind\": \"to_hit\", \"amount\": 1}.");
@@ -343,16 +345,19 @@ internal sealed class ModifierItemValidator : AbstractValidator<ModifierItem>
                 if (refused.Count > 0)
                 {
                     var names = string.Join(" or ", refused.Select(f => $"\"{f}\""));
-                    new Problems<ModifierItem>(context, item.Where).Add(
+                    new Problems<ModifierItem>(context, Where(context)).Add(
                         $"does not take {names}; {item.Kind} takes {ModifierFields.Describe(item.Kind!)}.");
                 }
             });
 
-            RuleFor(i => i.Spec!).Custom((spec, context) => CommonProblems(context.InstanceToValidate, spec, new Problems<ModifierItem>(context, context.InstanceToValidate.Where)));
+            RuleFor(i => i.Spec!).Custom((spec, context) => CommonProblems(context.InstanceToValidate, spec, new Problems<ModifierItem>(context, Where(context))));
 
-            RuleFor(i => i.Spec!).Custom((spec, context) => KindProblems(context.InstanceToValidate, spec, new Problems<ModifierItem>(context, context.InstanceToValidate.Where)));
+            RuleFor(i => i.Spec!).Custom((spec, context) => KindProblems(context.InstanceToValidate, spec, new Problems<ModifierItem>(context, Where(context))));
         });
     }
+
+    // The item as this validation names it: by position, or in a merged variant by the list it came from.
+    private static string Where(ValidationContext<ModifierItem> context) => ItemNames.From(context).One(ItemRef.Of(context.InstanceToValidate));
 
     private static void CommonProblems(ModifierItem item, ModifierSpec spec, Problems<ModifierItem> problems)
     {
@@ -498,6 +503,7 @@ internal sealed class ModifierItemValidator : AbstractValidator<ModifierItem>
                 problems.Known(V.Conditions.OnHitSet, "condition", spec.Condition);
                 SaveProblems(spec, problems, dcRequired: false);
                 problems.Known(V.When.ConditionOnHitSet, "when", spec.When);
+                problems.Known(V.Durations.Set, "duration", spec.Duration);
                 PolicyProblems(spec, problems);
                 break;
 
@@ -505,6 +511,38 @@ internal sealed class ModifierItemValidator : AbstractValidator<ModifierItem>
                 problems.Parse(() => LevelValue.ParseAmount(spec.Amount, "amount"));
                 problems.Known(V.DamageTypes.Set, "type", spec.Type);
                 break;
+
+            case V.Kinds.Heal:
+                HealProblems(spec, problems);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// heal: dice and/or amount (healing per target), who and how many it heals, and what it costs. No setup: a heal is
+    /// spent when the simulator decides to use it, never as a first-round cost that would take a DPR turn's action.
+    /// </summary>
+    private static void HealProblems(ModifierSpec spec, Problems<ModifierItem> problems)
+    {
+        if (!LevelValue.IsGiven(spec.Dice) && !LevelValue.IsGiven(spec.Amount))
+        {
+            problems.Add(
+                "heal needs dice (e.g. \"2d4\" for Healing Word) or amount (e.g. \"wis\", or a step map by level for Second Wind's " +
+                "1d10 + level), or both.");
+        }
+
+        problems.Parse(() => LevelValue.ParseDamage(spec.Dice, "dice", hint: DamageFormula.HealHint));
+        problems.Parse(() => LevelValue.ParseAmount(spec.Amount, "amount"));
+        problems.Known(V.ActionCosts.HealSet, "action_cost", spec.ActionCost);
+        problems.InRange("targets", spec.Targets, 1, DslLimits.MaxHealTargets);
+        if (spec.SelfOnly == true && spec.Targets is > 1)
+        {
+            problems.Add("self_only heals only the creature itself, so it takes no targets above 1; remove one of them.");
+        }
+
+        if (spec.Setup is not null)
+        {
+            problems.Add("heal takes no setup: it is used when it is needed (the simulator decides each turn); remove setup.");
         }
     }
 
@@ -515,7 +553,7 @@ internal sealed class ModifierItemValidator : AbstractValidator<ModifierItem>
             problems.Add("extra_damage needs dice (e.g. \"1d6\") or amount (e.g. 2).");
         }
 
-        problems.Parse(() => LevelValue.ParseDamage(spec.Dice, "dice"));
+        problems.Parse(() => LevelValue.ParseDamage(spec.Dice, "dice", hint: DamageFormula.AmountHint));
         problems.Parse(() => LevelValue.ParseAmount(spec.Amount, "amount"));
         problems.Known(V.DamageTypes.Set, "type", spec.Type);
         problems.Known(V.ActionCosts.RiderSet, "action_cost", spec.ActionCost);
@@ -633,7 +671,7 @@ internal sealed class ModifierItemValidator : AbstractValidator<ModifierItem>
     private static void SaveEffectProblems(ModifierSpec spec, Problems<ModifierItem> problems)
     {
         SaveProblems(spec, problems, dcRequired: true);
-        problems.Parse(() => LevelValue.ParseDamage(spec.Dice, "dice"));
+        problems.Parse(() => LevelValue.ParseDamage(spec.Dice, "dice", hint: DamageFormula.AmountHint));
         problems.Parse(() => LevelValue.ParseAmount(spec.Amount, "amount"));
         if (!LevelValue.IsGiven(spec.Dice) && !LevelValue.IsGiven(spec.Amount) && spec.Condition is null)
         {
@@ -649,6 +687,10 @@ internal sealed class ModifierItemValidator : AbstractValidator<ModifierItem>
         problems.Known(V.OnSuccess.Set, "on_success", spec.OnSuccess);
         problems.Known(V.Conditions.SaveEffectSet, "condition", spec.Condition);
         problems.Known(V.ActionCosts.SaveEffectSet, "action_cost", spec.ActionCost);
+        if (problems.Known(V.Durations.Set, "duration", spec.Duration) && spec.Duration is not null && spec.Condition is null)
+        {
+            problems.Add("duration is how long its condition lasts, so it needs a condition (e.g. \"paralyzed\"); add one or remove duration.");
+        }
         problems.InRange("targets", spec.Targets, 1, DslLimits.MaxTargets);
 
         if (spec.Targets is not null && (spec.Shape is not null || spec.Size is not null))

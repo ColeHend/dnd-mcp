@@ -130,15 +130,24 @@ public sealed class BuildLevelValidationTests
         BuildResolver.Validate(spec, [1, 2, 5, 20]);
     }
 
+    /// <summary>
+    /// The one-routine refusal's fix is two builds; changing action_cost is offered only for an effect that really costs
+    /// less, since a Fireball given "none" is cast for free beside the attacks every turn (review finding).
+    /// </summary>
+    private const string CheaperOnlyIfTrue =
+        "Change an action_cost only if the effect really costs less: \"bonus_action\" for a Bonus Action effect (e.g. a Quickened " +
+        "spell), \"none\" for one that takes no action on your turn (e.g. an aura already up); a spell cast with the Action, such as " +
+        "Fireball, keeps \"action\". (balance_simulate takes both routines and picks one each turn.)";
+
     [Fact]
     public void Validate_ActionSaveEffectBesideAttackActionAttacks_IsRefused()
     {
         var message = Problem(WithModifier("""{ "kind": "save_effect", "name": "Fireball", "ability": "dex", "dc": 15, "dice": "8d6" }"""), 5);
 
         Assert.Equal(
-            "Invalid build: at level 5 modifiers item 1 (save_effect \"Fireball\") uses the Action, and attacks item 1 (Greatsword) is " +
-            "made with the Attack action; a build is one turn's routine, so compare the two routines as two builds (or give the " +
-            "save_effect action_cost \"bonus_action\" or \"none\").",
+            "Invalid build: at level 5 modifiers item 1 (save_effect \"Fireball\") uses the Action, and so does attacks item 1 " +
+            "(Greatsword); a turn has one Action, so a build is one turn's routine: compare the two routines as two builds. " +
+            CheaperOnlyIfTrue,
             message);
     }
 
@@ -151,7 +160,57 @@ public sealed class BuildLevelValidationTests
                             { "kind": "save_effect", "ability": "wis", "dc": 15, "condition": "paralyzed" }] }
             """), 5);
 
-        Assert.Contains("modifiers item 1 (save_effect) and modifiers item 2 (save_effect) both use the Action", message, StringComparison.Ordinal);
+        Assert.Equal(
+            "Invalid build: at level 5 modifiers item 1 (save_effect) and modifiers item 2 (save_effect) both use the Action; a turn " +
+            "has one Action, so a build is one turn's routine: compare them as two builds. " + CheaperOnlyIfTrue,
+            message);
+    }
+
+    [Theory]
+    [InlineData("""{ "kind": "save_effect", "name": "Fireball", "ability": "dex", "dc": 15, "dice": "8d6" }""")]
+    [InlineData("""{ "kind": "save_effect", "name": "Fireball", "ability": "dex", "dc": 15, "dice": "8d6" }, { "kind": "save_effect", "ability": "wis", "dc": 15, "condition": "paralyzed" }""")]
+    public void Validate_OneRoutineMessages_NeverOfferACheaperActionCostWithoutItsQualifier(string modifiers)
+    {
+        var message = Problem(WithModifier(modifiers), 5);
+
+        // Every "none" and "bonus_action" the message offers sits inside the qualified sentence.
+        var outside = message.Replace(CheaperOnlyIfTrue, string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"none\"", outside, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"bonus_action\"", outside, StringComparison.Ordinal);
+        Assert.Contains(CheaperOnlyIfTrue, message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("""{ "kind": "save_effect", "name": "Fireball", "ability": "dex", "dc": 15, "dice": "8d6", "resource": {"uses": 2, "per": "long_rest"} }""")]
+    [InlineData("""{ "kind": "save_effect", "name": "Fireball", "ability": "dex", "dc": 15, "dice": "8d6" }, { "kind": "save_effect", "name": "Hold Person", "ability": "wis", "dc": 15, "condition": "paralyzed" }""")]
+    public void Validate_SimulationUse_AcceptsSeveralActionRoutines(string modifiers)
+    {
+        // The simulator chooses the Action each turn (Fireball while slots last, the Greatsword after), so for it a build
+        // that holds both routines is normal; the DPR engine refuses it.
+        var spec = WithModifier(modifiers);
+
+        BuildResolver.Validate(spec, [5], use: BuildUse.Simulation);
+        var resolved = BuildResolver.Resolve(spec, 5, use: BuildUse.Simulation);
+        Assert.NotEmpty(resolved.SaveEffects);
+        Assert.Throws<DndInputException>(() => BuildResolver.Validate(spec, [5]));
+    }
+
+    [Fact]
+    public void Validate_SimulationUse_StillRefusesTheOtherPerLevelRules()
+    {
+        // Only the one-routine rule is relaxed: two Concentration effects, the attacks-per-turn total and step coverage
+        // still hold for the simulator.
+        var concentration = With(modifiersJson: """
+            [{ "kind": "to_hit", "name": "Bless", "dice": "1d4", "concentration": true },
+             { "kind": "extra_damage", "name": "Hunter's Mark", "dice": "1d6", "concentration": true }]
+            """);
+        var tooMany = With("""[{ "name": "A", "count": 10, "damage": "1d4" }, { "name": "B", "count": 10, "damage": "1d4" }]""",
+            """[{ "kind": "extra_attack", "attack": "A", "action": "action", "count": 3, "resource": {"uses": 1, "per": "short_rest"} }]""");
+        var uncovered = With("""[{ "name": "A", "count": {"5": 2}, "damage": "1d4" }]""");
+
+        Assert.Contains("need Concentration", Assert.Throws<DndInputException>(() => BuildResolver.Validate(concentration, [5], use: BuildUse.Simulation)).Message, StringComparison.Ordinal);
+        Assert.Contains("23 attacks a turn", Assert.Throws<DndInputException>(() => BuildResolver.Validate(tooMany, [5], use: BuildUse.Simulation)).Message, StringComparison.Ordinal);
+        Assert.Contains("count has no value at level 1", Assert.Throws<DndInputException>(() => BuildResolver.Validate(uncovered, [1], use: BuildUse.Simulation)).Message, StringComparison.Ordinal);
     }
 
     [Fact]

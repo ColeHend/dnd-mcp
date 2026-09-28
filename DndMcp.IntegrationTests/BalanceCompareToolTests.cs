@@ -310,6 +310,137 @@ public sealed class BalanceCompareToolTests : IClassFixture<McpServerHarness>
         Assert.True(text.Length < 9_000, $"The result is {text.Length} characters.");
     }
 
+    [Fact]
+    public async Task CallTool_2024GreatWeaponMasterFeat_PutsTheAsiYardstickBesideTheHeadline()
+    {
+        // §8.3: the ASI (Str 18 → 20) adds +2.80 (19.20 → 22.00), so the feat adds +2.036 beyond it; both on RPGBOT's 1.25.
+        const string feature = """
+            {"name": "Great Weapon Master", "abilities": {"str": 19}, "modifiers": [
+              {"kind": "bonus_damage", "name": "Great Weapon Master", "amount": "pb", "attack_action_only": true},
+              {"kind": "extra_attack", "name": "Hew", "attack": "Greatsword", "action": "bonus_action", "trigger": "crit"}]}
+            """;
+
+        var text = await Success($$"""{"baseline": {{Fighter2024("", strength: 18)}}, "feature": {{feature}}, "target": {"ac": 15}, "horizon": "round1"}""");
+
+        Assert.Contains(
+            "For scale: an Ability Score Improvement here (Str 18 → 20) adds +2.80 (19.20 → 22.00; LE 2.2 on the same slope). If this " +
+            "feature takes an ASI's place (a general feat at an ASI level), judge what it adds beyond that: +2.04, LE 1.6 (Breaking). An " +
+            "origin feat, a class feature, an item or a boon replaces no ASI.",
+            text,
+            StringComparison.Ordinal);
+        Assert.Contains(DndMcp.Formatting.BalanceCompareMarkdown.FeatureCaveat, text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_VariantPath_SaysTheBandIsAgainstTheBaselineWithoutTheFeatureCaveat()
+    {
+        var text = await Success($$"""{"baseline": {{Fighter2014("")}}, "variant": {{Fighter2014()}}, "target": {"ac": 15}, "horizon": "round1"}""");
+
+        Assert.Contains(DndMcp.Formatting.BalanceCompareMarkdown.VariantCaveat, text, StringComparison.Ordinal);
+        Assert.DoesNotContain(DndMcp.Formatting.BalanceCompareMarkdown.FeatureCaveat, text, StringComparison.Ordinal);
+        Assert.Contains("For scale: an Ability Score Improvement here (Str 18 → 20)", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_TheDescriptionsOwnExample_ScalesAndShowsTheAsiLine()
+    {
+        // balance_compare's example baseline: Str 16/18/20 at 1/4/6, Extra Attack at 5 and 11, so every tier divides by its own
+        // curve and level 5 (Str 18) has an ASI to compare with.
+        const string example =
+            """{"name": "Fighter", "level": 5, "abilities": {"str": {"1": 16, "4": 18, "6": 20}}, "attacks": [{"name": "Greatsword", "count": {"1": 1, "5": 2, "11": 3}, "damage": "2d6", "damage_type": "slashing", "properties": ["melee", "heavy", "two-handed"]}]}""";
+
+        var text = await Success($$"""{"baseline": {{example}}, "feature": {{SavageAttacker}}, "levels": [1, 5, 11]}""");
+
+        Assert.Contains("For scale: an Ability Score Improvement here (Str 18 → 20)", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("RPGBOT", text, StringComparison.Ordinal);
+        Assert.Equal(3, CountOf(text, "from the baseline's own curve"));
+    }
+
+    private const string Paladin = """
+        {"name": "Paladin", "level": 5, "abilities": {"str": 18},
+         "attacks": [{"name": "Longsword", "count": 2, "damage": "1d8", "damage_type": "slashing", "properties": ["melee", "versatile"]}]}
+        """;
+
+    private const string FireFeat = """
+        {"name": "Fire Feat", "modifiers": [{"kind": "extra_damage", "name": "Fire Feat", "dice": "1d8", "type": "fire", "when": "first_hit_per_turn", "resource": {"uses": 3, "per": "long_rest"}}]}
+        """;
+
+    [Fact]
+    public async Task CallTool_LimitedFeatureOnTheFightHorizon_GivesTheDayFigureOnce()
+    {
+        // Fresh uses every fight: +4.25, LE 3.4, Breaking. Over the DMG day 3 uses spread over 21 rounds: +9/13 = +0.69, LE 0.55, Over.
+        var text = await Success($$$"""{"baseline": {{{Paladin}}}, "feature": {{{FireFeat}}}, "target": {"ac": 15}}""");
+
+        Assert.Contains("**+4.25** damage per round", text, StringComparison.Ordinal);
+        Assert.Contains("That is a level-equivalent of **3.4**: **Breaking**", text, StringComparison.Ordinal);
+        Assert.Contains(
+            "Limited uses (Fire Feat: 3 per long rest): the 3-round fight gives them fresh every fight. Over an adventuring day (2014 DMG: " +
+            "6–8 encounters, 2 short rests; 7 encounters of 3 rounds, 2 short rests) the feature adds +0.69, a level-equivalent of 0.55 on " +
+            "the baseline's day slope: Over (0.5 ≤ LE < 1.0). Pass horizon \"day\" to judge it on the day.",
+            text,
+            StringComparison.Ordinal);
+        Assert.Equal(1, CountOf(text, "Limited uses ("));
+    }
+
+    [Theory]
+    [InlineData(""", "horizon": "day" """, FireFeat)] // the headline already is the day
+    [InlineData("", SavageAttacker)] // nothing limited
+    public async Task CallTool_DayHeadlineOrNoLimitedFeature_HasNoLimitedUsesLine(string horizon, string feature)
+    {
+        var text = await Success($$"""{"baseline": {{Paladin}}, "feature": {{feature}}, "target": {"ac": 15}{{horizon}}}""");
+
+        Assert.DoesNotContain("Limited uses (", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_ActionSurgeOnTheRound1Headline_SaysRound1SpendsItFreely()
+    {
+        const string feature = """
+            {"name": "Action Surge", "modifiers": [{"kind": "extra_attack", "name": "Action Surge", "attack": "Greatsword", "count": 2, "action": "action", "resource": {"uses": 1, "per": "short_rest"}}]}
+            """;
+
+        var text = await Success($$$"""{"baseline": {{{Fighter2014()}}}, "feature": {{{feature}}}, "target": {"ac": 15}, "horizon": "round1"}""");
+
+        Assert.Contains("Limited uses (Action Surge: 1 per short rest): round 1 (the nova) spends them freely. Over an adventuring day", text, StringComparison.Ordinal);
+        Assert.Contains("the feature adds +2.79, a level-equivalent of", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_FeatureStepMapUncoveredAtALevel_IsTheFeaturesOwnItem()
+    {
+        var text = await Error($$$"""{"baseline": {{{Fighter2024()}}}, "feature": {"name": "Searing", "modifiers": [{"kind": "extra_damage", "dice": {"5": "1d6"}}]}, "levels": [1, 5]}""");
+
+        Assert.Equal(
+            Prefix + "Invalid feature: modifiers item 1 (extra_damage): dice has no value at level 1: its step map starts at level 5. Add a " +
+            "key \"1\" or lower (e.g. \"1\"), or give the modifier from_level 5.",
+            text);
+    }
+
+    [Fact]
+    public async Task CallTool_WholeStepMapFeature_LeavesTheLevelsBeforeTheFeatUnchanged()
+    {
+        const string feature = """{"name": "Feat", "abilities": {"str": {"1": 16, "4": 17, "8": 19}}}""";
+
+        var text = await Success($$"""{"baseline": {{ScalingFighter}}, "feature": {{feature}}, "levels": [1, 5]}""");
+
+        Assert.Matches(new System.Text.RegularExpressions.Regex(@"\| 1 \| [\d.]+ \| [\d.]+ \| 0\.00 \| 0\.0% \|"), text);
+        Assert.DoesNotContain("The feature sets", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_ConditionFeatureAgainstLegendaryResistance_AnnotatesTheSignatureTable()
+    {
+        const string feature = """
+            {"name": "Stunning Strike", "modifiers": [{"kind": "condition_on_hit", "name": "Stunning Strike", "condition": "stunned", "ability": "con", "dc": 15, "when": "first_hit_per_turn"}]}
+            """;
+
+        var text = await Success($$$"""{"baseline": {{{Fighter2014("")}}}, "feature": {{{feature}}}, "target": {"ac": 15, "saves": {"con": 2}, "legendary_resistance": 3}}""");
+
+        Assert.Contains("These chances ignore the target's 3 Legendary Resistances: every failed save is counted as landing.", text, StringComparison.Ordinal);
+        Assert.Contains("- Against 3 Legendary Resistance: Stunning Strike is measured as if every failed save sticks", text, StringComparison.Ordinal);
+        Assert.Equal(1, CountOf(text, "Stunning Strike: the stunned condition counts only for the rest of the turn it lands in"));
+    }
+
     private static int CountOf(string text, string part)
     {
         var count = 0;

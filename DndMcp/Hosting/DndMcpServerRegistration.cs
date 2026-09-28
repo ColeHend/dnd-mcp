@@ -47,6 +47,10 @@ internal static class DndMcpServerRegistration
         services.AddSingleton<SrdIndexService>();
         services.AddHostedService<SrdIndexWarmup>();
 
+        // Singleton: stat blocks are normalized once per process and cached by ref, for balance_simulate, rules_get's
+        // combatant format and balance_dpr's monster targets alike.
+        services.AddSingleton<StatBlockService>();
+
         return services
             .AddMcpServer(serverOptions =>
             {
@@ -93,6 +97,7 @@ internal static class DndMcpServerRegistration
             .WithTools<RulesTools>(McpJson.Options)
             .WithTools<EncounterTools>(McpJson.Options)
             .WithTools<BalanceTools>(McpJson.Options)
+            .WithTools<SimulateTools>(McpJson.Options)
             .WithResources<RulesResources>()
             .WithResources(RulesTableResources.Create());
     }

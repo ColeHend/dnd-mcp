@@ -42,6 +42,7 @@ internal sealed class TurnEvaluator
     private readonly TurnPlan _plan;
     private readonly DamageModel _damage;
     private readonly IReadOnlyList<SaveEffectDamage> _saves;
+    private readonly IReadOnlyList<SaveEffectDamage> _savesIncapacitated;
     private readonly TallyLayout _layout;
     private readonly ulong _present;
     private readonly int _powerOn;
@@ -62,6 +63,7 @@ internal sealed class TurnEvaluator
         TurnPlan plan,
         DamageModel damage,
         IReadOnlyList<SaveEffectDamage> saves,
+        IReadOnlyList<SaveEffectDamage> savesIncapacitated,
         TallyLayout layout,
         ulong advantageSourcesPresent,
         int powerAttacksOn,
@@ -72,6 +74,7 @@ internal sealed class TurnEvaluator
         _plan = plan;
         _damage = damage;
         _saves = saves;
+        _savesIncapacitated = savesIncapacitated;
         _layout = layout;
         _present = advantageSourcesPresent;
         _powerOn = powerAttacksOn;
@@ -232,10 +235,12 @@ internal sealed class TurnEvaluator
         var next = state.With(TurnState.FirstRoundFlag, false).With(TurnState.BonusActionFlag, bonusAction);
         if (actionAvailable && _plan.ActionSaveSegment >= 0)
         {
+            // The Action is the save effect: no Attack action, so no offhand attack (the flag stays unset).
             return (next with { Segment = _plan.ActionSaveSegment, Position = 0 }, 0);
         }
 
         var surges = 0;
+        var surgedAttackAction = false;
         for (var i = 0; i < _plan.SurgeExtras.Count; i++)
         {
             var slot = _plan.ExtraSlots[_plan.SurgeExtras[i]];
@@ -243,7 +248,14 @@ internal sealed class TurnEvaluator
             {
                 surges |= 1 << i;
                 next = next.Spend(slot);
+                surgedAttackAction |= _plan.SurgeIsAttackAction[i];
             }
+        }
+
+        if (_plan.GatesOffhand)
+        {
+            // Action Surge is a second Attack action: it lets the offhand attack follow even when a setup took the first.
+            next = next.With(TurnState.AttackActionFlag, surgedAttackAction || (actionAvailable && _plan.ActionMakesWeaponAttacks));
         }
 
         return (next with { Segment = _plan.ActionSegment(actionAvailable, surges), Position = 0 }, surges);
@@ -365,7 +377,10 @@ internal sealed class TurnEvaluator
             advantage = true;
         }
 
-        if ((conditions & (1 << TurnPlan.DodgingBit)) != 0)
+        // Dodge: "any attack roll made against you has disadvantage if you can see the attacker" (2014; 2024 alike), so a
+        // blinded dodger gives it up for attack rolls only. Incapacitated or restrained, it has lost Dodge altogether
+        // (TurnPlan.Effective has cleared the bit).
+        if ((conditions & (1 << TurnPlan.DodgingBit)) != 0 && (conditions & (1 << TurnPlan.BlindedBit)) == 0)
         {
             disadvantage = true;
         }
@@ -429,8 +444,7 @@ internal sealed class TurnEvaluator
 
         var target = _plan.Target;
         var dex = ability == V.Abilities.Dex;
-        const int autoFailConditions = (1 << TurnPlan.StunnedBit) | (1 << TurnPlan.ParalyzedBit) | (1 << TurnPlan.UnconsciousBit);
-        var autoFail = (dex || ability == V.Abilities.Str) && (conditions & autoFailConditions) != 0;
+        var autoFail = (dex || ability == V.Abilities.Str) && (conditions & TurnPlan.IncapacitatedConditions) != 0;
         var advantage = (magical && target.MagicResistance) || (dex && (conditions & (1 << TurnPlan.DodgingBit)) != 0);
         var disadvantage = dex && (conditions & (1 << TurnPlan.RestrainedBit)) != 0;
         var bonus = target.SaveBonus(ability) + (dex ? target.CoverBonus : 0);
@@ -711,7 +725,7 @@ internal sealed class TurnEvaluator
                 outcomes = next;
             }
 
-            if (attack.Mastery == V.Masteries.Topple)
+            if (attack.Mastery == V.Masteries.Topple && !_plan.ToppleBlocked)
             {
                 // "the target must succeed on a Constitution saving throw (DC 8 plus the ability modifier used to make the
                 // attack roll and your Proficiency Bonus) or have the Prone condition" — for the rest of this turn here.
@@ -819,6 +833,27 @@ internal sealed class TurnEvaluator
         return builder.Build();
     }
 
+    /// <summary>
+    /// The damage instance for a save-effect target with <paramref name="conditions"/>: a 2024 target that is Incapacitated
+    /// has no Evasion (the evaluation passes the same instance twice when that makes no difference).
+    /// </summary>
+    private SaveEffectDamage SaveDamage(int index, int conditions) =>
+        (TurnPlan.Effective(conditions) & TurnPlan.IncapacitatedConditions) != 0 ? _savesIncapacitated[index] : _saves[index];
+
+    /// <summary>
+    /// A save effect as this state casts it. The main (first) target has the conditions imposed on it this turn (Stunning
+    /// Strike's stun makes it auto-fail a Dex save, restrained gives it Disadvantage, and on a 2024 build an Incapacitated
+    /// target loses Evasion); the other creatures in an area have only the target spec's own condition.
+    /// </summary>
+    private (SaveEffectDamage Main, double MainFail, SaveEffectDamage Others, double OthersFail) SaveOdds(TurnState state, int index)
+    {
+        var effect = _plan.SaveEffects[index];
+        var mainConditions = _plan.InitialConditions | state.AppliedConditions;
+        var mainFail = SaveFail(effect.Ability, effect.Dc, effect.Magical, mainConditions);
+        var othersFail = state.AppliedConditions == 0 ? mainFail : SaveFail(effect.Ability, effect.Dc, effect.Magical, _plan.InitialConditions);
+        return (SaveDamage(index, mainConditions), mainFail, SaveDamage(index, _plan.InitialConditions), othersFail);
+    }
+
     private NodeValue SaveNode(TurnState state, Segment segment)
     {
         var index = segment.SaveIndex;
@@ -831,32 +866,31 @@ internal sealed class TurnEvaluator
         }
 
         next = next.Spend(slot);
-        var effect = _plan.SaveEffects[index];
-        var damage = _saves[index];
-        var fail = SaveFail(effect.Ability, effect.Dc, effect.Magical, _plan.InitialConditions | state.AppliedConditions);
+        var (main, fail, others, othersFail) = SaveOdds(state, index);
+        var total = others.MeanTotal(main, fail, othersFail);
 
         var builder = new NodeBuilder(_layout.Size, _trackCarry);
         builder.Tally(_layout.SaveCasts(index), 1);
-        builder.Tally(_layout.SaveDamage(index), damage.MeanTotal(fail));
-        builder.Tally(_layout.SaveFailures(index), damage.Targets * fail);
+        builder.Tally(_layout.SaveDamage(index), total);
+        builder.Tally(_layout.SaveFailures(index), fail + ((others.Targets - 1) * othersFail));
 
         var landedBit = _plan.SaveLandedBits[index];
         if (landedBit < 0)
         {
-            builder.Damage(1, damage.MeanTotal(fail));
+            builder.Damage(1, total);
             builder.Child(1, Value(next));
         }
         else
         {
             if (fail > 0)
             {
-                builder.Damage(fail, damage.MeanTotalGivenFirst(fail, firstFails: true));
+                builder.Damage(fail, others.MeanTotalGivenFirst(main, othersFail, firstFails: true));
                 builder.Child(fail, Value(next.WithSaveLanded(landedBit)));
             }
 
             if (fail < 1)
             {
-                builder.Damage(1 - fail, damage.MeanTotalGivenFirst(fail, firstFails: false));
+                builder.Damage(1 - fail, others.MeanTotalGivenFirst(main, othersFail, firstFails: false));
                 builder.Child(1 - fail, Value(next));
             }
         }
@@ -872,7 +906,12 @@ internal sealed class TurnEvaluator
             switch (option.Kind)
             {
                 case BonusActionOptionKind.Attacks:
-                    yield return option;
+                    // Without the Attack action the offhand attack is not made; the other bonus_action attacks still are.
+                    if (!_plan.GatesOffhand || state.Has(TurnState.AttackActionFlag) || _plan.NonOffhandBonusAttackSegment >= 0)
+                    {
+                        yield return option;
+                    }
+
                     break;
                 case BonusActionOptionKind.ExtraAttack:
                     var extra = _plan.ExtraAttacks[option.ExtraIndex];
@@ -880,7 +919,9 @@ internal sealed class TurnEvaluator
                     {
                         V.Triggers.Always => true,
                         V.Triggers.Hit => state.Has(TurnState.HitTriggerFlag),
-                        V.Triggers.Crit => state.Has(TurnState.CritTriggerFlag),
+
+                        // The closed form has no hit points, so crit_or_kill fires on its crit alone (noted).
+                        V.Triggers.Crit or V.Triggers.CritOrKill => state.Has(TurnState.CritTriggerFlag),
                         _ => throw new InvalidOperationException($"Unknown trigger \"{extra.Trigger}\"."),
                     };
                     if (triggered && state.CanSpend(option.ResourceSlot))
@@ -900,10 +941,16 @@ internal sealed class TurnEvaluator
         }
     }
 
-    /// <summary>The state an option leads to (the save effect's node spends its own use).</summary>
-    private static TurnState TakeBonusAction(TurnState state, BonusActionOption option)
+    /// <summary>
+    /// The state an option leads to (the save effect's node spends its own use). The bonus_action attacks without the
+    /// Attack action this turn go to the queue without the offhand attack.
+    /// </summary>
+    private TurnState TakeBonusAction(TurnState state, BonusActionOption option)
     {
-        var next = state.With(TurnState.BonusActionFlag, false) with { Segment = option.Segment, Position = 0, CleaveLine = -1 };
+        var segment = option.Kind == BonusActionOptionKind.Attacks && _plan.GatesOffhand && !state.Has(TurnState.AttackActionFlag)
+            ? _plan.NonOffhandBonusAttackSegment
+            : option.Segment;
+        var next = state.With(TurnState.BonusActionFlag, false) with { Segment = segment, Position = 0, CleaveLine = -1 };
         return option.Kind == BonusActionOptionKind.ExtraAttack ? next.Spend(option.ResourceSlot) : next;
     }
 
@@ -1058,24 +1105,45 @@ internal sealed class TurnEvaluator
         }
 
         next = next.Spend(slot);
-        var effect = _plan.SaveEffects[index];
-        var damage = _saves[index];
-        var fail = SaveFail(effect.Ability, effect.Dc, effect.Magical, _plan.InitialConditions | state.AppliedConditions);
+        var (main, fail, others, othersFail) = SaveOdds(state, index);
         var landedBit = _plan.SaveLandedBits[index];
         if (landedBit < 0)
         {
-            return damage.Total(fail, -1, _meter).Convolve(Distribution(next), _meter);
+            if (others.Targets == 1)
+            {
+                return main.Total(fail, -1, _meter).Convolve(Distribution(next), _meter);
+            }
+
+            if (fail == othersFail && ReferenceEquals(main, others))
+            {
+                return others.Total(fail, -1, _meter).Convolve(Distribution(next), _meter);
+            }
+
+            // The main target's save differs from the others' (a condition imposed on it this turn): a mixture over its
+            // outcome, each over the shared roll.
+            var cast = new PmfAccumulator();
+            if (fail > 0)
+            {
+                cast.Add(fail, others.Total(othersFail, 1, _meter, main));
+            }
+
+            if (fail < 1)
+            {
+                cast.Add(1 - fail, others.Total(othersFail, 0, _meter, main));
+            }
+
+            return cast.Build().Convolve(Distribution(next), _meter);
         }
 
         var mixture = new PmfAccumulator();
         if (fail > 0)
         {
-            mixture.Add(fail, damage.Total(fail, 1, _meter).Convolve(Distribution(next.WithSaveLanded(landedBit)), _meter));
+            mixture.Add(fail, others.Total(othersFail, 1, _meter, main).Convolve(Distribution(next.WithSaveLanded(landedBit)), _meter));
         }
 
         if (fail < 1)
         {
-            mixture.Add(1 - fail, damage.Total(fail, 0, _meter).Convolve(Distribution(next), _meter));
+            mixture.Add(1 - fail, others.Total(othersFail, 0, _meter, main).Convolve(Distribution(next), _meter));
         }
 
         return mixture.Build();

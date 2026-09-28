@@ -41,7 +41,8 @@ public sealed class ModifierFieldsTests
               "setup": "x", "amount": 0, "dice": "x", "type": "x", "when": "x", "policy": "x", "use_value": 0, "crit_doubles": false,
               "attack_action_only": false, "action_cost": "x", "min": 0, "mode": "x", "rate": 0, "remap": "x", "attack": "x", "count": 0,
               "action": "x", "trigger": "x", "trigger_probability": 0, "penalty": 0, "bonus": 0, "ability": "x", "dc": 0, "dc_ability": "x",
-              "dc_bonus": 0, "on_success": "x", "targets": 0, "shape": "x", "size": 0, "magical": false, "condition": "x", "cantrip": false }
+              "dc_bonus": 0, "on_success": "x", "targets": 0, "shape": "x", "size": 0, "magical": false, "condition": "x", "cantrip": false,
+              "duration": "x", "self_only": false }
             """, "modifier");
 
         Assert.All(ModifierFields.All, f => Assert.True(f.IsGiven(full), f.Name));
@@ -78,7 +79,7 @@ public sealed class ModifierFieldsTests
         {
             "attacks" => "[\"Greatsword\"]",
             "resource" => """{"uses": 1, "per": "long_rest"}""",
-            "concentration" or "crit_doubles" or "attack_action_only" or "magical" or "cantrip" => "true",
+            "concentration" or "crit_doubles" or "attack_action_only" or "magical" or "cantrip" or "self_only" => "true",
             "amount" or "min" or "count" or "from_level" or "until_level" or "dc" or "dc_bonus" or "targets" or "size" or "penalty" or "bonus" => "2",
             "use_value" or "rate" or "trigger_probability" => "0.5",
             _ => "\"x\"",

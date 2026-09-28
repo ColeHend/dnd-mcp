@@ -47,7 +47,7 @@ public sealed partial class SrdCorrectionsTests
     [InlineData("2024/feature", 24)]
     [InlineData("2024/equipment-category", 6)]
     [InlineData("2024/feat", 2)]
-    [InlineData("2024/monster", 4)]
+    [InlineData("2024/monster", 5)]
     [InlineData("2024/rule", 1)]
     [InlineData("2024/species", 1)]
     [InlineData("2024/trait", 2)]

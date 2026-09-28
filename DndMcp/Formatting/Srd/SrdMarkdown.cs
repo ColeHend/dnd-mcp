@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using DndMcp.Domain.Simulation;
 using DndMcp.Repository.Srd;
 using DndMcp.Repository.Srd.Index;
 
@@ -26,8 +27,20 @@ internal static class SrdMarkdown
     public const string Concise = "concise";
     public const string Full = "full";
 
+    /// <summary>A monster's normalized stat block as the simulator reads it (<see cref="CombatantMarkdown"/>); monsters only.</summary>
+    public const string Combatant = "combatant";
+
     /// <summary>The formats <c>rules_get</c> accepts, in the order its description lists them.</summary>
-    public static IReadOnlyList<string> Formats { get; } = [Concise, Full];
+    public static IReadOnlyList<string> Formats { get; } = [Concise, Full, Combatant];
+
+    /// <summary>
+    /// The formats as <c>rules_get</c>'s description and its format errors list them: one text, so the description and
+    /// the error can never disagree about what a format is (RulesGetToolTests pins that every one of
+    /// <see cref="Formats"/> is in it).
+    /// </summary>
+    public const string FormatsText =
+        "\"concise\" (default), \"full\" (adds the raw SRD JSON) or \"combatant\" (a monster as balance_simulate reads " +
+        "it: parsed actions, traits by kind, what is not simulated)";
 
     /// <summary>About 8,000 tokens at the usual four characters per token.</summary>
     public const int MaxChars = 32_000;
@@ -49,12 +62,17 @@ internal static class SrdMarkdown
     /// this entry's #### Grappling subsection"). At the top because it explains the title: a lookup of "Grappling" that
     /// opens on "# Melee Attacks" reads as a wrong answer until the reader learns why.
     /// </param>
-    public static string Format(SrdDocument doc, string format, ISrdLookup lookup, string? trailer = null, string? lead = null)
+    /// <param name="combatant">
+    /// The stat block of a monster document, for <see cref="Combatant"/>: the caller's normalizer (the host's cached
+    /// <c>StatBlockService</c>), since normalizing needs the content root's overrides, which this class does not know.
+    /// </param>
+    public static string Format(
+        SrdDocument doc, string format, ISrdLookup lookup, string? trailer = null, string? lead = null, Func<SrdDocument, StatBlock>? combatant = null)
     {
         var builder = new StringBuilder();
         builder.Append("# ").Append(doc.Name).Append('\n');
         AppendMeta(builder, doc, lead);
-        builder.Append(Body(doc, lookup).TrimEnd());
+        builder.Append(Body(doc, format, lookup, combatant).TrimEnd());
 
         if (format == Full)
         {
@@ -82,7 +100,8 @@ internal static class SrdMarkdown
         ISrdLookup lookup,
         string? trailer = null,
         string? note2014 = null,
-        string? note2024 = null)
+        string? note2024 = null,
+        Func<SrdDocument, StatBlock>? combatant = null)
     {
         if (doc2014 is null && doc2024 is null)
         {
@@ -101,12 +120,27 @@ internal static class SrdMarkdown
             builder.Append("## At a glance\n\n").Append(glance.TrimEnd()).Append("\n\n");
         }
 
-        AppendEdition(builder, SrdEdition.Edition2014, doc2014, format, lookup, note2014);
+        AppendEdition(builder, SrdEdition.Edition2014, doc2014, format, lookup, note2014, combatant);
         builder.Append("\n\n");
-        AppendEdition(builder, SrdEdition.Edition2024, doc2024, format, lookup, note2024);
+        AppendEdition(builder, SrdEdition.Edition2024, doc2024, format, lookup, note2024, combatant);
 
         SrdRef[] refs = [.. new[] { doc2014, doc2024 }.OfType<SrdDocument>().Select(d => d.Ref)];
         return Cap(builder.ToString().TrimEnd(), refs, trailer);
+    }
+
+    /// <summary>
+    /// The body in a format: <see cref="CombatantMarkdown"/> for a monster in <see cref="Combatant"/> format, else the
+    /// per-kind body. The other side of a comparison may be a different kind (matched by name only); it keeps its own body.
+    /// </summary>
+    internal static string Body(SrdDocument doc, string format, ISrdLookup lookup, Func<SrdDocument, StatBlock>? combatant)
+    {
+        if (format != Combatant || doc.Kind != SrdKinds.Monster)
+        {
+            return Body(doc, lookup);
+        }
+
+        ArgumentNullException.ThrowIfNull(combatant);
+        return CombatantMarkdown.Body(combatant(doc));
     }
 
     /// <summary>The per-kind body. Kinds without a dedicated formatter fall back to <see cref="GenericMarkdown"/>.</summary>
@@ -200,7 +234,8 @@ internal static class SrdMarkdown
         builder.Append("\n\n");
     }
 
-    private static void AppendEdition(StringBuilder builder, string edition, SrdDocument? doc, string format, ISrdLookup lookup, string? note)
+    private static void AppendEdition(
+        StringBuilder builder, string edition, SrdDocument? doc, string format, ISrdLookup lookup, string? note, Func<SrdDocument, StatBlock>? combatant)
     {
         builder.Append("## ").Append(edition).Append(" (").Append(SrdMarkdownText.SourceFor(edition)).Append(")\n\n");
         if (doc is null)
@@ -210,7 +245,7 @@ internal static class SrdMarkdown
         }
 
         AppendMeta(builder, doc, note);
-        builder.Append(Body(doc, lookup).TrimEnd());
+        builder.Append(Body(doc, format, lookup, combatant).TrimEnd());
         if (format == Full)
         {
             builder.Append("\n\n").Append(RawSection(doc));

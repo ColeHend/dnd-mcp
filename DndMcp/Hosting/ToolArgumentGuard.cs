@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Reflection;
 using System.Text;
@@ -43,7 +44,10 @@ namespace DndMcp.Hosting;
 /// <para>
 /// A parameter marked <see cref="SameShapeAsAttribute"/> is published untyped (its schema would repeat another
 /// parameter's) and checked here exactly as that parameter is: against its schema's fields, then test-deserialized as its
-/// CLR type. Without that, an untyped object would reach the tool unchecked, and a misspelt field in it would be ignored.
+/// CLR type; when that parameter is an array (<c>balance_simulate</c>'s <c>enemies</c>, shaped like <c>party</c>), item by
+/// item. A parameter marked <see cref="CheckedAsAttribute"/> is published untyped too and checked the same way against the
+/// schema of the type it names, generated with the server's JSON options. Without either, an untyped value would reach
+/// the tool unchecked, and a misspelt field in it would be ignored.
 /// </para>
 /// </summary>
 internal static partial class ToolArgumentGuard
@@ -81,6 +85,7 @@ internal static partial class ToolArgumentGuard
 
         var problems = new List<string>();
         var sameShapes = SameShapeParameters(method);
+        var checkedAs = CheckedAsParameters(method);
 
         if (inputSchema.TryGetProperty("required", out var required) && required.ValueKind == JsonValueKind.Array)
         {
@@ -111,6 +116,12 @@ internal static partial class ToolArgumentGuard
                     parameterTypes?.GetValueOrDefault(shapeOf) is { } shapeType)
                 {
                     problems.AddRange(SameShapeProblems(name, value, shapeSchema, shapeType));
+                    continue;
+                }
+
+                if (checkedAs?.GetValueOrDefault(name) is { } checkedType)
+                {
+                    problems.AddRange(SameShapeProblems(name, value, SchemaOf(checkedType), checkedType));
                     continue;
                 }
 
@@ -156,7 +167,7 @@ internal static partial class ToolArgumentGuard
         if (problems.Count > 0)
         {
             throw new McpException(
-                $"Invalid arguments: {string.Join("; ", problems)}. {toolName} accepts: {DescribeParameters(inputSchema, properties, sameShapes)}.");
+                $"Invalid arguments: {string.Join("; ", problems)}. {toolName} accepts: {DescribeParameters(inputSchema, properties, UntypedSchemas(properties, sameShapes, checkedAs))}.");
         }
     }
 
@@ -318,13 +329,31 @@ internal static partial class ToolArgumentGuard
 
     /// <summary>
     /// An argument published untyped that must have another parameter's shape (<see cref="SameShapeAsAttribute"/>): null,
-    /// or an object whose fields pass that parameter's schema and which binds as that parameter's CLR type.
+    /// or an object whose fields pass that parameter's schema and which binds as that parameter's CLR type, or — when the
+    /// other parameter is an array (<c>balance_simulate</c>'s <c>enemies</c>, shaped like <c>party</c>) — an array whose
+    /// items pass that parameter's item schema and which binds as its CLR type, item problems counted as for a typed array.
     /// </summary>
     private static IEnumerable<string> SameShapeProblems(string name, JsonElement value, JsonElement shapeSchema, Type shapeType)
     {
         if (value.ValueKind == JsonValueKind.Null)
         {
             return [];
+        }
+
+        if (AllowedTypes(shapeSchema).Contains("array"))
+        {
+            if (value.ValueKind != JsonValueKind.Array)
+            {
+                return [$"argument '{name}' should be array but was {Describe(value)}"];
+            }
+
+            var itemProblems = ItemProblems(name, shapeSchema, value).ToList();
+            if (itemProblems.Count == 0)
+            {
+                itemProblems = Capped(name, ItemValueProblems(name, shapeSchema, value, ElementType(shapeType)));
+            }
+
+            return itemProblems.Count > 0 ? itemProblems : BindingProblems(name, value, shapeType).ToList();
         }
 
         if (value.ValueKind != JsonValueKind.Object)
@@ -574,6 +603,59 @@ internal static partial class ToolArgumentGuard
         return shapes;
     }
 
+    /// <summary>The parameters marked <see cref="CheckedAsAttribute"/>, by schema name, each with its type; null when none.</summary>
+    private static Dictionary<string, Type>? CheckedAsParameters(MethodInfo? method)
+    {
+        Dictionary<string, Type>? types = null;
+        foreach (var parameter in method?.GetParameters() ?? [])
+        {
+            if (parameter.GetCustomAttribute<CheckedAsAttribute>() is { } attribute && SchemaName(parameter) is { } name)
+            {
+                (types ??= new Dictionary<string, Type>(StringComparer.Ordinal))[name] = attribute.Type;
+            }
+        }
+
+        return types;
+    }
+
+    private static readonly ConcurrentDictionary<Type, JsonElement> Schemas = new();
+
+    /// <summary>
+    /// The JSON schema of a <see cref="CheckedAsAttribute"/> parameter's type, made by the generator and options the SDK
+    /// makes typed parameters' schemas with, so the checks match what a typed parameter would get. Cached per type.
+    /// </summary>
+    private static JsonElement SchemaOf(Type type) =>
+        Schemas.GetOrAdd(type, t => AIJsonUtilities.CreateJsonSchema(t, serializerOptions: McpJson.Options));
+
+    /// <summary>
+    /// The schema that describes each untyped parameter in the accepted-parameters list: the named parameter's for
+    /// <see cref="SameShapeAsAttribute"/>, the type's for <see cref="CheckedAsAttribute"/>.
+    /// </summary>
+    private static Dictionary<string, JsonElement>? UntypedSchemas(
+        JsonElement properties, Dictionary<string, string>? sameShapes, Dictionary<string, Type>? checkedAs)
+    {
+        if (sameShapes is null && checkedAs is null)
+        {
+            return null;
+        }
+
+        var schemas = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        foreach (var (name, shapeOf) in sameShapes ?? [])
+        {
+            if (properties.TryGetProperty(shapeOf, out var shape))
+            {
+                schemas[name] = shape;
+            }
+        }
+
+        foreach (var (name, type) in checkedAs ?? [])
+        {
+            schemas[name] = SchemaOf(type);
+        }
+
+        return schemas;
+    }
+
     // MEAI001: the attribute is experimental in Microsoft.Extensions.AI 10.8.3. If it is renamed or removed,
     // the SDK's parameter naming changes with it, and a build break here is the right signal.
 #pragma warning disable MEAI001
@@ -592,8 +674,8 @@ internal static partial class ToolArgumentGuard
         _ => value.ValueKind.ToString(),
     };
 
-    // A same-shape parameter's schema is untyped on purpose (SameShapeAsAttribute); the list says what it takes.
-    private static string DescribeParameters(JsonElement schema, JsonElement properties, Dictionary<string, string>? sameShapes)
+    // An untyped parameter's schema is untyped on purpose (SameShapeAsAttribute, CheckedAsAttribute); the list says what it takes.
+    private static string DescribeParameters(JsonElement schema, JsonElement properties, Dictionary<string, JsonElement>? untyped)
     {
         var required = schema.TryGetProperty("required", out var r) && r.ValueKind == JsonValueKind.Array
             ? r.EnumerateArray().Select(x => x.GetString()).OfType<string>().ToHashSet()
@@ -601,8 +683,10 @@ internal static partial class ToolArgumentGuard
 
         return string.Join(", ", properties.EnumerateObject().Select(p =>
         {
-            var typeText = sameShapes?.ContainsKey(p.Name) == true ? "object" : TypeText(p.Value);
-            if (typeText == "array" && p.Value.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Object &&
+            // An untyped parameter is described by the schema it is checked against.
+            var schemaOf = untyped is not null && untyped.TryGetValue(p.Name, out var shape) ? shape : p.Value;
+            var typeText = TypeText(schemaOf);
+            if (typeText == "array" && schemaOf.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Object &&
                 TypeText(items) is var itemText and not "any")
             {
                 typeText = $"array of {itemText}";

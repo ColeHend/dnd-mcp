@@ -105,6 +105,18 @@ public sealed record LevelEquivalent(double Value, double Reported, string Text,
 /// Δ into a huge LE; RPGBOT's target (1.25 DPR a level in tiers 1–3, 1.875 in tier 4) is the conventional yardstick then,
 /// and a note says so.
 /// </para>
+/// <para>
+/// <b>Which target the slope uses.</b> The target spec as given, resolved at each slope level, like the compared levels
+/// themselves: a fixed ac, cr or monster is the same creature at both ends; the default target is the profile's CR = level
+/// row at each end — the DMG 2014 row, or under <c>profile</c> mm2014 / mm2024 the SRD medians for CR = that level, so
+/// the slope is how the baseline keeps up with that edition's typical monsters. The empirical rows are a census, not a
+/// design table, and a slope reads only its two end rows, so their unevenness shows: balance_compare's example baseline
+/// (a scaling greatsword fighter) has a tier 2 slope (level 4 → 10) of 1.47 DPR a level against the DMG rows, 1.36 against
+/// mm2024 and 1.08 against mm2014, whose CR 4 median AC is 12 against CR 10's 18; its tier 1 slope against mm2024 is flat
+/// (CR 1 → 4 medians AC 13 → 15) and falls back to RPGBOT's. That is the profile's answer, not an error, and the slope
+/// lines say which targets they used; a slope below <see cref="DprLimits.MinTierSlope"/> still falls back to RPGBOT's,
+/// which never depends on the profile.
+/// </para>
 /// </summary>
 public static class LevelEquivalents
 {

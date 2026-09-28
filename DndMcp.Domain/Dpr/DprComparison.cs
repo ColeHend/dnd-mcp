@@ -20,6 +20,12 @@ public sealed record CompareRequest
 
     public TargetSpec? Target { get; init; }
 
+    /// <summary>
+    /// The stat block <see cref="TargetSpec.Monster"/> names, looked up by the host; required when the target names one
+    /// (<see cref="TargetResolver.Resolve"/>).
+    /// </summary>
+    public Simulation.StatBlock? TargetMonster { get; init; }
+
     public RulingsSpec? Rulings { get; init; }
 
     /// <summary>Levels to compare at (1–20); null or empty: the baseline's own level.</summary>
@@ -80,7 +86,66 @@ public sealed record ActionSlotReport(string Slot, IReadOnlyList<string> Baselin
 /// <param name="New">The baseline has no effect of that kind and name (it comes with the variant).</param>
 /// <param name="LandChancePerTurn">P(the condition lands in a turn), averaged over the fight's rounds.</param>
 /// <param name="LandChancePerFight">P(it lands at least once in the fight).</param>
-public sealed record SignatureEffect(string Name, string Kind, string Condition, bool New, double LandChancePerTurn, double LandChancePerFight, int Rounds);
+public sealed record SignatureEffect(string Name, string Kind, string Condition, bool New, double LandChancePerTurn, double LandChancePerFight, int Rounds)
+{
+    /// <summary>The target is immune to the condition (a stat block's condition immunity): the 0% chances are that, not bad luck.</summary>
+    public bool Immune { get; init; }
+}
+
+/// <summary>
+/// The yardstick for a feat: what an Ability Score Improvement adds to the BASELINE at the detail level, on the same slope
+/// as the headline (contract §4.6's LE and bands are unchanged; this puts them in scale). A general feat taken at an ASI
+/// level replaces the ASI, so what it adds beyond this (<see cref="NetDelta"/>) is what it is worth there; for an origin
+/// feat, a class feature, an item or a boon the net figure is not a verdict, which the result says.
+///
+/// <para>
+/// The ability raised is the to_hit ability of the attack line that deals the most damage in the baseline's detail
+/// evaluation, or for a build with only save effects the dc_ability of the one that deals the most. It rises by 2, to at
+/// most 20, and the baseline is evaluated again with the same horizon, target and rulings. Skipped, with
+/// <see cref="SkipReason"/>, when that ability is none, the DC is given rather than from an ability, the score is already
+/// 20 or more, or nothing deals damage.
+/// </para>
+/// </summary>
+public sealed record AsiYardstick
+{
+    /// <summary>The ability key raised, or null when skipped.</summary>
+    public string? Ability { get; init; }
+
+    public int From { get; init; }
+
+    public int To { get; init; }
+
+    /// <summary>The baseline's DPR with the ASI (the headline horizon).</summary>
+    public double AsiDamagePerRound { get; init; }
+
+    /// <summary>ASI − baseline.</summary>
+    public double Delta { get; init; }
+
+    /// <summary>Δ_ASI ÷ the same slope as the headline's level-equivalent.</summary>
+    public LevelEquivalent? LevelEquivalent { get; init; }
+
+    /// <summary>The feature's Δ minus the ASI's: what it adds beyond an ASI.</summary>
+    public double NetDelta { get; init; }
+
+    public LevelEquivalent? NetLevelEquivalent { get; init; }
+
+    /// <summary>Why there is no yardstick, or null.</summary>
+    public string? SkipReason { get; init; }
+
+    public static AsiYardstick Skipped(string reason) => new() { SkipReason = reason };
+}
+
+/// <summary>A resource-limited feature of a compared build (a day horizon feature), named for the limited-uses line.</summary>
+public sealed record LimitedFeature(string Name, ResolvedResource Resource);
+
+/// <summary>
+/// A headline on the fight or round1 horizon when a compared build has resource-limited features: those horizons give
+/// their uses fresh every fight (round 1 spends them freely), so the band can read a "3 per long rest" feat as
+/// Breaking. This is the day's figure beside it: Δ on the day horizon (already in the summaries) and its level-equivalent
+/// on the baseline's DAY-horizon slope (a fight slope would divide a day Δ by the wrong curve), with the day's own band.
+/// </summary>
+/// <param name="Features">The limited features, the variant's then any the baseline has alone.</param>
+public sealed record LimitedUsesReport(IReadOnlyList<LimitedFeature> Features, double DayDelta, LevelEquivalent DayLevelEquivalent);
 
 /// <summary>One level of a comparison: both builds' results under identical assumptions, Δ and the level-equivalent.</summary>
 public sealed record ComparisonLevel
@@ -139,6 +204,15 @@ public sealed record ComparisonReport
     /// <summary>The baseline's, for comparison.</summary>
     public required IReadOnlyList<SignatureEffect> BaselineSignatureEffects { get; init; }
 
+    /// <summary>What an ASI adds to the baseline at <see cref="DetailLevel"/> on the headline's slope (the scale a feat is read on).</summary>
+    public required AsiYardstick Asi { get; init; }
+
+    /// <summary>
+    /// On a fight or round1 headline with resource-limited features: the day horizon's Δ and level-equivalent; null
+    /// otherwise.
+    /// </summary>
+    public LimitedUsesReport? LimitedUses { get; init; }
+
     /// <summary>Call-level notes: mismatched builds, slope fallbacks, collisions.</summary>
     public required IReadOnlyList<string> Notes { get; init; }
 
@@ -154,6 +228,15 @@ public sealed record ComparisonReport
 /// <para>
 /// <b>Validation order</b> follows what the model wrote: the baseline first ("Invalid baseline: …"), then the feature on
 /// its own numbering ("Invalid feature: …") or the variant ("Invalid variant: …"), so a mistake is reported where it is.
+/// A problem only the merged build shows (a feature step map with no value at a level compared, a Concentration clash
+/// with a baseline modifier) is still "Invalid feature", naming each item in the list it came from
+/// (<see cref="ItemNames"/>).
+/// </para>
+/// <para>
+/// <b>Reading the band.</b> The level-equivalent is damage-only and measured against the baseline as given (for a
+/// feature, against adding nothing). So the report also carries an ASI yardstick on the same slope
+/// (<see cref="AsiYardstick"/>) and, when limited uses make the fight horizon generous, the day's Δ with its own
+/// level-equivalent (<see cref="LimitedUsesReport"/>).
 /// </para>
 /// <para>
 /// <b>The slope</b> of a level's tier comes from the baseline's own curve at the tier's edges (<see cref="LevelEquivalents"/>),
@@ -187,11 +270,20 @@ public static class DprComparison
         }
 
         var levels = DprAnalysis.DistinctLevels(request.Levels);
-        TargetResolver.Validate(request.Target);
+        TargetResolver.Validate(request.Target, request.TargetMonster);
         var baselines = BuildResolver.Resolve(request.Baseline, levels, request.Rulings, "baseline");
         var evaluated = baselines.Select(b => b.Level).ToList();
-        var variantSpec = request.Variant ?? FeatureMerge.Merge(request.Baseline, request.Feature!);
-        var variants = BuildResolver.Resolve(variantSpec, evaluated, request.Rulings, "variant");
+        IReadOnlyList<ResolvedBuild> variants;
+        if (request.Variant is not null)
+        {
+            variants = BuildResolver.Resolve(request.Variant, evaluated, request.Rulings, "variant");
+        }
+        else
+        {
+            // A problem only the merged build shows is the feature's, named in the lists the model wrote.
+            var (merged, origins) = FeatureMerge.MergeWithOrigins(request.Baseline, request.Feature!);
+            variants = BuildResolver.Resolve(merged, evaluated, request.Rulings, "feature", BuildUse.Dpr, ItemNames.Merged(origins));
+        }
 
         var ownLevel = request.Baseline.Level ?? evaluated[0];
         var detailLevel = evaluated.Contains(ownLevel) ? ownLevel : evaluated[0];
@@ -204,7 +296,7 @@ public static class DprComparison
             for (var i = 0; i < evaluated.Count; i++)
             {
                 var level = evaluated[i];
-                var target = TargetResolver.Resolve(request.Target, level);
+                var target = TargetResolver.Resolve(request.Target, level, request.TargetMonster);
                 var detail = level == detailLevel;
                 var baseline = HorizonEvaluator.Full(baselines[i], target, horizon, detail, runner);
                 var variant = HorizonEvaluator.Full(variants[i], target, horizon, detail, runner);
@@ -241,6 +333,10 @@ public static class DprComparison
             var variantSummary = HorizonEvaluator.Summary(detailResult.Variant, runner, variantFight);
             var baselineEffects = Signature(baselineFight, horizon.Rounds, baseline: null);
             var variantEffects = Signature(variantFight, horizon.Rounds, baselineEffects);
+            var asi = Yardstick(request, detailResult, horizon, runner);
+            var limitedUses = LimitedUses(request, detailResult, baselineSummary, variantSummary, horizon, runner, baselines[0].ScalesWithLevel);
+            notes.AddRange(AbilityNotes(request, baselines));
+            notes.AddRange(LegendaryResistanceNotes(detailResult));
 
             return new ComparisonReport
             {
@@ -257,6 +353,8 @@ public static class DprComparison
                 Reaction = reaction,
                 SignatureEffects = variantEffects,
                 BaselineSignatureEffects = baselineEffects,
+                Asi = asi,
+                LimitedUses = limitedUses,
                 Notes = notes.Distinct().ToList(),
                 Runs = runner.Runs,
             };
@@ -280,6 +378,196 @@ public static class DprComparison
         return Math.Abs(delta) <= DeltaPrecision * Math.Max(1.0, Math.Abs(baseline)) ? 0 : delta;
     }
 
+    /// <summary>The ASI yardstick at the detail level (see <see cref="AsiYardstick"/>).</summary>
+    private static AsiYardstick Yardstick(CompareRequest request, ComparisonLevel detail, HorizonSettings horizon, DprRunner runner)
+    {
+        var evaluation = detail.Baseline.Evaluation;
+        var build = evaluation.Build;
+        string? ability;
+        var attack = evaluation.Attacks.Where(a => a.DamagePerRound > 0).OrderByDescending(a => a.DamagePerRound).FirstOrDefault();
+        if (attack is not null)
+        {
+            ability = build.FindAttack(attack.Attack)!.Ability;
+            if (ability == V.Abilities.None)
+            {
+                return AsiYardstick.Skipped(
+                    $"the baseline's main attack, {attack.Attack}, has to_hit ability none (a fixed bonus), so an ASI does not change it");
+            }
+        }
+        else
+        {
+            var save = evaluation.SaveEffects.Select((r, i) => (Report: r, Effect: build.SaveEffects[i]))
+                .Where(p => p.Report.DamagePerRound > 0)
+                .OrderByDescending(p => p.Report.DamagePerRound)
+                .FirstOrDefault();
+            if (save.Effect is null)
+            {
+                return AsiYardstick.Skipped("no attack or save effect of the baseline deals damage here, so an ASI has nothing to raise");
+            }
+
+            ability = save.Effect.DcAbility;
+            if (ability is null)
+            {
+                return AsiYardstick.Skipped($"the baseline's {save.Effect.Source.Label} has a given DC, not one from an ability, so an ASI does not change it");
+            }
+        }
+
+        var from = build.Abilities.Score(ability);
+        if (from >= DprLimits.AsiCap)
+        {
+            return AsiYardstick.Skipped(
+                $"the baseline's {V.Abilities.Display(ability)} is already {Text(from)} (an ASI raises a score to at most {Text(DprLimits.AsiCap)})");
+        }
+
+        var to = Math.Min(DprLimits.AsiCap, from + 2);
+        ResolvedBuild raised;
+        try
+        {
+            raised = BuildResolver.Resolve(WithAbility(BuildPresets.Expand(request.Baseline), ability, to), detail.Level, request.Rulings, "baseline");
+        }
+        catch (DndInputException ex)
+        {
+            // The baseline validated at this level, so only a bug gets here; the yardstick is a side figure, never the reason a call fails.
+            return AsiYardstick.Skipped($"the baseline with {V.Abilities.Display(ability)} {Text(to)} could not be read ({ex.Message})");
+        }
+
+        var damage = HorizonEvaluator.Headline(raised, evaluation.Target, horizon, runner).DamagePerRound;
+        var slope = detail.LevelEquivalent.Slope;
+        var delta = Delta(detail.Baseline.DamagePerRound, damage);
+        var net = detail.Delta - delta;
+        return new AsiYardstick
+        {
+            Ability = ability,
+            From = from,
+            To = to,
+            AsiDamagePerRound = damage,
+            Delta = delta,
+            LevelEquivalent = LevelEquivalents.Of(delta, slope),
+            NetDelta = net,
+            NetLevelEquivalent = LevelEquivalents.Of(net, slope),
+        };
+    }
+
+    // The spec with one ability score set to a scalar: the yardstick evaluates one level, where a scalar is exact.
+    private static BuildSpec WithAbility(BuildSpec spec, string ability, int score)
+    {
+        var abilities = spec.Abilities;
+        object? Pick(string key) => key == ability ? score : abilities?.Get(key);
+        return new BuildSpec
+        {
+            Name = spec.Name,
+            Edition = spec.Edition,
+            Level = spec.Level,
+            Abilities = new AbilitiesSpec
+            {
+                Str = Pick(V.Abilities.Str),
+                Dex = Pick(V.Abilities.Dex),
+                Con = Pick(V.Abilities.Con),
+                Int = Pick(V.Abilities.Int),
+                Wis = Pick(V.Abilities.Wis),
+                Cha = Pick(V.Abilities.Cha),
+            },
+            ProficiencyBonus = spec.ProficiencyBonus,
+            FightingStyle = spec.FightingStyle,
+            Attacks = spec.Attacks,
+            Modifiers = spec.Modifiers,
+        };
+    }
+
+    /// <summary>
+    /// The day's figure beside a fight or round1 headline when either build has resource-limited features at the detail
+    /// level (see <see cref="LimitedUsesReport"/>). The day slope is always measured on the day horizon: the baseline's own
+    /// day curve at the tier's edges (its limited features amortized there too), or RPGBOT's when that cannot serve.
+    /// </summary>
+    private static LimitedUsesReport? LimitedUses(
+        CompareRequest request, ComparisonLevel detail, HorizonSummary baseline, HorizonSummary variant, HorizonSettings horizon, DprRunner runner,
+        bool scales)
+    {
+        if (horizon.Horizon == DprHorizons.Day)
+        {
+            return null;
+        }
+
+        var variantFeatures = HorizonEvaluator.LimitedFeatures(detail.Variant.Evaluation.Build);
+        var baselineFeatures = HorizonEvaluator.LimitedFeatures(detail.Baseline.Evaluation.Build);
+        var features = variantFeatures
+            .Concat(baselineFeatures.Where(b => !variantFeatures.Any(v => v.Source.Label == b.Source.Label)))
+            .Select(f => new LimitedFeature(f.Source.Label, f.Resource))
+            .ToList();
+        if (features.Count == 0)
+        {
+            return null;
+        }
+
+        var day = HorizonSettings.ForDay(horizon.Day, horizon.Rounds);
+        var slopes = new Slopes(request, day, runner, scales, new Dictionary<int, double> { [detail.Level] = baseline.DayDamagePerRound });
+        var dayDelta = Delta(baseline.DayDamagePerRound, variant.DayDamagePerRound);
+        return new LimitedUsesReport(features, dayDelta, LevelEquivalents.Of(dayDelta, slopes.For(LevelEquivalents.Tier(detail.Level))));
+    }
+
+    /// <summary>
+    /// A feature that gives an ability as one number over a baseline whose score changes across the levels compared:
+    /// the feature's value replaces the baseline's step map at EVERY level (abilities SET), so the variant loses the
+    /// baseline's later ASIs and gains the feat before its level. Said, since the Δ curve reads as the feature's.
+    /// </summary>
+    private static IEnumerable<string> AbilityNotes(CompareRequest request, IReadOnlyList<ResolvedBuild> baselines)
+    {
+        if (request.Feature?.Abilities is not { } abilities || baselines.Count < 2)
+        {
+            yield break;
+        }
+
+        var baseline = BuildPresets.Expand(request.Baseline);
+        foreach (var ability in V.Abilities.All)
+        {
+            LevelValue<int>? given;
+            LevelValue<int>? steps;
+            try
+            {
+                given = LevelValue.ParseInt(abilities.Get(ability), ability, DslLimits.MinAbilityScore, DslLimits.MaxAbilityScore);
+                steps = LevelValue.ParseInt(baseline.Abilities?.Get(ability), ability, DslLimits.MinAbilityScore, DslLimits.MaxAbilityScore);
+            }
+            catch (DndInputException)
+            {
+                continue;
+            }
+
+            if (given is null || given.IsStepMap || steps is null || !steps.Scales ||
+                baselines.Select(b => b.Abilities.Score(ability)).Distinct().Count() < 2)
+            {
+                continue;
+            }
+
+            var display = V.Abilities.Display(ability);
+            yield return
+                $"The feature sets {display} {Text(given.At(1))} at every level, replacing the baseline's step map " +
+                $"({string.Join("/", steps.Steps.Select(s => Text(s.Value)))} at {string.Join("/", steps.Steps.Select(s => Text(s.Level)))}): the " +
+                "variant has it before the feat's level and loses the baseline's later increases. For a feat taken at one level, give " +
+                $"the variant's whole step map, e.g. {{\"{ability}\": {{\"1\": {Text(steps.Steps[0].Value)}, \"<feat level>\": …}}}}.";
+        }
+    }
+
+    /// <summary>
+    /// Against Legendary Resistance the condition effects' landing chances (and a condition's Advantage on damage) assume
+    /// every failed save sticks, so Δ and its band are not the rules-as-written value against a legendary creature.
+    /// </summary>
+    private static IEnumerable<string> LegendaryResistanceNotes(ComparisonLevel detail)
+    {
+        var target = detail.Baseline.Evaluation.Target;
+        var effects = new[] { detail.Baseline.Evaluation, detail.Variant.Evaluation }
+            .SelectMany(e => e.Conditions.Where(c => !c.Immune).Select(c => c.Name)
+                .Concat(e.SaveEffects.Where(s => s.Condition is not null && !s.ConditionImmune).Select(s => s.Name)))
+            .Distinct()
+            .ToList();
+        if (target.LegendaryResistance > 0 && effects.Count > 0)
+        {
+            yield return
+                $"Against {Text(target.LegendaryResistance)} Legendary Resistance: {string.Join(", ", effects)} {(effects.Count == 1 ? "is" : "are")} " +
+                "measured as if every failed save sticks, so Δ and the band are not what a creature that spends one on each failure " +
+                "allows (the expected casts or attempts to land are in each build's breakdown).";
+        }
+    }
+
     private static List<SignatureEffect> Signature(DprResult fight, int rounds, IReadOnlyList<SignatureEffect>? baseline)
     {
         bool IsNew(string kind, string name) => baseline is not null && !baseline.Any(b => b.Kind == kind && b.Name == name);
@@ -289,7 +577,10 @@ public static class DprComparison
         {
             effects.Add(new SignatureEffect(
                 condition.Name, V.Kinds.ConditionOnHit, condition.Condition, IsNew(V.Kinds.ConditionOnHit, condition.Name),
-                condition.LandChancePerTurn, condition.LandChancePerFight ?? condition.LandChancePerTurn, rounds));
+                condition.LandChancePerTurn, condition.LandChancePerFight ?? condition.LandChancePerTurn, rounds)
+            {
+                Immune = condition.Immune,
+            });
         }
 
         foreach (var save in fight.SaveEffects)
@@ -297,7 +588,10 @@ public static class DprComparison
             if (save.Condition is not null && save.LandChancePerTurn is { } perTurn)
             {
                 effects.Add(new SignatureEffect(
-                    save.Name, V.Kinds.SaveEffect, save.Condition, IsNew(V.Kinds.SaveEffect, save.Name), perTurn, save.LandChancePerFight ?? perTurn, rounds));
+                    save.Name, V.Kinds.SaveEffect, save.Condition, IsNew(V.Kinds.SaveEffect, save.Name), perTurn, save.LandChancePerFight ?? perTurn, rounds)
+                {
+                    Immune = save.ConditionImmune,
+                });
             }
         }
 
@@ -423,7 +717,7 @@ public static class DprComparison
                 return false;
             }
 
-            value = HorizonEvaluator.Headline(build, TargetResolver.Resolve(request.Target, level), horizon, runner).DamagePerRound;
+            value = HorizonEvaluator.Headline(build, TargetResolver.Resolve(request.Target, level, request.TargetMonster), horizon, runner).DamagePerRound;
             damage[level] = value;
             return true;
         }

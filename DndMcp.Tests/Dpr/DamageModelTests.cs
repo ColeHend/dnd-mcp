@@ -112,6 +112,19 @@ public sealed class DamageModelTests
         Assert.Equal(expected, DamageAdjustment.Apply(rolled, type, target, halve));
     }
 
+    [Theory]
+    [InlineData(false, false, 4)] // mundane: the qualified resistance applies, floor(9/2)
+    [InlineData(true, false, 9)] // magical: it does not
+    [InlineData(false, true, 9)] // silvered: it does not
+    public void Apply_QualifiedResistance_ReadsTheDamagesProperties(bool magical, bool silvered, long expected)
+    {
+        var target = TargetResolver.Resolve(null, 5, Features.TargetStatBlocks.WerewolfLike());
+
+        Assert.Equal(expected, DamageAdjustment.Apply(9, "slashing", target, properties: new DamageProperties(magical, silvered, false)));
+        Assert.Equal(4, DamageAdjustment.Apply(9, "cold", target, properties: new DamageProperties(magical, silvered, false))); // unqualified
+        Assert.Equal(4, DamageAdjustment.Apply(9, "slashing", target)); // left out: plain damage
+    }
+
     [Fact]
     public void Apply_TypelessDamage_IsNeverResisted()
     {

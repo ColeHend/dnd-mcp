@@ -212,7 +212,8 @@ public sealed class DprComparisonTests
 
         // Only the detail level carries the round-1 distributions; the slope's own levels (1, 4, 10, 16) are extra runs.
         Assert.All(report.Levels, l => Assert.Equal(l.Level == 5, l.Baseline.Evaluation.Round1Distribution is not null && l.Variant.Evaluation.Round1Distribution is not null));
-        Assert.Equal((2 * 4) + 4, report.Runs);
+        // Plus one: the ASI yardstick's baseline run at the detail level.
+        Assert.Equal((2 * 4) + 4 + 1, report.Runs);
     }
 
     [Fact]
@@ -341,9 +342,9 @@ public sealed class DprComparisonTests
         """;
 
     [Theory]
-    [InlineData("fight", 2)] // each build's fight run serves the headline, the summary and the landing chances
-    [InlineData("round1", 4)] // one more fight each, shared by the summary and the landing chances
-    [InlineData("day", 2)] // nothing limited: the day is the fight
+    [InlineData("fight", 3)] // each build's fight run serves the headline, the summary and the landing chances; + the ASI run
+    [InlineData("round1", 5)] // one more fight each, shared by the summary and the landing chances; + the ASI run
+    [InlineData("day", 3)] // nothing limited: the day is the fight; + the ASI run
     public void Compare_SignatureCondition_LandsPerTurnAndPerFightByHand(string horizon, int runs)
     {
         // One +7 swing vs AC 15 (0.65), then Con DC 15 vs +2 (fails 0.6): stunned in 0.65 × 0.6 = 0.39 of turns. Turns are
@@ -455,5 +456,281 @@ public sealed class DprComparisonTests
         var request = new CompareRequest { Baseline = Build(Scaler), Feature = Feature(ModifierFeature("F", """{ "kind": "to_hit", "amount": 1 }""")) };
 
         Assert.ThrowsAny<OperationCanceledException>(() => DprComparison.Compare(request, cancellation.Token));
+    }
+
+    // ------------------------------------------------------------------------------------------------------------------
+    // Phase 4 review fixes: the ASI yardstick, the day figure for limited uses, feature-named errors, notes.
+    // ------------------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Compare_2024GwmFeat_ReportsTheAsiYardstickOnTheSameSlope()
+    {
+        // §8.3: without the feat (Str 18) 19.20; the ASI (Str 20) 22.00, +2.80; GWM with its +1 (Str 19) 24.036, +4.836, so
+        // +2.036 beyond the ASI. The baseline does not scale: both divide by RPGBOT's 1.25 a level (2.24 → "2.2", 1.6288 → "1.6").
+        var feature = """{ "name": "Great Weapon Master", "abilities": {"str": 19}, "modifiers": [GWM] }""".Replace("GWM", GoldenBuilds.Gwm2024, StringComparison.Ordinal);
+
+        var report = Compare(GoldenBuilds.Fighter2024(strength: 18), feature);
+
+        var asi = report.Asi;
+        Assert.Null(asi.SkipReason);
+        Assert.Equal(("str", 18, 20), (asi.Ability, asi.From, asi.To));
+        Assert.Equal(22.0, asi.AsiDamagePerRound, Exact);
+        Assert.Equal(2.8, asi.Delta, Exact);
+        Assert.Equal(4.836 - 2.8, asi.NetDelta, Exact);
+        Assert.Same(report.Detail.LevelEquivalent.Slope, asi.LevelEquivalent!.Slope);
+        Assert.Same(report.Detail.LevelEquivalent.Slope, asi.NetLevelEquivalent!.Slope);
+        Assert.Equal(("2.2", "1.6"), (asi.LevelEquivalent.Text, asi.NetLevelEquivalent.Text));
+    }
+
+    [Theory]
+    [InlineData("""{ "name": "Fighter", "level": 5, "abilities": {"str": 20}, "attacks": [{ "name": "Greatsword", "count": 2, "damage": "2d6", "damage_type": "slashing" }] }""",
+                "the baseline's Str is already 20 (an ASI raises a score to at most 20)")]
+    [InlineData("""{ "name": "Trapper", "level": 5, "attacks": [{ "name": "Dart trap", "to_hit": {"ability": "none", "total": 7}, "damage": "1d4" }] }""",
+                "the baseline's main attack, Dart trap, has to_hit ability none (a fixed bonus), so an ASI does not change it")]
+    [InlineData("""{ "name": "Breath", "level": 5, "modifiers": [{ "kind": "save_effect", "name": "Breath", "ability": "dex", "dc": 13, "dice": "2d6" }] }""",
+                "the baseline's Breath has a given DC, not one from an ability, so an ASI does not change it")]
+    public void Compare_NothingAnAsiCanRaise_SkipsTheYardstickWithItsReason(string baseline, string reason)
+    {
+        var report = Compare(baseline, ModifierFeature("Extra", """{ "kind": "extra_damage", "dice": "1d4" }"""));
+
+        Assert.Equal(reason, report.Asi.SkipReason);
+        Assert.Null(report.Asi.LevelEquivalent);
+    }
+
+    [Fact]
+    public void Compare_SaveEffectOnlyBaseline_RaisesItsDcAbility()
+    {
+        // Sacred Flame, DC 8 + 3 + Wis +3 = 14 vs Dex +2: fails 0.55, 2d8 = 9 at level 5. With Wis 18 the DC is 15: 0.60.
+        // The ASI adds 0.05 × 9 = 0.45.
+        const string cleric = """{ "name": "Cleric", "level": 5, "abilities": {"wis": 16}, "modifiers": [{ "kind": "save_effect", "name": "Sacred Flame", "ability": "dex", "dc_ability": "wis", "dice": "1d8", "type": "radiant", "on_success": "none", "cantrip": true }] }""";
+
+        var report = Compare(cleric, ModifierFeature("Blessed Strikes", """{ "kind": "to_hit", "amount": 1 }"""), target: """{ "saves": {"dex": 2} }""");
+
+        Assert.Equal(("wis", 16, 18), (report.Asi.Ability, report.Asi.From, report.Asi.To));
+        Assert.Equal(0.45, report.Asi.Delta, Exact);
+    }
+
+    private const string Paladin = """
+        { "name": "Paladin", "level": 5, "abilities": {"str": 18},
+          "attacks": [{ "name": "Longsword", "count": 2, "damage": "1d8", "damage_type": "slashing", "properties": ["melee", "versatile"] }] }
+        """;
+
+    private const string FireFeat = """{ "kind": "extra_damage", "name": "Fire Feat", "dice": "1d8", "type": "fire", "when": "first_hit_per_turn", "resource": {"uses": 3, "per": "long_rest"} }""";
+
+    [Fact]
+    public void Compare_LimitedFeatureOnTheFightHorizon_AddsTheDayFigureWithItsOwnLevelEquivalent()
+    {
+        // 1d8 on the first hit (+7 vs AC 15): per round 0.65 × 3.15 + 0.35 × 3.15 × 0.65 … = 4.2525 over P(a hit) 0.8775, so
+        // d = 63/13 a use. The fight gives 3 fresh uses every 3-round fight: +4.2525 (LE 3.4, Breaking). The DMG day, 7
+        // fights of 3 rounds, spends 3 uses over 21 rounds: 3 × 63/13 ÷ 21 = 9/13 = +0.6923, LE 0.55 on the (reference)
+        // slope, Over.
+        var report = Compare(Paladin, ModifierFeature("Fire Feat", FireFeat));
+
+        Assert.Equal(4.2525, report.Detail.Delta, Exact);
+        var limited = report.LimitedUses!;
+        Assert.Equal(9.0 / 13, limited.DayDelta, Exact);
+        Assert.Equal(("0.55", BalanceBands.Over), (limited.DayLevelEquivalent.Text, limited.DayLevelEquivalent.Band));
+        Assert.Equal([("Fire Feat", new ResolvedResource(3, "long_rest"))], limited.Features.Select(f => (f.Name, f.Resource)));
+    }
+
+    [Theory]
+    [InlineData("day", FireFeat)] // the headline already is the day
+    [InlineData(null, """{ "kind": "reroll_damage_take_best", "name": "Savage Attacker" }""")] // nothing limited
+    public void Compare_DayHeadlineOrNothingLimited_HasNoLimitedUsesFigure(string? horizon, string modifier)
+    {
+        Assert.Null(Compare(Paladin, ModifierFeature("Feature", modifier), horizon: horizon).LimitedUses);
+    }
+
+    [Fact]
+    public void Compare_ActionSurgeOnARound1Headline_GivesTheDaysPlus279()
+    {
+        // §8.12 on the DMG day (E 7, S 2 → 3 uses): 3 × 19.5227 ÷ 21 = +2.789.
+        var report = Compare(GoldenBuilds.Fighter2014(GoldenBuilds.Gwm2014), ModifierFeature("Action Surge", GoldenBuilds.ActionSurge), horizon: "round1");
+
+        Assert.Equal(3 * 19.5227 / 21, report.LimitedUses!.DayDelta, 1e-4);
+    }
+
+    [Fact]
+    public void Compare_ScalingBaselineWithLimitedFeatures_DividesTheDayDeltaByTheDaySlope()
+    {
+        // The baseline itself has a limited smite, so its day curve differs from its fight curve: the day figure must use
+        // the DAY slope at the tier's edges (4 and 10), which this recomputes from two day-horizon runs of the baseline.
+        const string baseline = """
+            { "name": "Smiter", "level": 5, "abilities": {"str": {"1": 16, "4": 18, "8": 20}},
+              "attacks": [{ "name": "Longsword", "count": {"1": 1, "5": 2}, "damage": "1d8", "damage_type": "slashing", "properties": ["melee"] }],
+              "modifiers": [{ "kind": "extra_damage", "name": "Smite", "dice": "2d8", "type": "radiant", "when": "first_hit_per_turn", "resource": {"uses": 2, "per": "long_rest"} }] }
+            """;
+
+        var report = Compare(baseline, ModifierFeature("Fire Feat", FireFeat));
+
+        double Day(int level) => DprAnalysis.Analyze(new DprRequest { Build = Build(baseline), Target = Target(Ac15), Levels = [level], Horizon = "day" }).Levels[0].DamagePerRound;
+        var daySlope = (Day(10) - Day(4)) / 6;
+        var limited = report.LimitedUses!;
+        Assert.Equal(daySlope, limited.DayLevelEquivalent.Slope.PerLevel, Exact);
+        Assert.NotEqual(report.Slopes.Single(t => t.Tier == 2).PerLevel, limited.DayLevelEquivalent.Slope.PerLevel, 6);
+        Assert.Equal(limited.DayDelta / daySlope, limited.DayLevelEquivalent.Value, Exact);
+
+        // Every run is on the call's one budget and counted: the two fights at level 5, the fight slope's levels 4 and 10,
+        // the two days in the summaries (base + 1 feature, base + 2 features), the ASI yardstick, and the day slope's
+        // levels 4 and 10 (base + the smite each): 2 + 2 + 5 + 1 + 4.
+        Assert.Equal(14, report.Runs);
+    }
+
+    [Fact]
+    public void Compare_TwentyLevelsWithLimitedFeatures_FitsTheCallsBudget()
+    {
+        const string baseline = """
+            { "name": "Smiter", "level": 5, "abilities": {"str": {"1": 16, "4": 18, "8": 20}},
+              "attacks": [{ "name": "Longsword", "count": {"1": 1, "5": 2, "11": 3}, "damage": "1d8", "damage_type": "slashing", "properties": ["melee"] }],
+              "modifiers": [{ "kind": "extra_damage", "name": "Smite", "dice": "2d8", "type": "radiant", "when": "first_hit_per_turn", "resource": {"uses": 2, "per": "long_rest"} }] }
+            """;
+
+        var report = Compare(baseline, ModifierFeature("Fire Feat", FireFeat), target: null, levels: Enumerable.Range(1, 20).ToList());
+
+        Assert.Equal(20, report.Levels.Count);
+        Assert.NotNull(report.LimitedUses);
+    }
+
+    /// <summary>A baseline with two attacks and two modifiers, so merged positions differ from the feature's own.</summary>
+    private const string Blessed = """
+        { "name": "Blessed", "level": 5, "abilities": {"str": 18},
+          "attacks": [{ "name": "Greatsword", "count": 2, "damage": "2d6", "damage_type": "slashing", "properties": ["melee"] },
+                      { "name": "Javelin", "damage": "1d6", "damage_type": "piercing", "properties": ["ranged", "thrown"] }],
+          "modifiers": [{ "kind": "to_hit", "name": "Bless", "dice": "1d4", "concentration": true },
+                        { "kind": "bonus_damage", "name": "Blade Ward", "amount": 1 }] }
+        """;
+
+    private static string CompareError(string baseline, string? feature = null, string? variant = null, IReadOnlyList<int>? levels = null) =>
+        Assert.Throws<DndInputException>(() => Compare(baseline, feature, variant, levels: levels)).Message;
+
+    [Fact]
+    public void Compare_FeatureStepMapUncoveredAtALevel_IsTheFeaturesItem()
+    {
+        var message = CompareError(Blessed, ModifierFeature("Searing", """{ "kind": "extra_damage", "dice": {"5": "1d6"} }"""), levels: [1, 5]);
+
+        Assert.Equal(
+            "Invalid feature: modifiers item 1 (extra_damage): dice has no value at level 1: its step map starts at level 5. Add a key " +
+            "\"1\" or lower (e.g. \"1\"), or give the modifier from_level 5.",
+            message);
+    }
+
+    [Fact]
+    public void Compare_FeatureClashingWithABaselineItem_NamesBothInTheirOwnLists()
+    {
+        var message = CompareError(Blessed, ModifierFeature("Searing Aura", """{ "kind": "extra_damage", "name": "Searing Aura", "dice": "1d6", "concentration": true }"""));
+
+        Assert.Equal(
+            "Invalid feature: at level 5 baseline modifiers item 1 (to_hit \"Bless\") and feature modifiers item 1 (extra_damage " +
+            "\"Searing Aura\") need Concentration, and a character concentrates on one effect at a time; compare them as two builds.",
+            message);
+    }
+
+    [Fact]
+    public void Compare_FeatureAttackReplacingTheBaselinesSecond_IsTheFeaturesFirst()
+    {
+        var feature = """{ "name": "Javelin Master", "attacks": [{ "name": "Javelin", "count": {"5": 2}, "damage": "1d8", "damage_type": "piercing", "properties": ["ranged", "thrown"] }] }""";
+
+        var message = CompareError(Blessed, feature, levels: [1, 5]);
+
+        Assert.StartsWith("Invalid feature: attacks item 1 (Javelin): count has no value at level 1", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compare_FeatureAbilityUncoveredAtALevel_IsTheFeatures()
+    {
+        var message = CompareError(Blessed, """{ "name": "Late bloomer", "abilities": {"str": {"5": 21}} }""", levels: [1, 5]);
+
+        Assert.StartsWith("Invalid feature: abilities str has no value at level 1: its step map starts at level 5.", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compare_SameMistakeThroughVariant_KeepsTheVariantsPositions()
+    {
+        var variant = Blessed.Replace(
+            """{ "kind": "bonus_damage", "name": "Blade Ward", "amount": 1 }""",
+            """{ "kind": "bonus_damage", "name": "Blade Ward", "amount": 1 }, { "kind": "extra_damage", "dice": {"5": "1d6"} }""",
+            StringComparison.Ordinal);
+
+        var message = CompareError(Blessed, variant: variant, levels: [1, 5]);
+
+        Assert.StartsWith("Invalid variant: modifiers item 3 (extra_damage): dice has no value at level 1", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compare_FeatureOnAPreset_NamesThePresetsItems()
+    {
+        var message = CompareError(
+            """{ "name": "Warlock", "preset": "warlock_baseline", "level": 5 }""",
+            ModifierFeature("Bless", """{ "kind": "to_hit", "name": "Bless", "dice": "1d4", "concentration": true }"""));
+
+        Assert.Contains(
+            "the warlock_baseline preset's modifiers item 2 (extra_damage \"Hex\") and feature modifiers item 1 (to_hit \"Bless\") need Concentration",
+            message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compare_FeatureTakingTheMergedBuildPastALimit_SaysBothTogether()
+    {
+        var attacks = string.Join(", ", Enumerable.Range(1, 6).Select(i => $$"""{ "name": "A{{i}}", "damage": "1d4" }"""));
+        var more = string.Join(", ", Enumerable.Range(1, 5).Select(i => $$"""{ "name": "B{{i}}", "damage": "1d4" }"""));
+
+        var message = CompareError($$"""{ "name": "Many", "level": 5, "attacks": [{{attacks}}] }""", $$"""{ "name": "More", "attacks": [{{more}}] }""");
+
+        Assert.Equal("Invalid feature: the baseline and the feature together have 11 attacks; at most 10 are accepted.", message);
+    }
+
+    [Fact]
+    public void Compare_ScalarFeatureAbilityOverASteppedBaseline_SaysItReplacesTheStepMap()
+    {
+        var report = Compare(Scaler, """{ "name": "Feat", "abilities": {"str": 19} }""", levels: [1, 5, 11]);
+
+        Assert.Contains(
+            report.Notes,
+            n => n.StartsWith("The feature sets Str 19 at every level, replacing the baseline's step map (16/18/20 at 1/4/8)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Compare_WholeStepMapFeatureOrScalarBaseline_HasNoReplacementNote()
+    {
+        // A feat instead of the level 4 ASI: 16 → 17 at 4, 19 at 8. Level 1 is unchanged (Δ 0); at 5 it is Str 17 against the
+        // baseline's 18, two swings of 2d6 + 3 at 0.55 against 2d6 + 4 at 0.60: 2 × (5.5 + 0.85) − 2 × (6.6 + 0.9) = −2.3.
+        var stepped = Compare(Scaler, """{ "name": "Feat", "abilities": {"str": {"1": 16, "4": 17, "8": 19}} }""", levels: [1, 5]);
+        var scalar = Compare(GoldenBuilds.Fighter2024(strength: 18), """{ "name": "Feat", "abilities": {"str": 19} }""", levels: [4, 5]);
+
+        Assert.DoesNotContain(stepped.Notes, n => n.StartsWith("The feature sets", StringComparison.Ordinal));
+        Assert.DoesNotContain(scalar.Notes, n => n.StartsWith("The feature sets", StringComparison.Ordinal));
+        Assert.Equal([0, -2.3], stepped.Levels.Select(l => Math.Round(l.Delta, 9)));
+    }
+
+    [Fact]
+    public void Compare_ConditionEffectAgainstLegendaryResistance_NotesTheBandIsNotRaw()
+    {
+        var feature = ModifierFeature("Stunning Strike", """{ "kind": "condition_on_hit", "name": "Stunning Strike", "condition": "stunned", "ability": "con", "dc": 15 }""");
+
+        var legendary = DprComparison.Compare(new CompareRequest { Baseline = Build(Monk), Feature = Feature(feature), Target = Target("""{ "ac": 15, "saves": {"con": 2}, "legendary_resistance": 3 }""") });
+        var plain = Compare(Monk, feature, target: """{ "ac": 15, "saves": {"con": 2} }""");
+
+        Assert.Contains(legendary.Notes, n => n.StartsWith("Against 3 Legendary Resistance: Stunning Strike is measured as if every failed save sticks", StringComparison.Ordinal));
+        Assert.DoesNotContain(plain.Notes, n => n.Contains("Legendary Resistance", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("mm2014")]
+    [InlineData("mm2024")]
+    public void Compare_EmpiricalProfile_SlopesUseTheProfilesRowAtEachEnd(string profile)
+    {
+        // Level-equivalents divide by the baseline's slope against the same target spec at the slope levels: under an
+        // empirical profile, the SRD medians for CR 4 and CR 10 (tier 2), each the analysis of the baseline at that level.
+        var target = $$"""{ "profile": "{{profile}}" }""";
+        var report = Compare(Scaler, ModifierFeature("Savage Attacker", """{ "kind": "reroll_damage_take_best" }"""), target: target);
+
+        var tier2 = report.Slopes.Single(s => s.Tier == 2);
+        var at4 = DprAnalysis.Analyze(new DprRequest { Build = Build(Scaler), Target = Target(target), Levels = [4] }).Detail.DamagePerRound;
+        var at10 = DprAnalysis.Analyze(new DprRequest { Build = Build(Scaler), Target = Target(target), Levels = [10] }).Detail.DamagePerRound;
+        Assert.Equal(SlopeSources.Baseline, tier2.Source);
+        Assert.Equal(at4, tier2.FromDamage, Exact);
+        Assert.Equal(at10, tier2.ToDamage, Exact);
+        Assert.Equal(profile, report.Detail.Baseline.Evaluation.Target.Profile);
     }
 }

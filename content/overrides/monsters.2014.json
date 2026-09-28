@@ -1,0 +1,7 @@
+{
+  "2014/adult-red-dragon": {"actions": {"Fire Breath": {"on_success": "half", "note": "The stat block text says \"or half as much damage on a successful one\"; the data labels the save \"none\"."}}},
+  "2014/ancient-white-dragon": {"actions": {"Cold Breath": {"on_success": "half", "note": "The stat block text says \"or half as much damage on a successful one\"; the data labels the save \"none\"."}}},
+  "2014/green-dragon-wyrmling": {"actions": {"Poison Breath": {"on_success": "half", "note": "The stat block text says \"or half as much damage on a successful one\"; the data labels the save \"none\"."}}},
+  "2014/lich": {"actions": {"Disrupt Life": {"on_success": "half", "note": "The stat block text says \"or half as much damage on a successful one\"; the data labels the save \"none\". (legendary action)"}}},
+  "2014/winter-wolf": {"actions": {"Cold Breath": {"on_success": "half", "note": "The stat block text says \"or half as much damage on a successful one\"; the data labels the save \"none\"."}}}
+}

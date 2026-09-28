@@ -23,6 +23,7 @@ internal sealed class DprEvaluation
     private readonly TurnPlan _plan;
     private readonly DamageModel _damage;
     private readonly IReadOnlyList<SaveEffectDamage> _saves;
+    private readonly IReadOnlyList<SaveEffectDamage> _savesIncapacitated;
     private readonly TallyLayout _layout;
     private readonly Pmf<double>? _saveDice;
     private readonly bool _trackCarry;
@@ -40,7 +41,13 @@ internal sealed class DprEvaluation
         _options = options;
         _plan = new TurnPlan(build, target, options, meter);
         _damage = new DamageModel(_plan);
-        _saves = _plan.SaveEffects.Select(e => new SaveEffectDamage(e, _damage.SaveRoll(e), target)).ToList();
+        _saves = _plan.SaveEffects.Select(e => new SaveEffectDamage(e, _damage.SaveRoll(e), target, target.Evasion)).ToList();
+
+        // 2024 Evasion: "You don't benefit from this feature if you have the Incapacitated condition." 2014 has no such
+        // clause, so its incapacitated target keeps the same instance.
+        _savesIncapacitated = target.Evasion && build.Edition == V.Editions.E2024
+            ? _plan.SaveEffects.Select(e => new SaveEffectDamage(e, _damage.SaveRoll(e), target, evasion: false)).ToList()
+            : _saves;
         _layout = new TallyLayout(_plan);
         _saveDice = target.SaveDice is { } dice ? DamageDice.Sum(dice.Dice, meter) : null;
         _trackCarry = options.Horizon == DprHorizons.Fight;
@@ -69,9 +76,12 @@ internal sealed class DprEvaluation
     private sealed record ReactionResult(int Extra, double TriggerProbability, NodeValue Value, TurnEvaluator Evaluator, TurnState Start, IReadOnlyList<NamedAmount> Considered);
 
     /// <summary>
-    /// The horizon. Round1 is the first turn. A fight chains R turns as a Markov chain over what carries — Vex pending,
-    /// uses left, and, for "P(it lands at least once per fight)", which conditions and save effects have landed so far —
-    /// with the round's reaction added each round. Every per-round figure is the total over the rounds ÷ R.
+    /// The horizon. Round1 is the first turn, its round's reaction included. A fight chains R turns as a Markov chain over
+    /// what carries — Vex pending, uses left, and, for "P(it lands at least once per fight)", which conditions and save
+    /// effects have landed so far — with the round's reaction added each round. Every per-round figure is the total over
+    /// the rounds ÷ R. Decisions stay per turn (settled, oracle reading 1): an optimal rider, the Bonus Action and a power
+    /// attack maximise the current turn's objective, and uses left or a pending Vex are worth nothing of their own in a
+    /// later round; use_value is how a resource is priced.
     /// </summary>
     public DprResult Run()
     {
@@ -233,7 +243,7 @@ internal sealed class DprEvaluation
     {
         if (!_evaluators.TryGetValue((present, powerOn), out var evaluator))
         {
-            evaluator = new TurnEvaluator(_plan, _damage, _saves, _layout, present, powerOn, _trackCarry, _saveDice, _options.TurnStateLimit);
+            evaluator = new TurnEvaluator(_plan, _damage, _saves, _savesIncapacitated, _layout, present, powerOn, _trackCarry, _saveDice, _options.TurnStateLimit);
             _evaluators[(present, powerOn)] = evaluator;
         }
 
@@ -313,7 +323,8 @@ internal sealed class DprEvaluation
                 continue;
             }
 
-            _reactionEvaluator ??= new TurnEvaluator(_plan, _damage, _saves, _layout, 0, _powerFixedOn, trackCarry: false, _saveDice, _options.TurnStateLimit);
+            _reactionEvaluator ??= new TurnEvaluator(
+                _plan, _damage, _saves, _savesIncapacitated, _layout, 0, _powerFixedOn, trackCarry: false, _saveDice, _options.TurnStateLimit);
             // The uses are there, but a reaction attack may not spend them (TurnEvaluator.Available enforces it).
             var start = new TurnState(segment, 0, -1, 0, uses, 0);
             var value = _reactionEvaluator.Value(start);
@@ -485,6 +496,7 @@ internal sealed class DprEvaluation
             .Select((condition, c) =>
             {
                 var bit = TurnPlan.ConditionBit(condition.Condition);
+                var immune = _target.IsImmuneToCondition(condition.Condition);
                 return new ConditionReport(
                     condition.Source.Label,
                     condition.Condition,
@@ -492,38 +504,50 @@ internal sealed class DprEvaluation
                     tally[_layout.ConditionAttempts(c)],
                     tally[_layout.ConditionLands(c)],
                     tally[_layout.ConditionApplied(bit)],
-                    ever is null ? null : ever.GetValueOrDefault(bit));
+                    ever is null ? null : ever.GetValueOrDefault(bit))
+                {
+                    ExpectedAttemptsToLand = _target.LegendaryResistance > 0 && condition.Dcs.Count > 0 && !immune
+                        ? SavingThrow.ExpectedCastsToLand(
+                            InitialFailChance(condition.Ability, condition.Dcs[0].Dc, condition.Magical), _target.LegendaryResistance)
+                        : null,
+                    Immune = immune,
+                };
             })
             .ToList();
 
     /// <summary>P(the target fails) against the target as given: its initial condition, cover, save dice, Magic Resistance.</summary>
-    private double InitialFailChance(ResolvedSaveEffect effect)
+    private double InitialFailChance(ResolvedSaveEffect effect) => InitialFailChance(effect.Ability, effect.Dc, effect.Magical);
+
+    private double InitialFailChance(string ability, int dc, bool magical)
     {
         var conditions = _plan.InitialConditions;
-        var dex = effect.Ability == V.Abilities.Dex;
-        const int autoFailConditions = (1 << TurnPlan.StunnedBit) | (1 << TurnPlan.ParalyzedBit) | (1 << TurnPlan.UnconsciousBit);
-        var autoFail = (dex || effect.Ability == V.Abilities.Str) && (conditions & autoFailConditions) != 0;
-        var advantage = (effect.Magical && _target.MagicResistance) || (dex && (conditions & (1 << TurnPlan.DodgingBit)) != 0);
+        var dex = ability == V.Abilities.Dex;
+        var autoFail = (dex || ability == V.Abilities.Str) && (conditions & TurnPlan.IncapacitatedConditions) != 0;
+        var advantage = (magical && _target.MagicResistance) || (dex && (conditions & (1 << TurnPlan.DodgingBit)) != 0);
         var disadvantage = dex && (conditions & (1 << TurnPlan.RestrainedBit)) != 0;
-        var bonus = _target.SaveBonus(effect.Ability) + (dex ? _target.CoverBonus : 0);
-        return SavingThrow.FailChance(effect.Dc, bonus, D20.Resolve(advantage, disadvantage), _saveDice, autoFail);
+        var bonus = _target.SaveBonus(ability) + (dex ? _target.CoverBonus : 0);
+        return SavingThrow.FailChance(dc, bonus, D20.Resolve(advantage, disadvantage), _saveDice, autoFail);
     }
 
     private List<SaveEffectReport> SaveEffectReports(double[] tally, Dictionary<int, double>? ever)
     {
         var reports = new List<SaveEffectReport>();
+        var incapacitated = (_plan.InitialConditions & TurnPlan.IncapacitatedConditions) != 0;
         for (var i = 0; i < _plan.SaveEffects.Count; i++)
         {
             var effect = _plan.SaveEffects[i];
-            var damage = _saves[i];
+
+            // Per cast against the target as given: an Incapacitated 2024 target has no Evasion, as its save auto-fails.
+            var damage = incapacitated ? _savesIncapacitated[i] : _saves[i];
             var fail = InitialFailChance(effect);
             var kills = _target.HitPoints is { } hp && effect.Damage is not null ? damage.Kills(fail, hp) : null;
-            double? castsToLand = effect.Condition is not null && _target.LegendaryResistance > 0
+            var immune = effect.Condition is { } imposed && _target.IsImmuneToCondition(imposed);
+            double? castsToLand = effect.Condition is not null && _target.LegendaryResistance > 0 && !immune
                 ? SavingThrow.ExpectedCastsToLand(fail, _target.LegendaryResistance)
                 : null;
             var landedBit = _plan.SaveLandedBits[i];
-            double? landPerTurn = landedBit >= 0 ? tally[_layout.SaveLanded(landedBit)] : null;
-            double? landPerFight = ever is not null && landedBit >= 0 ? ever.GetValueOrDefault(8 + landedBit) : null;
+            double? landPerTurn = landedBit >= 0 ? tally[_layout.SaveLanded(landedBit)] : immune ? 0 : null;
+            double? landPerFight = ever is not null && landedBit >= 0 ? ever.GetValueOrDefault(8 + landedBit) : ever is not null && immune ? 0 : null;
             reports.Add(new SaveEffectReport(
                 effect.Source.Label,
                 effect.Ability,
@@ -543,7 +567,10 @@ internal sealed class DprEvaluation
                 kills?.Distribution,
                 castsToLand,
                 landPerTurn,
-                landPerFight));
+                landPerFight)
+            {
+                ConditionImmune = immune,
+            });
         }
 
         return reports;
@@ -679,6 +706,13 @@ internal sealed class DprEvaluation
                 "over the turn and is left to the simulator.");
         }
 
+        foreach (var extra in _plan.ExtraAttacks.Where(e => e.Action == V.ExtraAttackActions.BonusAction && e.Trigger == V.Triggers.CritOrKill))
+        {
+            notes.Add(
+                $"{extra.Source.Label}: reducing a creature to 0 HP also triggers it; the closed form has no hit points, so it counts its " +
+                "crits only (balance_simulate models the kills).");
+        }
+
         if (_plan.ReactionSegments.Any(s => s >= 0))
         {
             notes.Add(
@@ -716,12 +750,32 @@ internal sealed class DprEvaluation
             notes.Add("An Unconscious creature is also Prone, so a ranged attack's Advantage (Unconscious) and Disadvantage (Prone) cancel.");
         }
 
+        var offhand = _plan.GatesOffhand
+            ? string.Join(", ", _build.Attacks.Where(a => a.Offhand && a.Action == V.AttackActions.BonusAction).Select(a => a.Name))
+            : null;
+        var weaponSurge = _plan.SurgeIsAttackAction.Any(s => s);
         foreach (var setup in _plan.SetupCosts)
         {
-            notes.Add(setup.Cost == V.Setup.Action
+            var text = setup.Cost == V.Setup.Action
                 ? $"{setup.Source.Label}: set up with round 1's Action (no Attack action that round), active from then on."
-                : $"{setup.Source.Label}: set up with round 1's Bonus Action, active from then on.");
+                : $"{setup.Source.Label}: set up with round 1's Bonus Action, active from then on.";
+            if (setup.Cost == V.Setup.Action && offhand is not null && !weaponSurge)
+            {
+                text += $" {offhand} (offhand) is not made in round 1: the Light weapon's extra attack needs the Attack action.";
+            }
+
+            notes.Add(text);
         }
+
+        // An Action save effect takes the turn's Action every turn (and Action Surge is not used beside it, noted below).
+        if (offhand is not null && (_plan.ActionSaveIndex >= 0 || (!_plan.ActionMakesWeaponAttacks && !weaponSurge)))
+        {
+            notes.Add(
+                $"{offhand} (offhand) is never made: the Light weapon's extra attack needs the Attack action, and this build's Action " +
+                (_plan.ActionSaveIndex >= 0 ? $"is {_plan.SaveEffects[_plan.ActionSaveIndex].Source.Label}." : "makes no weapon attack."));
+        }
+
+        ConditionNotes(notes);
 
         foreach (var effect in _plan.SaveEffects)
         {
@@ -732,16 +786,41 @@ internal sealed class DprEvaluation
                     $"{DslText.Number(effect.Size ?? 0)}-ft {effect.Shape} (±1d3 for how bunched the creatures are).");
             }
 
-            if (effect.Condition is not null && effect.ConditionIsMechanical)
+            var immune = effect.Condition is { } imposed && _target.IsImmuneToCondition(imposed);
+            if (immune)
+            {
+                notes.Add(
+                    $"{effect.Source.Label}: {TargetName} is immune to the {effect.Condition} condition, so it never lands" +
+                    (effect.Damage is not null ? "; the damage still counts." : "."));
+            }
+            else if (effect.Condition is not null && effect.ConditionIsMechanical)
             {
                 notes.Add($"{effect.Source.Label}: its {effect.Condition} is reported (chance it lands) but does not change later attacks this turn.");
             }
 
-            if (effect.Condition is null && effect.Damage is not null && _target.LegendaryResistance > 0)
+            if ((effect.Condition is null || immune) && effect.Damage is not null && _target.LegendaryResistance > 0)
             {
                 notes.Add($"{effect.Source.Label}: Legendary Resistance is assumed not spent on a damage-only effect.");
             }
+
+            if (effect.ConditionIsMechanical && !immune && _target.LegendaryResistance > 0)
+            {
+                notes.Add(
+                    $"{effect.Source.Label}: the chances its {effect.Condition} condition lands assume every failed save sticks: Legendary Resistance " +
+                    $"({DslText.Number(_target.LegendaryResistance)}) is not spent in the fight model. A creature that spends one on every " +
+                    $"failure refuses the first {DslText.Number(_target.LegendaryResistance)} failures (see its expected casts to land).");
+            }
+
+            if (effect.Resource is null && !effect.IsCantrip)
+            {
+                notes.Add(
+                    $"{effect.Source.Label}: no resource, so it is used every round of every fight (it counts the same in round 1, a fight " +
+                    "and a day). If it spends spell slots or limited uses, give resource {\"uses\": n, \"per\": \"long_rest\"} for the fight " +
+                    "and day figures.");
+            }
         }
+
+        EvasionNote(notes);
 
         if (_plan.ActionSaveIndex >= 0 && _plan.SurgeExtras.Count > 0)
         {
@@ -753,9 +832,95 @@ internal sealed class DprEvaluation
             notes.Add($"{extra.Source.Label}: its own resource is not tracked; it is treated as available every round.");
         }
 
+        var toppling = _build.Attacks.Where(a => a.Mastery == V.Masteries.Topple).Select(a => a.Name).ToList();
+        if (_plan.ToppleBlocked && toppling.Count > 0)
+        {
+            notes.Add($"{string.Join(", ", toppling)}: {TargetName} is immune to the prone condition, so Topple forces no save and never knocks it prone.");
+        }
+
         notes.AddRange(_build.Notes);
         notes.AddRange(_target.Notes);
         notes.AddRange(TargetResolver.Warnings(_build, _target));
+        notes.AddRange(TargetResolver.AdjustmentNotes(_build, _target));
         return notes.Distinct().ToList();
+    }
+
+    /// <summary>"the Stone Golem" for a stat block target, "the target" otherwise: who is immune, in a note.</summary>
+    private string TargetName => _target.Monster is { } monster ? $"the {monster.Name}" : "the target";
+
+    /// <summary>
+    /// What the closed form does with a condition_on_hit: it counts for the rest of the turn it lands in and is gone at
+    /// the start of the next (contract §4.4; the simulator carries durations). Prone needs no note (the target stands on
+    /// its own turn, which the reset matches), and 2024's default "until the start of your next turn" is exact for the
+    /// attacker's own attacks; a condition that lasts into the next turn (2014's default, as 2014 Stunning Strike, or a
+    /// longer duration given) is understated over a fight. With Legendary Resistance on the target, the landing chances
+    /// and the Advantage assume every failed save sticks. A condition the target is immune to gets only the note that it is
+    /// never attempted.
+    /// </summary>
+    private void ConditionNotes(List<string> notes)
+    {
+        foreach (var condition in _plan.ConditionsOnHit)
+        {
+            if (_target.IsImmuneToCondition(condition.Condition))
+            {
+                notes.Add(
+                    $"{condition.Source.Label}: {TargetName} is immune to the {condition.Condition} condition, so it is never attempted " +
+                    "(no save forced, no use spent) and adds nothing.");
+                continue;
+            }
+
+            if (condition.Condition != V.Conditions.Prone)
+            {
+                var text =
+                    $"{condition.Source.Label}: the {condition.Condition} condition counts only for the rest of the turn it lands in; the target starts " +
+                    "each later turn without it, so your later turns' attacks, allies' attacks and the target's lost turns are not " +
+                    "counted (balance_simulate carries its duration).";
+                var carries = condition.Duration is V.Durations.EndOfNextTurn or V.Durations.SaveEnds or V.Durations.Fight
+                    ? $"duration {condition.Duration}"
+                    : condition.Duration is null && _build.Edition == V.Editions.E2014
+                        ? condition.Condition == V.Conditions.Stunned
+                            ? "2014 Stunning Strike: until the end of your next turn"
+                            : "the 2014 default, as 2014 Stunning Strike: until the end of your next turn"
+                        : null;
+                if (carries is not null)
+                {
+                    text += $" It lasts into your next turn ({carries}), so a fight's DPR and the feature's value are understated here.";
+                }
+
+                notes.Add(text);
+            }
+
+            if (_target.LegendaryResistance > 0)
+            {
+                notes.Add(
+                    $"{condition.Source.Label}: the landing chances and the {condition.Condition} condition's effect on damage assume every failed save " +
+                    $"sticks: Legendary Resistance ({DslText.Number(_target.LegendaryResistance)}) is not spent in the fight model. A creature " +
+                    $"that spends one on every failure refuses the first {DslText.Number(_target.LegendaryResistance)} failures (expected " +
+                    "attempts to land it are reported with the condition).");
+            }
+        }
+    }
+
+    /// <summary>
+    /// 2024 Evasion does not work while the target is Incapacitated: said when a 2024 build's Dex-half save effect meets an
+    /// Evasion target that is, or can become (a condition_on_hit), stunned, paralyzed or unconscious.
+    /// </summary>
+    private void EvasionNote(List<string> notes)
+    {
+        if (!_target.Evasion || _build.Edition != V.Editions.E2024 ||
+            !_plan.SaveEffects.Any(e => e.Ability == V.Abilities.Dex && e.OnSuccess == V.OnSuccess.Half))
+        {
+            return;
+        }
+
+        var incapacitating = (_plan.InitialConditions & TurnPlan.IncapacitatedConditions) != 0 ||
+                             _plan.ConditionsOnHit.Any(c => ((1 << TurnPlan.ConditionBit(c.Condition)) & TurnPlan.IncapacitatedConditions) != 0 &&
+                                                            !_target.IsImmuneToCondition(c.Condition));
+        if (incapacitating)
+        {
+            notes.Add(
+                "2024 Evasion: not while Incapacitated (stunned, paralyzed or unconscious); such a target takes full damage on its failed " +
+                "save.");
+        }
     }
 }

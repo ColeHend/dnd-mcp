@@ -35,6 +35,11 @@ namespace DndMcp.Tools;
 /// The index is opened only when an item names an SRD monster, so an encounter given entirely by CR works even while
 /// srd.db is still building or cannot be built.
 /// </para>
+/// <para>
+/// <b>The lookup is shared</b> (<see cref="SrdMonsterLookup"/>): <c>balance_simulate</c> and <c>balance_dpr</c>'s monster
+/// targets resolve names exactly as this tool does, through <see cref="StatBlockService"/>; only the wording around it
+/// (<see cref="Wording"/>: "monsters item N", a CR as the fallback) is this tool's.
+/// </para>
 /// </summary>
 public sealed class EncounterTools
 {
@@ -213,9 +218,7 @@ public sealed class EncounterTools
         }
 
         ArgumentNullException.ThrowIfNull(index);
-        var docs = request.RefText is { } refText && refText.Contains('/')
-            ? ByRef(index, request, refText, editions)
-            : ByName(index, request, request.RefText ?? request.NameText!, editions);
+        var docs = SrdMonsterLookup.Resolve(index, request.RefText ?? request.NameText!, editions, Wording(request.Position));
 
         var notes = new List<string>(docs.Notes);
         var resolved = new Dictionary<string, EncounterEntrySide>(StringComparer.Ordinal);
@@ -249,6 +252,20 @@ public sealed class EncounterTools
 
         return new EncounterEntry(resolved[editions[0]].Name, request.Count, request.Exclude, resolved, notes);
     }
+
+    /// <summary>
+    /// encounter_difficulty's words around the shared monster lookup (<see cref="SrdMonsterLookup"/>): items are "monsters
+    /// item N", the stat block serves "this 2024 encounter" or "the 2024 maths", and a monster the SRD lacks is given by
+    /// its CR, which only this tool takes.
+    /// </summary>
+    private static MonsterLookupWording Wording(int position) => new(
+        $"monsters item {position.ToString(CultureInfo.InvariantCulture)}",
+        "encounter",
+        edition => $"for the {edition} maths too",
+        "Give a monster's ref (e.g. \"2024/monster/ogre\"), its name, or a cr.",
+        "For a monster not in the SRD, give its cr instead.",
+        name => "For a monster the SRD does not have (it has only some of the Monster Manual), give the CR from its stat block, " +
+                $"with name as a label: {{\"name\": \"{name}\", \"cr\": \"<its CR>\"}}.");
 
     /// <summary>
     /// A monster given by CR: the XP table's value in every edition, labelled with its name or "CR n monster". In its lair
@@ -290,205 +307,6 @@ public sealed class EncounterTools
         return new EncounterEntry(label, request.Count, request.Exclude, sides, notes);
     }
 
-    /// <summary>
-    /// The stat block for each edition from an explicit ref. One edition: the ref as given, even from the other edition
-    /// (a 2014 stat block in a 2024 game is ordinary play). Both: the ref's own edition plus its counterpart.
-    /// </summary>
-    private static ResolvedDocs ByRef(SrdIndex index, MonsterRequest request, string refText, IReadOnlyList<string> editions)
-    {
-        var where = $"monsters item {request.Position.ToString(CultureInfo.InvariantCulture)}";
-        var defaultEdition = editions.Count == 1 ? editions[0] : SrdEdition.Edition2024;
-        SrdRef reference;
-        try
-        {
-            reference = SrdRefParser.Parse(refText, defaultEdition);
-        }
-        catch (DndInputException ex)
-        {
-            throw new DndInputException($"{where}: {ex.Message} A monster's ref looks like \"2024/monster/ogre\"; name \"Ogre\" works too.", ex);
-        }
-
-        if (reference.Kind != SrdKinds.Monster)
-        {
-            throw new DndInputException(
-                $"{where}: ref `{Echo(reference.ToString())}` is a {reference.Kind}, not a monster. Give a monster's ref (e.g. " +
-                "\"2024/monster/ogre\"), its name, or a cr.");
-        }
-
-        var doc = index.Get(reference) ?? throw RefNotFound(index, reference, where);
-        var byEdition = new Dictionary<string, SrdDocument>(StringComparer.Ordinal);
-        var notes = new List<string>();
-        foreach (var edition in editions)
-        {
-            if (edition == doc.Edition)
-            {
-                byEdition[edition] = doc;
-            }
-            else if (editions.Count == 1)
-            {
-                byEdition[edition] = doc;
-                notes.Add($"{doc.Name}: `{doc.Ref}` is a {doc.Edition} stat block, used as given in this {edition} encounter.");
-            }
-            else
-            {
-                byEdition[edition] = OtherEdition(index, doc, typedName: null, edition, notes);
-            }
-        }
-
-        return new ResolvedDocs(byEdition, notes);
-    }
-
-    /// <summary>
-    /// The stat block for each edition by name: that edition's own match (or its shared form, <see cref="SharedForm"/>)
-    /// first, then the other edition's counterpart, then the other edition's stat block with a note. Nothing in either
-    /// edition is an error that lists close names before offering cr.
-    /// </summary>
-    private static ResolvedDocs ByName(SrdIndex index, MonsterRequest request, string name, IReadOnlyList<string> editions)
-    {
-        var where = $"monsters item {request.Position.ToString(CultureInfo.InvariantCulture)}";
-        var lookups = new Dictionary<string, SrdNameLookup>(StringComparer.Ordinal);
-        var own = new Dictionary<string, (SrdDocument Doc, string? Note)?>(StringComparer.Ordinal);
-        foreach (var edition in SrdEdition.All)
-        {
-            try
-            {
-                lookups[edition] = index.FindByName(name, edition, SrdKinds.Monster);
-            }
-            catch (DndInputException ex)
-            {
-                throw new DndInputException($"{where}: {ex.Message}", ex);
-            }
-
-            own[edition] = lookups[edition].Best is { } match ? (match.Document, null) : SharedForm(index, name, edition);
-        }
-
-        var found = SrdEdition.All.Where(e => own[e] is not null).ToList();
-        if (found.Count == 0)
-        {
-            throw NameNotFound(name, editions, lookups, where);
-        }
-
-        var byEdition = new Dictionary<string, SrdDocument>(StringComparer.Ordinal);
-        var notes = new List<string>();
-        foreach (var edition in editions)
-        {
-            var (doc, note) = own[edition] ?? own[found[0]]!.Value;
-            if (note is not null)
-            {
-                notes.Add(note);
-            }
-
-            byEdition[edition] = doc.Edition == edition ? doc : OtherEdition(index, doc, name, edition, notes);
-        }
-
-        return new ResolvedDocs(byEdition, notes);
-    }
-
-    /// <summary>
-    /// The stat block for a name the SRD data splits into forms ("Vampire" is "Vampire, Vampire Form", "Vampire, Bat
-    /// Form" and "Vampire, Mist Form"; each lycanthrope likewise), when every form has the same CR and XP, as they all do:
-    /// the form named after the creature, else the first. Both SRDs print one stat block titled "Vampire", so "no monster
-    /// is named Vampire" was false, and it sent the model to guess a CR. Forms that differ in CR or XP are left to the
-    /// not-found message, which lists them.
-    /// </summary>
-    private static (SrdDocument Doc, string? Note)? SharedForm(SrdIndex index, string name, string edition)
-    {
-        var key = SrdNames.Key(name);
-        IReadOnlyList<SrdSearchHit> hits;
-        try
-        {
-            hits = index.Search(name, [edition], [SrdKinds.Monster], SrdIndex.MaxSearchLimit).Hits;
-        }
-        catch (DndInputException)
-        {
-            return null;
-        }
-
-        var forms = hits
-            .Where(h => h.Name.EndsWith(" Form", StringComparison.Ordinal) &&
-                        h.Name.IndexOf(", ", StringComparison.Ordinal) is > 0 and var comma &&
-                        SrdNames.Key(h.Name[..comma]) == key)
-            .Select(h => index.Get(h.Ref))
-            .OfType<SrdDocument>()
-            .OrderBy(d => d.Slug, StringComparer.Ordinal)
-            .ToList();
-        if (forms.Count == 0 || forms.Select(f => SrdMonsterChallenge.Read(f)).Distinct().Count() != 1)
-        {
-            return null;
-        }
-
-        var chosen = forms.FirstOrDefault(f => SrdNames.Key(f.Name) == SrdNames.Key($"{name}, {name} Form")) ?? forms[0];
-        var challenge = SrdMonsterChallenge.Read(chosen);
-        return (chosen,
-            $"{Echo(name)}: the {edition} SRD data splits this stat block into forms ({string.Join("; ", forms.Select(f => f.Name))}), " +
-            $"which share CR {challenge.ChallengeRating} and {Number(challenge.Xp)} XP, so {chosen.Name} (`{chosen.Ref}`) is used.");
-    }
-
-    // The other edition's stat block for doc: its recorded counterpart (the one answering to the typed name first), or
-    // doc itself with a note saying so.
-    private static SrdDocument OtherEdition(SrdIndex index, SrdDocument doc, string? typedName, string edition, List<string> notes)
-    {
-        if (index.Counterparts(doc, typedName).FirstOrDefault(d => d.Kind == SrdKinds.Monster) is { } counterpart)
-        {
-            return counterpart;
-        }
-
-        notes.Add(
-            $"{doc.Name}: the {edition} SRD has no counterpart of `{doc.Ref}`, so its {doc.Edition} stat block is used for the " +
-            $"{edition} maths too.");
-        return doc;
-    }
-
-    private static DndInputException RefNotFound(SrdIndex index, SrdRef reference, string where)
-    {
-        var message = $"{where}: no {reference.Edition} monster has the slug \"{Echo(reference.Slug)}\" (`{Echo(reference.ToString())}`).";
-        var asName = reference.Slug.Replace('-', ' ');
-        if (asName.Length <= SrdIndex.MaxNameLength && SrdNames.Key(asName).Length > 0)
-        {
-            var lookup = index.FindByName(asName, reference.Edition, SrdKinds.Monster);
-            var close = lookup.Matches.Count > 0 ? lookup.Matches.Select(m => m.Document) : lookup.Suggestions;
-            var refs = close.DistinctBy(d => d.Ref).Take(SrdIndex.MaxSuggestions).Select(d => $"{d.Name} (`{d.Ref}`)").ToList();
-            if (refs.Count > 0)
-            {
-                message += $" Did you mean {string.Join(" or ", refs)}?";
-            }
-        }
-
-        var otherEdition = reference.Edition == SrdEdition.Edition2014 ? SrdEdition.Edition2024 : SrdEdition.Edition2014;
-        if (index.Get(otherEdition, SrdKinds.Monster, reference.Slug) is { } other)
-        {
-            message += $" The {otherEdition} SRD has {other.Name} (`{other.Ref}`): pass that ref, or name \"{other.Name}\", which also " +
-                       $"finds its {reference.Edition} counterpart when there is one.";
-        }
-
-        return new DndInputException(message + " For a monster not in the SRD, give its cr instead.");
-    }
-
-    // "No monster is named X" must not read as "so guess a CR": when the SRD has close names (its "Vampire, Vampire Form"
-    // style), those come first, and the CR route is offered for a monster the SRD does not have.
-    private static DndInputException NameNotFound(
-        string name, IReadOnlyList<string> editions, IReadOnlyDictionary<string, SrdNameLookup> lookups, string where)
-    {
-        // Both editions: resolution falls back to the other one, so a close name there is a real answer (2024
-        // "Svirfneblin" is close only to 2014's Deep Gnome).
-        var close = editions.Concat(SrdEdition.All.Except(editions))
-            .SelectMany(e => lookups[e].Suggestions)
-            .DistinctBy(d => d.Ref)
-            .Take(SrdIndex.MaxSuggestions)
-            .Select(d => $"{d.Name} (`{d.Ref}`)")
-            .ToList();
-        var suggestion = close.Count > 0
-            ? $" Close SRD names: {string.Join(", ", close)}; if one is the monster you mean, pass its ref."
-            : string.Empty;
-        return new DndInputException(
-            $"{where}: no monster in the 2014 or 2024 SRD is named \"{Echo(name)}\".{suggestion} For a monster the SRD does not " +
-            "have (it has only some of the Monster Manual), give the CR from its stat block, with name as a label: " +
-            $"{{\"name\": \"{JsonText(Echo(name))}\", \"cr\": \"<its CR>\"}}.");
-    }
-
-    // Text safe inside a JSON string in an example: a name with a quote must not break the example the model copies.
-    private static string JsonText(string text) => text.Replace("\\", "\\\\").Replace("\"", "\\\"");
-
     private static List<EncounterMonster> Monsters(IReadOnlyList<EncounterEntry> entries, string edition) =>
         entries.Select(e =>
         {
@@ -524,8 +342,6 @@ public sealed class EncounterTools
         }));
 
     private static string Number(long value) => value.ToString("N0", CultureInfo.InvariantCulture);
-
-    private sealed record ResolvedDocs(IReadOnlyDictionary<string, SrdDocument> ByEdition, IReadOnlyList<string> Notes);
 }
 
 /// <summary>One monsters item, checked: which of ref, name or cr it gives, and the rest of its settings.</summary>

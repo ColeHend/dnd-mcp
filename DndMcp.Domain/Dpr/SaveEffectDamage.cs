@@ -19,6 +19,13 @@ namespace DndMcp.Domain.Dpr;
 /// Halving happens on the rolled total, before resistance, and each rounds down (a resisted success takes
 /// floor(floor(x/2)/2) = floor(x/4)), which is why this is computed per value of x and never from a mean.
 /// </para>
+/// <para>
+/// <b>The first target is the main target</b>, the one the turn's attacks hit: a condition imposed on it earlier in the
+/// turn (Stunning Strike) changes ITS save and, on a 2024 build, its Evasion, while every other creature in the area
+/// keeps the target spec's own condition. So the first target may fail with its own chance and take damage from another
+/// instance (<c>first</c>: Evasion off while it is Incapacitated); both instances are built from the same roll, so the
+/// shared roll x lines up index by index.
+/// </para>
 /// </summary>
 internal sealed class SaveEffectDamage
 {
@@ -26,24 +33,30 @@ internal sealed class SaveEffectDamage
     private readonly double[] _chances;
     private readonly long[] _onFail;
     private readonly long[] _onSuccess;
-    private readonly Dictionary<(double Fail, int FirstTarget), Pmf<double>> _totals = [];
+    private readonly Dictionary<(double Fail, int FirstTarget, bool OwnFirst), Pmf<double>> _totals = [];
 
-    public SaveEffectDamage(ResolvedSaveEffect effect, Pmf<double> roll, ResolvedTarget target)
+    /// <param name="evasion">
+    /// Whether the target's Evasion is available to this instance: the caller decides, since 2024 Evasion does not work
+    /// while the creature is Incapacitated and 2014 Evasion has no such clause.
+    /// </param>
+    public SaveEffectDamage(ResolvedSaveEffect effect, Pmf<double> roll, ResolvedTarget target, bool evasion)
     {
         Effect = effect;
         Targets = effect.Targets;
-        Evasion = target.Evasion && effect.Ability == V.Abilities.Dex && effect.OnSuccess == V.OnSuccess.Half;
+        Evasion = evasion && effect.Ability == V.Abilities.Dex && effect.OnSuccess == V.OnSuccess.Half;
         var half = effect.OnSuccess == V.OnSuccess.Half;
 
         _rolls = roll.Values.ToArray();
         _chances = new double[_rolls.Length];
         _onFail = new long[_rolls.Length];
         _onSuccess = new long[_rolls.Length];
+        // A magical effect overcomes "from nonmagical attacks"; a save effect is never silvered or adamantine.
+        var properties = DamageProperties.Of(effect);
         for (var i = 0; i < _rolls.Length; i++)
         {
             _chances[i] = roll.Weights[i] / roll.Total;
-            _onFail[i] = DamageAdjustment.Apply(_rolls[i], effect.DamageType, target, halve: Evasion);
-            _onSuccess[i] = half && !Evasion ? DamageAdjustment.Apply(_rolls[i], effect.DamageType, target, halve: true) : 0;
+            _onFail[i] = DamageAdjustment.Apply(_rolls[i], effect.DamageType, target, halve: Evasion, properties);
+            _onSuccess[i] = half && !Evasion ? DamageAdjustment.Apply(_rolls[i], effect.DamageType, target, halve: true, properties) : 0;
             MeanOnFail += _chances[i] * _onFail[i];
             MeanOnSuccess += _chances[i] * _onSuccess[i];
         }
@@ -73,14 +86,30 @@ internal sealed class SaveEffectDamage
         (firstFails ? MeanOnFail : MeanOnSuccess) + ((Targets - 1) * MeanPerTarget(fail));
 
     /// <summary>
+    /// E[total] when the first (main) target takes <paramref name="first"/>'s damage and fails with
+    /// <paramref name="firstFail"/>, and every other target takes this instance's and fails with <paramref name="othersFail"/>.
+    /// The same as <see cref="MeanTotal(double)"/> when the two agree.
+    /// </summary>
+    public double MeanTotal(SaveEffectDamage first, double firstFail, double othersFail) =>
+        ReferenceEquals(first, this) && firstFail == othersFail
+            ? MeanTotal(firstFail)
+            : first.MeanPerTarget(firstFail) + ((Targets - 1) * MeanPerTarget(othersFail));
+
+    /// <summary>E[total | the first (main) target fails or succeeds], its damage from <paramref name="first"/>, the others' from this.</summary>
+    public double MeanTotalGivenFirst(SaveEffectDamage first, double othersFail, bool firstFails) =>
+        (firstFails ? first.MeanOnFail : first.MeanOnSuccess) + ((Targets - 1) * MeanPerTarget(othersFail));
+
+    /// <summary>
     /// The distribution of the total over all targets, with the shared roll: Σ_x P(x) Σ_k Binomial(n, F)(k)·δ(k·dF(x) +
     /// (n − k)·dS(x)). With <paramref name="firstTarget"/> 1 (0) the first target is known to fail (succeed) and the
     /// binomial runs over the other n − 1.
     /// </summary>
     /// <param name="firstTarget">−1: unconditioned; 1: the first target fails; 0: it succeeds.</param>
-    public Pmf<double> Total(double fail, int firstTarget, WorkMeter meter)
+    /// <param name="first">Whose damage the known first target takes (the main target's instance); null: this one's.</param>
+    public Pmf<double> Total(double fail, int firstTarget, WorkMeter meter, SaveEffectDamage? first = null)
     {
-        var key = (fail, firstTarget);
+        first ??= this;
+        var key = (fail, firstTarget, ReferenceEquals(first, this));
         if (_totals.TryGetValue(key, out var cached))
         {
             return cached;
@@ -92,10 +121,10 @@ internal sealed class SaveEffectDamage
         var totals = new Dictionary<long, double>();
         for (var i = 0; i < _rolls.Length; i++)
         {
-            var first = firstTarget switch
+            var firstDamage = firstTarget switch
             {
-                1 => _onFail[i],
-                0 => _onSuccess[i],
+                1 => first._onFail[i],
+                0 => first._onSuccess[i],
                 _ => 0,
             };
             for (var k = 0; k <= others; k++)
@@ -107,7 +136,7 @@ internal sealed class SaveEffectDamage
                     continue;
                 }
 
-                var total = first + (k * _onFail[i]) + ((others - k) * _onSuccess[i]);
+                var total = firstDamage + (k * _onFail[i]) + ((others - k) * _onSuccess[i]);
                 totals[total] = totals.GetValueOrDefault(total) + (_chances[i] * binomial[k]);
             }
         }

@@ -203,6 +203,13 @@ internal sealed class TurnPlan
     public const int UnconsciousBit = 5;
     public const int DodgingBit = 6;
 
+    /// <summary>
+    /// The conditions that include Incapacitated: stunned, paralyzed, unconscious (both editions' condition text). They
+    /// auto-fail Str and Dex saves, end Dodge's benefits, and (2024) switch off Evasion: "You don't benefit from this
+    /// feature if you have the Incapacitated condition."
+    /// </summary>
+    public const int IncapacitatedConditions = (1 << StunnedBit) | (1 << ParalyzedBit) | (1 << UnconsciousBit);
+
     /// <summary>The spent bit that marks Cleave used this turn (options use the bits below it).</summary>
     public const int CleaveBit = 62;
 
@@ -270,7 +277,13 @@ internal sealed class TurnPlan
 
         CreateSegments();
         TracksSap = build.Attacks.Any(a => a.Mastery == V.Masteries.Sap);
-        TrackedSaveConditions = SaveEffects.Select((s, i) => (s, i)).Where(p => p.s.Condition is not null).Select(p => p.i).ToArray();
+        ToppleBlocked = target.IsImmuneToCondition(V.Conditions.Prone);
+
+        // A condition the target is immune to never lands, so there is nothing to track (its report says "immune").
+        TrackedSaveConditions = SaveEffects.Select((s, i) => (s, i))
+            .Where(p => p.s.Condition is { } condition && !target.IsImmuneToCondition(condition))
+            .Select(p => p.i)
+            .ToArray();
         SaveLandedBits = new int[SaveEffects.Count];
         Array.Fill(SaveLandedBits, -1);
         for (var i = 0; i < TrackedSaveConditions.Length; i++)
@@ -339,6 +352,12 @@ internal sealed class TurnPlan
     /// <summary>Whether the build has a Sap weapon, whose P(≥ 1 hit) per turn is reported.</summary>
     public bool TracksSap { get; }
 
+    /// <summary>
+    /// The target is immune to Prone (a stat block's condition immunity), so Topple forces no save and never knocks it
+    /// down: "no attempt", as a condition_on_hit it is immune to is never attempted (<see cref="CreateOptions"/>).
+    /// </summary>
+    public bool ToppleBlocked { get; }
+
     /// <summary>Save effects with a condition, whose landing on the first target is tracked for "P(lands)".</summary>
     public int[] TrackedSaveConditions { get; }
 
@@ -351,6 +370,25 @@ internal sealed class TurnPlan
     /// <summary>The Action's save-effect segment, or −1.</summary>
     public int ActionSaveSegment { get; private set; } = -1;
 
+    /// <summary>
+    /// A bonus_action attack is offhand (the Light weapon's extra attack), so the turn tracks whether the Attack action was
+    /// taken (<see cref="TurnState.AttackActionFlag"/>): 2014 "When you take the Attack action and attack with a light
+    /// melee weapon …", 2024 Light "When you take the Attack action on your turn and attack with a Light weapon".
+    /// </summary>
+    public bool GatesOffhand { get; private set; }
+
+    /// <summary>
+    /// The bonus_action attacks without the offhand ones, for a turn without the Attack action (Spiritual Weapon still
+    /// swings), or −1 when every bonus_action attack is offhand.
+    /// </summary>
+    public int NonOffhandBonusAttackSegment { get; private set; } = -1;
+
+    /// <summary>The Attack action's own queue holds a weapon attack (not only spell attacks, which use the casting action).</summary>
+    public bool ActionMakesWeaponAttacks { get; private set; }
+
+    /// <summary>Per <see cref="SurgeExtras"/> entry: its attacks are weapon attacks, so the surge is a second Attack action.</summary>
+    public IReadOnlyList<bool> SurgeIsAttackAction { get; private set; } = [];
+
     /// <summary>The condition bit of a mechanical condition (or dodging).</summary>
     public static int ConditionBit(string condition)
     {
@@ -359,12 +397,23 @@ internal sealed class TurnPlan
     }
 
     /// <summary>
-    /// The conditions a creature effectively has: Unconscious includes Prone (both editions: an unconscious creature
+    /// The conditions a creature effectively has. Unconscious includes Prone (both editions: an unconscious creature
     /// "falls prone" / "has the Incapacitated and Prone conditions"), which matters for a ranged attack (Advantage from
-    /// Unconscious and Disadvantage from Prone cancel) and for Topple (already prone).
+    /// Unconscious and Disadvantage from Prone cancel) and for Topple (already prone). Dodging ends once the creature is
+    /// Incapacitated or its Speed is 0 (restrained): 2014 "You lose this benefit if you are incapacitated … or if your
+    /// speed drops to 0", 2024 "You lose these benefits if you have the Incapacitated condition or if your Speed is 0".
+    /// A blinded dodger keeps Dodge but cannot see its attacker, which only the attack roll reads (<see cref="TurnEvaluator"/>).
     /// </summary>
-    public static int Effective(int conditions) =>
-        (conditions & (1 << UnconsciousBit)) != 0 ? conditions | (1 << ProneBit) : conditions;
+    public static int Effective(int conditions)
+    {
+        if ((conditions & (1 << UnconsciousBit)) != 0)
+        {
+            conditions |= 1 << ProneBit;
+        }
+
+        const int losesDodge = IncapacitatedConditions | (1 << RestrainedBit);
+        return (conditions & losesDodge) != 0 ? conditions & ~(1 << DodgingBit) : conditions;
+    }
 
     public AttackLine Line(int attackIndex, AttackKind kind, int extraIndex = -1) => _lineIndex[(attackIndex, kind, extraIndex)];
 
@@ -441,17 +490,19 @@ internal sealed class TurnPlan
 
     private void AddLine(int attackIndex, AttackKind kind, int extraIndex)
     {
+        // The Action's attacks and Action Surge's are part of the Attack action when they are weapon attacks; a spell
+        // attack made with the Action is the spell's casting action (ResolvedAttack.IsPartOfAttackAction).
         var attack = Build.Attacks[attackIndex];
         var flatAttackAction = kind switch
         {
-            AttackKind.Action or AttackKind.Surge => true,
+            AttackKind.Action or AttackKind.Surge => attack.IsWeapon,
             AttackKind.Cleave => Rulings.CleavePartOfAttackAction,
             AttackKind.Hew => Rulings.HewGetsPb,
             _ => false,
         };
         var riderAttackAction = kind switch
         {
-            AttackKind.Action or AttackKind.Surge => true,
+            AttackKind.Action or AttackKind.Surge => attack.IsWeapon,
             AttackKind.Cleave => Rulings.CleavePartOfAttackAction,
             _ => false,
         };
@@ -578,7 +629,11 @@ internal sealed class TurnPlan
 
         for (var c = 0; c < ConditionsOnHit.Count; c++)
         {
+            // A condition the target is immune to is never attempted: it can never land, so spending a use (a ki point) on
+            // it is never the better choice, and no policy should be able to spend one. The option applies to no attack,
+            // which leaves its report at zero attempts, and the result says why.
             var condition = ConditionsOnHit[c];
+            var immune = Target.IsImmuneToCondition(condition.Condition);
             options.Add(new HitOption
             {
                 Index = options.Count,
@@ -590,7 +645,7 @@ internal sealed class TurnPlan
                 BonusActionCost = false,
                 OnceBit = condition.When == V.When.FirstHitPerTurn ? onceBits++ : -1,
                 ConditionBit = ConditionBit(condition.Condition),
-                AppliesTo = Applies(line => condition.AppliesTo(line.Attack) && line.Kind.IsMainTarget()),
+                AppliesTo = Applies(line => !immune && condition.AppliesTo(line.Attack) && line.Kind.IsMainTarget()),
             });
         }
 
@@ -658,6 +713,8 @@ internal sealed class TurnPlan
         }
 
         SurgeExtras = surges;
+        ActionMakesWeaponAttacks = actionQueue.Any(l => _lines[l].Attack.IsPartOfAttackAction);
+        SurgeIsAttackAction = surges.Select(e => Build.Attacks[IndexOfAttack(ExtraAttacks[e].Attack)].IsWeapon).ToList();
         foreach (var actionAvailable in new[] { true, false })
         {
             for (var mask = 0; mask < 1 << surges.Count; mask++)
@@ -696,9 +753,15 @@ internal sealed class TurnPlan
         if (baQueue.Count > 0)
         {
             var names = Build.Attacks.Where(a => a.Action == V.AttackActions.BonusAction).Select(a => a.Name);
+            var all = AddSegment(SegmentKind.Attacks, baQueue.ToArray(), -1, afterBonusAction);
             options.Add(new BonusActionOption(
-                options.Count, $"bonus_action attacks ({string.Join(", ", names)})", BonusActionOptionKind.Attacks,
-                AddSegment(SegmentKind.Attacks, baQueue.ToArray(), -1, afterBonusAction), -1, -1, -1));
+                options.Count, $"bonus_action attacks ({string.Join(", ", names)})", BonusActionOptionKind.Attacks, all, -1, -1, -1));
+
+            var withoutOffhand = baQueue.Where(l => !_lines[l].Attack.Offhand).ToArray();
+            GatesOffhand = withoutOffhand.Length < baQueue.Count;
+            NonOffhandBonusAttackSegment = !GatesOffhand ? all
+                : withoutOffhand.Length > 0 ? AddSegment(SegmentKind.Attacks, withoutOffhand, -1, afterBonusAction)
+                : -1;
         }
 
         var reactions = new int[ExtraAttacks.Count];

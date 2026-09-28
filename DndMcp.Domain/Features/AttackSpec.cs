@@ -16,8 +16,8 @@ public sealed class AttackSpec
     public object? Count { get; init; }
 
     [Description(
-        "\"action\" (default: part of the Attack action) or \"bonus_action\" (made every turn with the Bonus Action, e.g. " +
-        "a 2014 offhand attack).")]
+        "\"action\" (default: the Attack action for a weapon, the casting action for a spell attack) or \"bonus_action\" " +
+        "(made every turn with the Bonus Action, e.g. an offhand attack, which needs the Attack action that turn).")]
     public string? Action { get; init; }
 
     [Description("The attack roll. Default {\"ability\": \"str\", \"proficient\": true}.")]
@@ -30,15 +30,19 @@ public sealed class AttackSpec
 
     [Description(
         "acid, bludgeoning, cold, fire, force, lightning, necrotic, piercing, poison, psychic, radiant, slashing or " +
-        "thunder. Leave out for typeless damage, which nothing resists.")]
+        "thunder. Leave out for typeless damage, which nothing resists. Untyped extra_damage riders on it take this type.")]
     public string? DamageType { get; init; }
 
-    [Description("Add the to_hit ability's modifier to damage. Default true (false for an offhand attack).")]
+    [Description(
+        "Add the to_hit ability's modifier to damage. Default true (false for an offhand attack). Weapons add it; most spell " +
+        "attacks do not (Fire Bolt, Eldritch Blast, Scorching Ray): give false, unless the spell adds your spellcasting " +
+        "modifier (Spiritual Weapon).")]
     public bool? AbilityToDamage { get; init; }
 
     [Description(
-        "Any of melee, ranged, spell, heavy, light, finesse, two-handed, versatile, reach, thrown. Neither melee nor " +
-        "ranged means melee. spell = a spell attack, not a weapon.")]
+        "Any of melee, ranged, spell, heavy, light, finesse, two-handed, versatile, reach, thrown, magical, silvered, " +
+        "adamantine. Neither melee nor ranged means melee. spell = a spell attack, not a weapon. ranged + thrown = a thrown " +
+        "melee weapon (javelin). magical/silvered/adamantine: vs qualified monster resistances only.")]
     public IReadOnlyList<string>? Properties { get; init; }
 
     [Description(
@@ -51,7 +55,8 @@ public sealed class AttackSpec
 
     [Description(
         "Cantrip scaling at character level 1/5/11/17: \"dice\" multiplies the damage dice by 1/2/3/4 (Fire Bolt), " +
-        "\"beams\" multiplies count by 1/2/3/4 (Eldritch Blast).")]
+        "\"beams\" multiplies count by 1/2/3/4 (Eldritch Blast). Cantrips add no ability modifier: give ability_to_damage " +
+        "false; Agonizing Blast is a bonus_damage with amount \"cha\".")]
     public string? Cantrip { get; init; }
 
     [Description("The first level this attack exists at, 1-20.")]
@@ -67,7 +72,9 @@ public sealed class AttackSpec
 /// </summary>
 public sealed class ToHitSpec
 {
-    [Description("str (default), dex, con, int, wis, cha or none: the modifier on the attack roll (and on damage).")]
+    [Description(
+        "str (default; give dex for ranged or finesse weapons, the casting ability for spell attacks), dex, con, int, wis, cha " +
+        "or none: the modifier on the attack roll (and on damage).")]
     public string? Ability { get; init; }
 
     [Description("Add the proficiency bonus. Default true.")]

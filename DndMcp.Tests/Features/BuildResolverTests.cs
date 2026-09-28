@@ -178,9 +178,14 @@ public sealed class BuildResolverTests
             """,
             extra: "\"edition\": \"2014\", \"abilities\": {\"str\": 16}, \"fighting_style\": \"dueling\","), 5);
 
-        Assert.Equal([5, 3, 3], build.Attacks.Select(a => a.FlatDamage(partOfAttackAction: true)));
+        // A thrown javelin is a melee weapon (SRD "Simple Melee Weapons"), so Dueling's +2 applies to it too.
+        Assert.Equal([5, 3, 5], build.Attacks.Select(a => a.FlatDamage(partOfAttackAction: true)));
         Assert.Contains(new DamagePart("Dueling", 2, DamagePartSources.Dueling), build.Attacks[0].DamageParts);
         Assert.Contains("Dueling's +2 assumes the weapon is held in one hand and no other weapon is wielded.", build.Notes);
+        Assert.Contains(
+            "Dueling's +2 is added to thrown Javelin: a thrown melee weapon is still a melee weapon (a dart is a ranged weapon: leave " +
+            "out thrown if it should not take Dueling).",
+            build.Notes);
     }
 
     [Fact]
@@ -645,5 +650,210 @@ public sealed class BuildResolverTests
     public void ScalesWithLevel_OneStepStepMap_DoesNotScale()
     {
         Assert.False(BuildResolver.ScalesWithLevel(With("""[{ "name": "A", "damage": {"1": "1d10"}, "count": {"1": 2} }]""")));
+    }
+
+    // ------------------------------------------------------------------------------------------------------------------
+    // Phase 4 review fixes: notes for defaults the rules would not pick, thrown weapons and the fighting styles.
+    // ------------------------------------------------------------------------------------------------------------------
+
+    private const string FireBolt = """{ "name": "Fire Bolt", "to_hit": {"ability": "int"}, "damage": "1d10", "damage_type": "fire", "properties": ["ranged", "spell"]EXTRA }""";
+
+    private static IReadOnlyList<string> SpellNotes(ResolvedBuild build) =>
+        build.Notes.Where(n => n.Contains("spell attack", StringComparison.Ordinal) || n.Contains("twice", StringComparison.Ordinal)).ToList();
+
+    [Fact]
+    public void Resolve_SpellAttackAddingItsModifierByDefault_IsNoted()
+    {
+        var build = BuildResolver.Resolve(With($"[{FireBolt.Replace("EXTRA", "", StringComparison.Ordinal)}]", extra: "\"abilities\": {\"int\": 18},"), 5);
+
+        Assert.Equal(
+            ["Fire Bolt: a spell attack, so Int +4 is added to its damage only because ability_to_damage defaults to true. Most spell " +
+             "attacks add no modifier (Fire Bolt, Eldritch Blast): give ability_to_damage false; Spiritual Weapon does add it."],
+            SpellNotes(build));
+        Assert.Equal(4, build.Attacks[0].AbilityDamage); // the default itself is unchanged (contract §3.3)
+    }
+
+    [Theory]
+    [InlineData(", \"ability_to_damage\": false", 18)] // told
+    [InlineData(", \"ability_to_damage\": true", 18)] // Spiritual Weapon: explicitly adds it
+    [InlineData("", 10)] // Int +0 adds nothing
+    public void Resolve_SpellAttackWhoseModifierIsGivenOrZero_HasNoNote(string extra, int intelligence)
+    {
+        var build = BuildResolver.Resolve(With($"[{FireBolt.Replace("EXTRA", extra, StringComparison.Ordinal)}]", extra: $"\"abilities\": {{\"int\": {intelligence}}},"), 5);
+
+        Assert.Empty(SpellNotes(build));
+    }
+
+    [Fact]
+    public void Resolve_SpellAttackWithToHitAbilityNone_HasNoNote()
+    {
+        var build = BuildResolver.Resolve(With("""[{ "name": "Trap bolt", "to_hit": {"ability": "none", "total": 6}, "damage": "1d10", "properties": ["ranged", "spell"] }]"""), 5);
+
+        Assert.Empty(SpellNotes(build));
+    }
+
+    [Fact]
+    public void Resolve_SpellAttackAddingItsModifierBesideAnAbilityBonus_IsNotedTwice()
+    {
+        var build = BuildResolver.Resolve(With(
+            """[{ "name": "Eldritch Blast", "to_hit": {"ability": "cha"}, "damage": "1d10", "damage_type": "force", "properties": ["ranged", "spell"], "cantrip": "beams" }]""",
+            """[{ "kind": "bonus_damage", "name": "Agonizing Blast", "amount": "cha" }]""",
+            "\"abilities\": {\"cha\": 18},"), 5);
+
+        Assert.Contains("Eldritch Blast adds Cha twice: its own modifier (ability_to_damage) and Agonizing Blast. Give ability_to_damage false.", build.Notes);
+        Assert.Contains(build.Notes, n => n.StartsWith("Eldritch Blast: a spell attack, so Cha +4 is added", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Resolve_WarlockPreset_HasNoAbilityNotes()
+    {
+        var build = BuildResolver.Resolve(new BuildSpec { Name = "W", Preset = "warlock_baseline", Level = 5 }, 5);
+
+        Assert.Empty(SpellNotes(build));
+        Assert.DoesNotContain(build.Notes, n => n.Contains("(the default)", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("""{ "name": "Longbow", "damage": "1d8", "properties": ["ranged"] }""", "Longbow is a ranged weapon attack but uses Str +0 (the default) while Dex is +4; ranged weapon attacks use Dex: give to_hit {\"ability\": \"dex\"}.")]
+    [InlineData("""{ "name": "Dagger", "damage": "1d4", "properties": ["ranged", "thrown", "finesse"] }""", "Dagger is a finesse weapon but uses Str +0 (the default) while Dex is +4; Finesse may use Dex for attack and damage: give to_hit {\"ability\": \"dex\"}.")]
+    [InlineData("""{ "name": "Rapier", "damage": "1d8", "properties": ["melee", "finesse"] }""", "Rapier is a finesse weapon but uses Str +0 (the default) while Dex is +4; Finesse may use Dex for attack and damage: give to_hit {\"ability\": \"dex\"}.")]
+    public void Resolve_RangedOrFinesseWeaponOnTheDefaultStr_IsNotedAndUnchanged(string attack, string note)
+    {
+        var build = BuildResolver.Resolve(With($"[{attack}]", extra: "\"abilities\": {\"dex\": 18},"), 5);
+
+        Assert.Contains(note, build.Notes);
+        Assert.Equal(3, build.Attacks[0].AttackBonus); // Str +0 and proficiency +3: the default is kept
+    }
+
+    [Theory]
+    [InlineData("""{ "name": "Longbow", "to_hit": {"ability": "str"}, "damage": "1d8", "properties": ["ranged"] }""", 18, 10)] // given
+    [InlineData("""{ "name": "Javelin", "damage": "1d6", "properties": ["ranged", "thrown"] }""", 18, 10)] // thrown: Str is right
+    [InlineData("""{ "name": "Rapier", "damage": "1d8", "properties": ["melee", "finesse"] }""", 14, 14)] // Dex not higher
+    public void Resolve_WeaponWhoseDefaultIsRight_HasNoAbilityNote(string attack, int dex, int str)
+    {
+        var build = BuildResolver.Resolve(With($"[{attack}]", extra: $"\"abilities\": {{\"dex\": {dex}, \"str\": {str}}},"), 5);
+
+        Assert.DoesNotContain(build.Notes, n => n.Contains("(the default)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Resolve_SpellAttackOnTheDefaultStr_IsNoted()
+    {
+        var build = BuildResolver.Resolve(With("""[{ "name": "Fire Bolt", "damage": "1d10", "ability_to_damage": false, "properties": ["ranged", "spell"] }]""", extra: "\"abilities\": {\"int\": 18},"), 5);
+
+        Assert.Contains("Fire Bolt is a spell attack but uses Str (the default); a spell attack uses the spellcasting ability: give to_hit ability int, wis or cha.", build.Notes);
+    }
+
+    [Fact]
+    public void Resolve_DexOvertakingStrByLevel_IsNotedOnlyWhereItIsHigher()
+    {
+        var spec = With("""[{ "name": "Rapier", "damage": "1d8", "properties": ["melee", "finesse"] }]""",
+            extra: "\"abilities\": {\"str\": 14, \"dex\": {\"1\": 14, \"8\": 18}},");
+
+        var builds = BuildResolver.Resolve(spec, [4, 8]);
+
+        Assert.DoesNotContain(builds[0].Notes, n => n.StartsWith("Rapier is a finesse weapon", StringComparison.Ordinal));
+        Assert.Contains(builds[1].Notes, n => n.StartsWith("Rapier is a finesse weapon but uses Str +2 (the default) while Dex is +4", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Resolve_ArcheryWithAThrownWeapon_SkipsItWithANote()
+    {
+        // A javelin is a Simple Melee Weapon with Thrown: Archery ("ranged weapons") does not apply. A dart, given without
+        // thrown, is a ranged weapon and takes it.
+        var build = BuildResolver.Resolve(With(
+            """[{ "name": "Javelin", "damage": "1d6", "properties": ["ranged", "thrown"] }, { "name": "Dart", "to_hit": {"ability": "dex"}, "damage": "1d4", "properties": ["ranged", "finesse"] }]""",
+            extra: "\"abilities\": {\"str\": 18, \"dex\": 18}, \"fighting_style\": \"archery\","), 5);
+
+        Assert.Equal(7, build.Attacks[0].AttackBonus);
+        Assert.DoesNotContain(build.Attacks[0].ToHitParts, p => p.Label == "Archery");
+        Assert.Equal(9, build.Attacks[1].AttackBonus);
+        Assert.Contains(
+            "fighting_style archery is not added to Javelin: a thrown weapon is taken to be a melee weapon, and Archery is for ranged " +
+            "weapons. A dart is a ranged weapon: leave out thrown to give it Archery.",
+            build.Notes);
+        Assert.DoesNotContain(build.Notes, n => n.Contains("to_hit total", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Resolve_ArcheryWithOnlyAThrownWeapon_SaysWhyNotTheToHitTotal()
+    {
+        var build = BuildResolver.Resolve(With("""[{ "name": "Javelin", "damage": "1d6", "properties": ["ranged", "thrown"] }]""", extra: "\"fighting_style\": \"archery\","), 5);
+
+        Assert.Equal(
+            ["fighting_style archery is not added to Javelin: a thrown weapon is taken to be a melee weapon, and Archery is for ranged " +
+             "weapons. A dart is a ranged weapon: leave out thrown to give it Archery."],
+            build.Notes.Where(n => n.Contains("archery", StringComparison.Ordinal)));
+    }
+
+    // ------------------------------------------------------------------------------------------------------------------
+    // Phase 5 DSL additions.
+    // ------------------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Resolve_Heal_IsResolvedForTheSimulatorAndNotABonusActionConsumer()
+    {
+        var build = BuildResolver.Resolve(With(modifiersJson: """
+            [{ "kind": "heal", "name": "Healing Word", "dice": "2d4", "amount": "wis", "action_cost": "bonus_action", "targets": 3, "resource": {"uses": 3, "per": "long_rest"} },
+             { "kind": "heal", "name": "Second Wind", "dice": "1d10", "amount": {"1": 1, "5": 5}, "self_only": true }]
+            """, extra: "\"abilities\": {\"wis\": 16},"), 5);
+
+        Assert.Equal(2, build.Heals.Count);
+        var word = build.Heals[0];
+        Assert.Equal(("2d4+3", V.ActionCosts.BonusAction, 3, false), (word.Healing.Text, word.ActionCost, word.Targets, word.SelfOnly));
+        Assert.Equal(new ResolvedResource(3, V.Rests.LongRest), word.Resource);
+        Assert.Equal(new ModifierRef(1, V.Kinds.Heal, "Healing Word"), word.Source);
+        var wind = build.Heals[1];
+        Assert.Equal(("1d10+5", V.ActionCosts.Action, 1, true), (wind.Healing.Text, wind.ActionCost, wind.Targets, wind.SelfOnly));
+        Assert.Null(wind.Resource);
+        Assert.Empty(build.BonusActionConsumers);
+        Assert.Contains("Healing Word (heal) is healing: kept for the simulator (balance_simulate), it does not change damage dealt.", build.Notes);
+    }
+
+    [Fact]
+    public void Resolve_Durations_AreCarriedOrNullForTheDefault()
+    {
+        var build = BuildResolver.Resolve(With(modifiersJson: """
+            [{ "kind": "condition_on_hit", "name": "Stunning Strike", "condition": "stunned", "ability": "con", "dc": 15, "duration": "End of next turn" },
+             { "kind": "condition_on_hit", "name": "Trip", "condition": "prone", "ability": "str", "dc": 15 },
+             { "kind": "save_effect", "name": "Hold Person", "ability": "wis", "dc": 15, "condition": "paralyzed", "duration": "save_ends", "action_cost": "bonus_action" },
+             { "kind": "save_effect", "name": "Burst", "ability": "dex", "dc": 15, "dice": "2d6", "action_cost": "none" }]
+            """), 5);
+
+        Assert.Equal([V.Durations.EndOfNextTurn, null], build.ConditionsOnHit.Select(c => c.Duration));
+        Assert.Equal([V.Durations.SaveEnds, null], build.SaveEffects.Select(s => s.Duration));
+    }
+
+    [Theory]
+    [InlineData("""["melee"]""", false, false, false)]
+    [InlineData("""["melee", "magical"]""", true, false, false)]
+    [InlineData("""["ranged", "spell"]""", true, false, false)] // a spell attack is magical without the property
+    [InlineData("""["melee", "Silvered"]""", false, true, false)]
+    [InlineData("""["melee", "adamantine", "magical"]""", true, false, true)]
+    public void Resolve_MaterialProperties_AreReadForQualifiedResistances(string properties, bool magical, bool silvered, bool adamantine)
+    {
+        var build = BuildResolver.Resolve(With($$"""[{ "name": "Blade", "damage": "1d8", "properties": {{properties}} }]"""), 5);
+
+        var attack = build.Attacks[0];
+        Assert.Equal((magical, silvered, adamantine), (attack.IsMagical, attack.IsSilvered, attack.IsAdamantine));
+    }
+
+    [Fact]
+    public void Resolve_SaveEffect_CarriesWhetherItIsACantripAndItsDcAbility()
+    {
+        var build = BuildResolver.Resolve(With(modifiersJson: """
+            [{ "kind": "save_effect", "name": "Sacred Flame", "ability": "dex", "dc_ability": "wis", "dice": "1d8", "cantrip": true, "action_cost": "none" },
+             { "kind": "save_effect", "name": "Breath", "ability": "dex", "dc": 13, "dice": "2d6", "action_cost": "bonus_action" }]
+            """), 3);
+
+        Assert.Equal([(true, 1, "wis"), (false, 1, null)], build.SaveEffects.Select(s => (s.IsCantrip, s.CantripMultiplier, s.DcAbility)));
+    }
+
+    [Fact]
+    public void Resolve_CritOrKillTrigger_IsKeptForTheSimulator()
+    {
+        var build = BuildResolver.Resolve(Build(Fighter2014GwmJson.Replace("\"trigger\": \"crit\"", "\"trigger\": \"Crit or kill\"", StringComparison.Ordinal)), 5);
+
+        Assert.Equal(V.Triggers.CritOrKill, Assert.Single(build.ExtraAttacks).Trigger);
     }
 }

@@ -39,8 +39,21 @@ internal sealed class DamageSummary
 /// flats summed, adjusted (<see cref="DamageAdjustment"/>), and the types convolved.
 /// </para>
 /// <para>
+/// <b>A rider with no type deals the attack's type</b> (settled; 2024 Sneak Attack: "The extra damage's type is the same
+/// as the weapon's type"), decided here per attack line rather than in the resolver: one rider may land with a piercing
+/// and a fire attack, and the hit and miss caches are keyed by line, so each gets its own. Elemental Adept then sees the
+/// inherited type too. A save effect's missing type stays typeless (<see cref="SaveRoll"/>).
+/// </para>
+/// <para>
 /// <b>A miss</b>: Graze (the attack's ability modifier when positive, the weapon's type) and on_miss riders, as one
 /// instance of damage per type.
+/// </para>
+/// <para>
+/// <b>A hit, a miss and every rider on them carry the ATTACK's properties</b>
+/// (<see cref="DamageProperties.Of(ResolvedAttack)"/>) into a qualified adjustment: a werewolf resists a mundane
+/// longsword's slashing and the untyped Hunter's Mark riding on it, and neither when the sword is magical or silvered. A
+/// radiant smite on that sword is radiant, which the werewolf's B/P/S qualifier never covers anyway. The caches stay keyed
+/// by line, since a line is one attack and so one set of properties.
 /// </para>
 /// </summary>
 internal sealed class DamageModel
@@ -131,7 +144,7 @@ internal sealed class DamageModel
             }
 
             var rider = _plan.Riders[r];
-            var type = rider.DamageType;
+            var type = rider.DamageType ?? attack.DamageType;
             var times = crit && rider.CritDoubles ? 2 : 1;
             var remap = _plan.Rulings.GwfOnRiders ? attack.WeaponRemap : null;
             var elementalAdept = type is not null && attack.ElementalAdeptTypes.Contains(type);
@@ -143,7 +156,7 @@ internal sealed class DamageModel
             groups.AddFlat(type, rider.Damage.Flat);
         }
 
-        var summary = new DamageSummary(groups.Adjusted(_plan.Target, _meter));
+        var summary = new DamageSummary(groups.Adjusted(_plan.Target, DamageProperties.Of(attack), _meter));
         _hits[key] = summary;
         return summary;
     }
@@ -173,7 +186,7 @@ internal sealed class DamageModel
             }
 
             var rider = _plan.Riders[r];
-            var type = rider.DamageType;
+            var type = rider.DamageType ?? attack.DamageType;
             if (rider.Damage.HasDice)
             {
                 groups.Add(type, Dice(rider.Damage.Dice, null, type is not null && attack.ElementalAdeptTypes.Contains(type), 1), _meter);
@@ -182,7 +195,7 @@ internal sealed class DamageModel
             groups.AddFlat(type, rider.Damage.Flat);
         }
 
-        var summary = groups.IsEmpty ? DamageSummary.None : new DamageSummary(groups.Adjusted(_plan.Target, _meter));
+        var summary = groups.IsEmpty ? DamageSummary.None : new DamageSummary(groups.Adjusted(_plan.Target, DamageProperties.Of(attack), _meter));
         _misses[key] = summary;
         return summary;
     }
@@ -275,14 +288,15 @@ internal sealed class DamageModel
             }
         }
 
-        public Pmf<double> Adjusted(ResolvedTarget target, WorkMeter meter)
+        /// <summary>Each type adjusted on its own (<paramref name="properties"/>: the attack's, for qualified adjustments), then convolved.</summary>
+        public Pmf<double> Adjusted(ResolvedTarget target, DamageProperties properties, WorkMeter meter)
         {
             Pmf<double>? total = null;
             foreach (var key in _order)
             {
                 var (dice, flat) = _groups[key];
                 var type = key == Typeless ? null : key;
-                var adjusted = dice.Map(x => DamageAdjustment.Apply(x + flat, type, target), meter);
+                var adjusted = dice.Map(x => DamageAdjustment.Apply(x + flat, type, target, properties: properties), meter);
                 total = total is null ? adjusted : total.Convolve(adjusted, meter);
             }
 

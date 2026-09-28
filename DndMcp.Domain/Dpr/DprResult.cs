@@ -185,7 +185,21 @@ public sealed record ExtraAttackReport(string Name, string Attack, string Action
 /// <param name="LandsPerRound">Failed saves per round.</param>
 /// <param name="LandChancePerTurn">P(the condition was imposed at least once in a turn), averaged over the rounds.</param>
 /// <param name="LandChancePerFight">P(it was imposed at least once in the fight); null for round1.</param>
-public sealed record ConditionReport(string Name, string Condition, string Ability, double AttemptsPerRound, double LandsPerRound, double LandChancePerTurn, double? LandChancePerFight);
+public sealed record ConditionReport(string Name, string Condition, string Ability, double AttemptsPerRound, double LandsPerRound, double LandChancePerTurn, double? LandChancePerFight)
+{
+    /// <summary>
+    /// With Legendary Resistance on the target: (L + 1) / F attempts to land it past L refusals, F the chance the target
+    /// fails against the DC of the first attack it applies to (the parity of <see cref="SaveEffectReport.ExpectedCastsToLand"/>).
+    /// The landing chances above do not spend Legendary Resistance; this does. Null without it, and for an immune target.
+    /// </summary>
+    public double? ExpectedAttemptsToLand { get; init; }
+
+    /// <summary>
+    /// The target is immune to <see cref="Condition"/> (a stat block's condition immunity): it is never attempted, so its
+    /// attempts, landings and landing chances are all 0, and the result says why rather than showing a bare 0%.
+    /// </summary>
+    public bool Immune { get; init; }
+}
 
 /// <summary>
 /// A save effect (research A6, A8). The per-cast figures are for a cast against the target as given (its initial
@@ -203,8 +217,11 @@ public sealed record ConditionReport(string Name, string Condition, string Abili
 /// <param name="EffectiveDamage">The same with each target's damage capped at its HP (overkill removed); null without HP.</param>
 /// <param name="KillDistribution">P(exactly k targets die), k = 0..targets; null without HP.</param>
 /// <param name="ExpectedCastsToLand">(L + 1) / F casts to land its condition past L Legendary Resistances; +∞ when F = 0; null when not applicable.</param>
-/// <param name="LandChancePerTurn">P(its condition lands on a given target in a turn): cast and failed; null without a condition.</param>
-/// <param name="LandChancePerFight">P(its condition lands on a given target at least once in the fight); null for round1 or without a condition.</param>
+/// <param name="LandChancePerTurn">
+/// P(its condition lands on the main (first) target in a turn): cast and failed, including conditions imposed on it earlier
+/// in the turn; null without a condition. Legendary Resistance is not spent here (see <paramref name="ExpectedCastsToLand"/>).
+/// </param>
+/// <param name="LandChancePerFight">P(its condition lands on the main target at least once in the fight); null for round1 or without a condition.</param>
 public sealed record SaveEffectReport(
     string Name,
     string Ability,
@@ -224,7 +241,14 @@ public sealed record SaveEffectReport(
     IReadOnlyList<double>? KillDistribution,
     double? ExpectedCastsToLand,
     double? LandChancePerTurn,
-    double? LandChancePerFight);
+    double? LandChancePerFight)
+{
+    /// <summary>
+    /// The target is immune to <see cref="Condition"/>: the effect's damage still counts, its condition never lands (the
+    /// landing chances are 0 and <see cref="ExpectedCastsToLand"/> is null), and the result says why.
+    /// </summary>
+    public bool ConditionImmune { get; init; }
+}
 
 /// <summary>
 /// A power attack (2014 GWM/Sharpshooter −5/+10): the turn-level choice and, for transparency, the per-attack rule of

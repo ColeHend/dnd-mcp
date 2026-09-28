@@ -1,4 +1,5 @@
 using DndMcp.Domain.Dpr;
+using DndMcp.Domain.Features;
 using DndMcp.Formatting.Srd;
 using static DndMcp.Formatting.BalanceMarkdownText;
 
@@ -23,7 +24,11 @@ namespace DndMcp.Formatting;
 /// </summary>
 internal static class BalanceDprMarkdown
 {
-    public static string Format(DprReport report)
+    /// <param name="lookupNotes">
+    /// The host's notes on how target.monster was found (a form chosen, another edition's stat block used): first among the
+    /// notes, since they say which creature every number is for.
+    /// </param>
+    public static string Format(DprReport report, IReadOnlyList<string>? lookupNotes = null)
     {
         var detail = report.Detail;
         var evaluation = detail.Result.Evaluation;
@@ -42,8 +47,8 @@ internal static class BalanceDprMarkdown
             SaveEffects(evaluation),
             detail.Result.Day is { } day ? Day(day, $"## The adventuring day at level {Number(detail.Level)}") : null,
             Assumptions(report),
-            Notes(report.Notes.Concat(evaluation.Notes)),
-            Sources(report.Levels.Select(l => l.Target), [detail.Build], references: true),
+            Notes((lookupNotes ?? []).Concat(report.Notes).Concat(evaluation.Notes)),
+            Sources(report.Levels.Select(l => l.Target), [detail.Build], references: true, detail.Reference.Profile),
         };
 
         return SrdMarkdownText.Blocks(blocks) + "\n";
@@ -57,7 +62,8 @@ internal static class BalanceDprMarkdown
         return
             $"**{Dpr(detail.DamagePerRound)}** damage per round at level {Number(detail.Level)} against {TargetShort(detail.Target, detail.Build)} — " +
             $"{report.Horizon.Label}. For scale at level {Number(detail.Level)}: RPGBOT's target " +
-            $"{Dpr(reference.RpgbotTarget)}, the warlock baseline {Dpr(reference.WarlockBaseline)}.";
+            $"{Dpr(reference.RpgbotTarget)}, the warlock baseline {Dpr(reference.WarlockBaseline)}" +
+            (reference.Profile == DslValues.Profiles.Default ? "." : $" (against the {reference.Profile} target for CR {Number(detail.Level)}).");
     }
 
     // All three horizons at the detail level, the headline's marked: a feature that shines in round 1 and fades over a

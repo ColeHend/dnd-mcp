@@ -36,8 +36,29 @@ public sealed record DiceTerm(int Count, int Sides, bool Negative = false)
 /// </summary>
 public sealed class DamageFormula : IEquatable<DamageFormula>
 {
+    /// <summary>
+    /// Where an attack's modifier, proficiency bonus and type go instead of its damage string: the words a model most often
+    /// writes into it ("2d6+str", "1d8+PB", "1d10 force").
+    /// </summary>
+    public const string AttackHint =
+        "the ability modifier is added for you (to_hit ability; ability_to_damage, default true); proficiency bonus is a " +
+        "bonus_damage modifier with amount \"pb\"; the damage type goes in damage_type";
+
+    /// <summary>Where a rider's or save effect's flat part and type go instead of its dice string.</summary>
+    public const string AmountHint = "a flat bonus, \"pb\" or an ability modifier goes in amount; the damage type goes in type";
+
+    /// <summary>Where a heal's flat part goes instead of its dice string.</summary>
+    public const string HealHint = "a flat bonus, \"pb\" or an ability modifier (\"wis\") goes in amount";
+
     private const string DamageExample = "e.g. \"2d6\", \"1d8+1\" or \"1d10+1d6\"";
     private const string BonusExample = "e.g. \"1d4\" (Bless) or \"-1d4\" (Bane)";
+
+    /// <summary>
+    /// The dice grammar's own closing examples (<c>DiceParser</c>): every one of them ("4d6kh3", "adv+5", "8d6>=30") is a
+    /// form this field refuses, so a syntax error drops them and says what the field takes instead. A test pins that they
+    /// are gone, so a change to the parser's wording cannot bring them back unnoticed.
+    /// </summary>
+    private const string ParserExamples = "Examples: \"2d6+3\", \"4d6kh3\", \"adv+5\", \"8d6>=30\".";
 
     private DamageFormula(IReadOnlyList<DiceTerm> dice, int flat)
     {
@@ -72,8 +93,12 @@ public sealed class DamageFormula : IEquatable<DamageFormula>
     /// Damage: plain dice (added only) and whole numbers. "2d6", "1d8+1", "1d10+1d6", "1d4-1".
     /// </summary>
     /// <param name="field">The field for the message, e.g. "damage" or "damage at level 5".</param>
+    /// <param name="hint">
+    /// Where a word the model wrote into the dice belongs instead (<see cref="AttackHint"/>, <see cref="AmountHint"/>): said
+    /// only when the text fails to parse and holds an ability, "pb" or a damage type.
+    /// </param>
     /// <exception cref="DndInputException">Anything else, with what to write instead.</exception>
-    public static DamageFormula ParseDamage(string? text, string field) => Parse(text, field, bonusDice: false, flatHint: null);
+    public static DamageFormula ParseDamage(string? text, string field, string? hint = null) => Parse(text, field, bonusDice: false, flatHint: hint);
 
     /// <summary>
     /// Bonus dice on a d20 roll: plain dice with their signs, no whole numbers. "1d4", "-1d4", "1d4-1d4".
@@ -108,6 +133,7 @@ public sealed class DamageFormula : IEquatable<DamageFormula>
             throw new DndInputException($"{field} is empty; {what}.");
         }
 
+        var echo = $"{field} \"{DslText.Echo(trimmed)}\"";
         DiceExpression expression;
         try
         {
@@ -115,10 +141,19 @@ public sealed class DamageFormula : IEquatable<DamageFormula>
         }
         catch (DndInputException ex)
         {
-            throw new DndInputException($"{field}: {ex.Message}", ex);
+            // A word where only dice and numbers go ("2d6+str", "1d8+PB", "1d10 force") says where it belongs; any other
+            // syntax error keeps the parser's own words, without its examples of forms this field refuses.
+            if (flatHint is not null && MisplacedWord(trimmed) is { } word)
+            {
+                throw new DndInputException($"{echo} has \"{DslText.Echo(word)}\": {flatHint}. {Capitalized(what)}.", ex);
+            }
+
+            var message = ex.Message.EndsWith(ParserExamples, StringComparison.Ordinal)
+                ? ex.Message[..^ParserExamples.Length].TrimEnd()
+                : ex.Message;
+            throw new DndInputException($"{field}: {message} {Capitalized(what)}.", ex);
         }
 
-        var echo = $"{field} \"{DslText.Echo(trimmed)}\"";
         if (expression.Comparison is not null)
         {
             throw new DndInputException($"{echo} has a comparison ({expression.Comparison}); {what}.");
@@ -201,6 +236,42 @@ public sealed class DamageFormula : IEquatable<DamageFormula>
 
         DndInputException Refused(string reason) => new($"{echo} {reason}; {what}.");
     }
+
+    /// <summary>
+    /// The first word of <paramref name="text"/> that names an ability, the proficiency bonus or a damage type: what a
+    /// model means as "plus my Str modifier" or "fire damage". Letters inside a dice term (the d of 2d6) are not words.
+    /// </summary>
+    private static string? MisplacedWord(string text)
+    {
+        var i = 0;
+        while (i < text.Length)
+        {
+            if (!char.IsLetter(text[i]))
+            {
+                i++;
+                continue;
+            }
+
+            var start = i;
+            while (i < text.Length && char.IsLetter(text[i]))
+            {
+                i++;
+            }
+
+            var word = text[start..i];
+            var key = word.ToLowerInvariant();
+            if (key is DslAmount.ProficiencyBonusKeyword or "prof" or "proficiency" or "mod" or "modifier" ||
+                DslValues.Abilities.Set.TryMatch(word, out _) ||
+                DslValues.DamageTypes.Set.TryMatch(word, out _))
+            {
+                return word;
+            }
+        }
+
+        return null;
+    }
+
+    private static string Capitalized(string text) => text.Length == 0 ? text : char.ToUpperInvariant(text[0]) + text[1..];
 
     /// <summary>Why a dice group is not a plain NdM term, or null when it is.</summary>
     private static string? RefusedModifier(DiceGroup group)

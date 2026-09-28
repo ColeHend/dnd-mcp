@@ -168,8 +168,10 @@ public static class LevelValue
         Parse(raw, field, (element, where, inMap) => ReadInt(element, where, min, max, inMap ? null : example), example);
 
     /// <summary>A damage formula (<see cref="DamageFormula.ParseDamage"/>) or a whole number, or a step map of them.</summary>
-    public static LevelValue<DamageFormula>? ParseDamage(object? raw, string field, string example = "{\"1\": \"1d8\", \"5\": \"2d8\"}") =>
-        Parse(raw, field, (element, where, inMap) => ReadDamage(element, where, inMap ? null : example), example);
+    /// <param name="hint">Where a misplaced word belongs (<see cref="DamageFormula.AttackHint"/>, …), for a formula that fails to parse.</param>
+    public static LevelValue<DamageFormula>? ParseDamage(
+        object? raw, string field, string example = "{\"1\": \"1d8\", \"5\": \"2d8\"}", string? hint = null) =>
+        Parse(raw, field, (element, where, inMap) => ReadDamage(element, where, inMap ? null : example, hint), example);
 
     /// <summary>Bonus dice (<see cref="DamageFormula.ParseBonusDice"/>), or a step map of them.</summary>
     public static LevelValue<DamageFormula>? ParseBonusDice(object? raw, string field, string flatHint) =>
@@ -210,11 +212,11 @@ public static class LevelValue
         return (int)value;
     }
 
-    private static DamageFormula ReadDamage(JsonElement element, string field, string? mapExample)
+    private static DamageFormula ReadDamage(JsonElement element, string field, string? mapExample, string? hint)
     {
         if (element.ValueKind == JsonValueKind.String)
         {
-            return DamageFormula.ParseDamage(element.GetString(), field);
+            return DamageFormula.ParseDamage(element.GetString(), field, hint);
         }
 
         if (TryReadWholeNumber(element, out var value))

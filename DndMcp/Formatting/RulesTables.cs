@@ -90,8 +90,22 @@ internal static class RulesTables
             "The 2014 DMG's expected AC, hit points, attack bonus, damage per round and save DC for each CR (not in either SRD).",
             ["Monster Statistics by Challenge Rating", "Monster Statistics by CR", "Monster Stats by CR"],
             MonsterStats2014),
+        new(
+            EmpiricalSlug,
+            "SRD Monster Statistics by Challenge Rating (Empirical)",
+            "2014 and 2024",
+            "SRD 5.1 and SRD 5.2.1 monster stat blocks, medians computed by this server (not a table in either SRD); the DMG " +
+            $"columns: {Dmg2014}, pp. 274–275",
+            "What the SRD's own monsters of each CR are, per edition: median AC, hit points, best attack bonus, best save DC " +
+            "and mean save bonus, with how many monsters each row counts, beside the 2014 DMG's design targets.",
+            ["SRD Monster Statistics by Challenge Rating", "Empirical Monster Statistics", "Empirical Monster Stats by CR",
+             "Monster Stats by CR (Empirical)"],
+            MonsterStatsEmpiricalPage),
         .. BalanceRulesTables.All,
     ];
+
+    /// <summary>The empirical monster statistics' slug (<see cref="MonsterStatsEmpirical"/>).</summary>
+    public const string EmpiricalSlug = "monster-stats-by-cr-empirical";
 
     /// <summary>
     /// What <c>rules_get</c> answers for a <c>rules://tables</c> URI: the table, or for <see cref="IndexUri"/> the list.
@@ -259,6 +273,66 @@ internal static class RulesTables
         "table: a defensive CR from hit points, moved one step for every 2 points of AC above or below the row's; an " +
         "offensive CR from damage per round, moved likewise by attack bonus or save DC; the final CR is their average. " +
         "For CR 0 the AC, attack bonus and save DC are maxima.");
+
+    /// <summary>
+    /// Both editions' empirical rows side by side for every CR, with the DMG 2014 row for comparison. A CR with no SRD
+    /// monster in an edition shows <see cref="MonsterStatsEmpirical.MonsterStats"/>'s interpolated values marked "~" and a
+    /// count of "—", because those numbers are not a census and a model must not quote them as one.
+    /// </summary>
+    private static string MonsterStatsEmpiricalPage(RulesTable table)
+    {
+        var rows = ChallengeRating.All.Select(cr =>
+        {
+            var dmg = ChallengeRatingTables.MonsterStats(cr);
+            var cells = new List<string> { cr.ToString() };
+            foreach (var edition in new[] { SrdEdition.Edition2014, SrdEdition.Edition2024 })
+            {
+                var row = MonsterStatsEmpirical.MonsterStats(edition, cr);
+                var mark = row.IsInterpolated ? "~" : string.Empty;
+                cells.Add(row.IsInterpolated ? "—" : Number(row.Count));
+                cells.Add(mark + Median(row.ArmorClass));
+                cells.Add(mark + Median(row.HitPoints));
+                cells.Add(row.AttackCount == 0 && !row.IsInterpolated ? "—" : mark + "+" + Median(row.AttackBonus));
+                cells.Add(row.SaveDcCount == 0 && !row.IsInterpolated
+                    ? "—"
+                    : mark + Median(row.SaveDc) + (row.IsInterpolated ? string.Empty : $" ({Number(row.SaveDcCount)})"));
+                cells.Add(mark + SignedMedian(row.MeanSaveBonus));
+            }
+
+            cells.Add((dmg.IsCeiling ? "≤ " : string.Empty) + Number(dmg.ArmorClass));
+            cells.Add($"{Number(dmg.HitPointsMin)}–{Number(dmg.HitPointsMax)}");
+            cells.Add((dmg.IsCeiling ? "≤ " : string.Empty) + SrdMarkdownText.Signed(dmg.AttackBonus));
+            cells.Add((dmg.IsCeiling ? "≤ " : string.Empty) + Number(dmg.SaveDc));
+            return (IReadOnlyList<string>)cells;
+        });
+
+        return Page(
+            table,
+            SrdMarkdownText.Table(
+                ["CR", "2014 n", "2014 AC", "2014 HP", "2014 attack", "2014 DC (n)", "2014 save", "2024 n", "2024 AC", "2024 HP",
+                 "2024 attack", "2024 DC (n)", "2024 save", "DMG AC", "DMG HP", "DMG attack", "DMG DC"],
+                rows),
+            "**Columns.** n is how many SRD monsters of that CR the row counts (a shapechanger's forms count once, as the form it " +
+            "fights in). AC and HP are medians of the stat blocks' own values; attack is the median of each monster's best attack " +
+            "bonus (spell attacks included); DC is the median of each monster's best save DC over the monsters that have one, " +
+            "with their number in brackets; save is the median of each monster's mean save bonus (all six saves). A median of " +
+            "an even count is the mean of the middle two, so a value can end in .5.",
+            "**~ marks an interpolated row**: the SRD has no monster of that CR in that edition, so each value is interpolated " +
+            "between the nearest CRs that have one (or taken from the nearest at either end). It is not a census; \"—\" means " +
+            "no monster of the row has that value.",
+            "**What the data says.** Against the DMG 2014 targets, the SRD's monsters have fewer hit points at nearly every CR, " +
+            "higher attack bonuses from CR 1 up, and about the DMG's AC (lower at CR 1/2 and below, higher from CR 20). The 2024 " +
+            "stat blocks' AC is the same as 2014's or higher at most CRs.",
+            "The medians come from the stat blocks as this server normalizes them for balance_simulate (rules_get with format " +
+            "\"combatant\" shows one), and a test recomputes every cell from the shipped data, so the table cannot drift from it. " +
+            "The DMG columns are the 2014 design targets (`" + UriPrefix + "monster-stats-by-cr-2014`), not SRD text.");
+    }
+
+    // 14.5 → "14.5", 12 → "12", an interpolated 13.67 → "13.67".
+    private static string Median(double value) => value.ToString("0.##", CultureInfo.InvariantCulture);
+
+    private static string SignedMedian(double value) =>
+        value < 0 ? "−" + (-value).ToString("0.00", CultureInfo.InvariantCulture) : "+" + value.ToString("0.00", CultureInfo.InvariantCulture);
 
     private static IEnumerable<int> Levels() => Enumerable.Range(EncounterLimits.MinLevel, EncounterLimits.MaxLevel - EncounterLimits.MinLevel + 1);
 

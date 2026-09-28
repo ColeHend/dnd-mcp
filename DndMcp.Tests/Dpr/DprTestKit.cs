@@ -1,6 +1,7 @@
 using DndMcp.Domain.Dice;
 using DndMcp.Domain.Dpr;
 using DndMcp.Domain.Features;
+using DndMcp.Domain.Simulation;
 
 namespace DndMcp.Tests.Dpr;
 
@@ -28,6 +29,18 @@ internal static class DprTestKit
     public static DprResult Evaluate(string buildJson, string? targetJson = null, DprOptions? options = null, string? rulingsJson = null, int? level = null)
     {
         var (build, target) = Resolve(buildJson, targetJson, rulingsJson, level);
+        return DprEngine.Evaluate(build, target, options ?? DprOptions.Round1, WorkMeter.Unlimited);
+    }
+
+    /// <summary>
+    /// The build against a stat block target (the host's lookup done by the test), with <paramref name="targetJson"/>'s
+    /// fields overriding it.
+    /// </summary>
+    public static DprResult EvaluateVs(string buildJson, StatBlock monster, string? targetJson = null, DprOptions? options = null, int? level = null)
+    {
+        var spec = Build(buildJson);
+        var build = BuildResolver.Resolve(spec, level ?? spec.Level ?? 1);
+        var target = TargetResolver.Resolve(Target(targetJson), build.Level, monster);
         return DprEngine.Evaluate(build, target, options ?? DprOptions.Round1, WorkMeter.Unlimited);
     }
 

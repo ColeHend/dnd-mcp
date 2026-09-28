@@ -5,7 +5,16 @@ namespace DndMcp.Domain.Features;
 /// <summary>
 /// The creature a build attacks. Every field is optional: with nothing given, <see cref="TargetResolver"/> uses the DMG
 /// 2014 "Monster Statistics by Challenge Rating" row for CR = the level being evaluated, the community convention for
-/// "a fair target at level L", and the typical save bonus for that CR (<see cref="TypicalSaveBonus"/>).
+/// "a fair target at level L", and the typical save bonus for that CR (<see cref="TypicalSaveBonus"/>). <c>profile</c>
+/// swaps that table for the SRD monsters' medians (<see cref="TargetProfiles"/>).
+///
+/// <para>
+/// <c>monster</c> names an SRD stat block instead (a ref or a name). The Domain only carries the text: the HOST looks it up
+/// (as <c>encounter_difficulty</c> resolves monsters) and passes the normalized stat block to
+/// <see cref="TargetResolver.Resolve"/>, which takes every number from it; any other field given here overrides the stat
+/// block's, with a note. <c>cr</c> and <c>profile</c> choose a table row, which a stat block replaces, so neither is
+/// accepted beside it.
+/// </para>
 ///
 /// <para>
 /// <c>cr</c> is <c>object?</c> for the same reason as <c>encounter_difficulty</c>'s: "1/2", "5", 0.5 and 5 must all
@@ -15,11 +24,17 @@ namespace DndMcp.Domain.Features;
 /// </summary>
 public sealed class TargetSpec
 {
-    [Description("Armor Class 1-40. Default: the DMG 2014 monster row for CR = the level evaluated (or for cr).")]
+    [Description("An SRD monster by ref or name, e.g. \"ogre\": its stat block gives AC, saves, HP, resistances and traits; other fields override it.")]
+    public string? Monster { get; init; }
+
+    [Description("Armor Class 1-40. Default: the row for CR = the level evaluated (or for cr).")]
     public int? Ac { get; init; }
 
-    [Description("Challenge rating (\"1/2\", \"5\" or 0.5): its DMG row gives the AC (unless ac is given) and typical saves.")]
+    [Description("Challenge rating (\"1/2\", \"5\" or 0.5): its row gives the AC (unless ac is given) and typical saves.")]
     public object? Cr { get; init; }
+
+    [Description("The row's table: dmg2014 (default, DMG 2014), mm2024 or mm2014 (SRD monster medians).")]
+    public string? Profile { get; init; }
 
     [Description("Bonus on every saving throw, -5 to 20. Default: the typical save bonus for the CR.")]
     public int? SaveBonus { get; init; }
@@ -42,7 +57,9 @@ public sealed class TargetSpec
     [Description("Advantage on saves against magical effects (Magic Resistance). Default false.")]
     public bool? MagicResistance { get; init; }
 
-    [Description("Evasion: a Dex save for half takes none on a success and half on a failure. Default false.")]
+    [Description(
+        "Evasion: a Dex save for half takes none on a success and half on a failure (2024: not while stunned, paralyzed or " +
+        "unconscious). Default false.")]
     public bool? Evasion { get; init; }
 
     [Description("A condition it starts every turn with: prone, restrained, blinded, stunned, paralyzed, unconscious or dodging.")]
@@ -51,7 +68,8 @@ public sealed class TargetSpec
     [Description("\"half\" (+2) or \"three_quarters\" (+5) cover: added to its AC and Dex saves.")]
     public string? Cover { get; init; }
 
-    [Description("Legendary Resistance uses per day, 0-5 (for save-or-suck effects). Default 0.")]
+    [Description(
+        "Legendary Resistance uses per day, 0-5: gives expected casts to land a condition; landing chances ignore it. Default 0.")]
     public int? LegendaryResistance { get; init; }
 
     [Description("Dice added to its saving throws, e.g. \"-1d4\" (Bane) or \"1d4\".")]
@@ -96,8 +114,9 @@ public sealed class SavesSpec
 }
 
 /// <summary>
-/// Table rulings the rules text does not settle. Every one defaults to the reading of the rules as written (false);
-/// results echo each one that mattered, so two answers computed under different rulings can be told apart.
+/// Table rulings the rules text does not settle. Every one defaults to false (the conservative reading, not a claim that
+/// the rules say so: gwf_on_riders and savage_attacker_on_crit_dice are open questions); results echo each one that
+/// mattered, so two answers computed under different rulings can be told apart.
 /// </summary>
 public sealed class RulingsSpec
 {
@@ -129,7 +148,9 @@ public sealed class FeatureSpec
     [Description("Modifiers to add to the baseline's, e.g. [{\"kind\": \"bonus_damage\", \"amount\": \"pb\", \"attack_action_only\": true}].")]
     public IReadOnlyList<ModifierSpec>? Modifiers { get; init; }
 
-    [Description("Ability scores to SET (not add), e.g. {\"str\": 19} for a feat's +1 to an 18.")]
+    [Description(
+        "Ability scores to SET (not add), replacing the baseline's value at every level: {\"str\": 19} for a feat's +1 to an 18. " +
+        "With a stepped baseline give the whole step map, e.g. {\"1\": 16, \"4\": 17, \"8\": 19} for a feat instead of the level 4 ASI.")]
     public AbilitiesSpec? Abilities { get; init; }
 
     [Description("A fighting style replacing the baseline's: gwf, archery, dueling or twf.")]

@@ -41,6 +41,8 @@ public sealed class StdoutPurityTests
     private const int UnknownToolId = 6;
     private const int OddsCallId = 7;
     private const int RulesSearchCallId = 8;
+    private const int SimulateCallId = 9;
+    private const int CombatantCallId = 10;
 
     [Fact]
     public async Task BuiltServer_FullSession_WritesOnlyJsonRpcToStdout()
@@ -69,6 +71,11 @@ public sealed class StdoutPurityTests
         Assert.False(IsToolError(responses[OddsCallId]), $"The dice_odds call (Monte Carlo path) failed.{server.Diagnostics()}");
         Assert.False(IsToolError(responses[RulesSearchCallId]), $"The rules_search call failed.{server.Diagnostics()}");
         Assert.Contains("`2024/spell/fireball`", ResultText(responses[RulesSearchCallId]), StringComparison.Ordinal);
+
+        // The simulator runs on worker threads and the normalizer reads the overrides: neither may print.
+        Assert.False(IsToolError(responses[SimulateCallId]), $"The balance_simulate call failed.{server.Diagnostics()}");
+        Assert.StartsWith("# Fight simulation: ", ResultText(responses[SimulateCallId]), StringComparison.Ordinal);
+        Assert.False(IsToolError(responses[CombatantCallId]), $"The rules_get combatant call failed.{server.Diagnostics()}");
     }
 
     [Fact]
@@ -201,9 +208,13 @@ public sealed class StdoutPurityTests
         await server.SendAsync(Request(UnknownToolId, "tools/call", """{"name":"no_such_tool","arguments":{}}"""));
         await server.SendAsync(Request(OddsCallId, "tools/call", """{"name":"dice_odds","arguments":{"expression":"4d6!kh3>=15"}}"""));
         await server.SendAsync(Request(RulesSearchCallId, "tools/call", """{"name":"rules_search","arguments":{"query":"fireball"}}"""));
+        await server.SendAsync(Request(SimulateCallId, "tools/call",
+            """{"name":"balance_simulate","arguments":{"party":[{"monster":"Knight","count":2}],"enemies":[{"monster":"Lich"}],"iterations":2048,"seed":1,"replay":1}}"""));
+        await server.SendAsync(Request(CombatantCallId, "tools/call", """{"name":"rules_get","arguments":{"name":"Lich","format":"combatant","edition":"both"}}"""));
 
         var rest = await server.WaitForResponsesAsync(
-            [ListToolsId, GoodCallId, DomainErrorCallId, GuardErrorCallId, UnknownToolId, OddsCallId, RulesSearchCallId], timeout.Token);
+            [ListToolsId, GoodCallId, DomainErrorCallId, GuardErrorCallId, UnknownToolId, OddsCallId, RulesSearchCallId, SimulateCallId, CombatantCallId],
+            timeout.Token);
 
         server.CloseInput();
         var exitCode = await server.WaitForExitAsync(ExitTimeout);

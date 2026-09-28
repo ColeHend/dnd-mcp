@@ -29,7 +29,7 @@ below, lists with reasons what is deliberately left as upstream wrote it, and pi
 here as still true. The file's sha256 is part of `srd.db`'s staleness key, so editing it rebuilds the index on next
 start.
 
-## What is corrected (306 entries: 256 in 2024, 50 in 2014)
+## What is corrected (307 entries: 257 in 2024, 50 in 2014)
 
 ### 2024 (SRD 5.2.1 data, text from the SRD 5.2 markdown)
 
@@ -40,7 +40,7 @@ start.
 | equipment | 44 | Wrong costs and weights (Longbow 5 GP for 50 GP, Dart 5 GP for 5 CP, Chain Shirt 14 lb. for 20 lb., …), Sling damage type, Trident damage (2014's 1d6/1d8), Brewer's Supplies and Tinker's Tools DCs, pack contents ("7 flasks of Oil" parsed as 7 Flasks *and* 7 Oil; the Entertainer's Pack had the 2014 pack's contents; the Scholar's Pack a Blanket), four damaged descriptions and the Scholar's Pack's, category claims (Hide Armor is Medium, not Light; Explorer's and Entertainer's Packs are Equipment Packs; the Disguise Kit is a Tool), and two dropped properties added: the Entertainer's Pack's weight (58½ lb.) and the Glassblower's Tools' Utilize line. |
 | feature | 24 | Circle of the Land Spells lacked Ray of Frost, Shocking Grasp and Sleep; Oath of Devotion Spells had "Shielf of Faith"; Draconic Spells ran its level 5 and 7 rows together; Draconic Spells, Fiend Spells and Font of Magic had their table captions glued to the header row; Wizard Spellcasting dropped half a sentence; Divine Intervention broke mid-sentence before "Reaction"; words split at old line breaks ("Ar- mor"). |
 | equipment-category | 6 | Martial Melee Weapons lacked the Longsword, Tools the Forgery Kit, Adventuring Gear the Entertainer's and Explorer's Packs, Equipment Packs the Entertainer's Pack; Armor and Weapons lacked the magic armor and weapons that claim them (the 2014 lists hold both). |
-| monster | 4 | The Mule carried the Octopus's traits, action and reaction (upstream has no Octopus record); the Pirate Captain's Captain's Charm and the Unicorn's Unicorn's Blessing (3/Day) bonus actions were missing (added); the Archmage was worth 8,000 XP, not CR 12's 8,400. |
+| monster | 5 | The Mule carried the Octopus's traits, action and reaction (upstream has no Octopus record); the Pirate Captain's Captain's Charm and the Unicorn's Unicorn's Blessing (3/Day) bonus actions were missing (added); the Archmage was worth 8,000 XP, not CR 12's 8,400; the Ancient Copper Dragon had a fourth legendary action, "Spike (level 5 version)", a fragment split off Mind Jolt (found by the Phase 5 normalizer). |
 | feat | 2 | Boon of Irresistible Offense and Boon of Spell Recall let the ability increase go to any ability. |
 | trait | 2 | Fiendish Legacy's "spell-casting"; the Rock Gnome lineage said only "You know the Prestidigitation cantrip." (upstream moved Mending to a separate trait). |
 | species | 1 | Dragonborn linked only Darkvision and Draconic Flight; its Draconic Ancestry trait (the table behind Breath Weapon and Damage Resistance) was linked from nothing. |

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using DndMcp.Domain.Encounters;
 using DndMcp.Domain.Features;
 using DndMcp.Domain.Probability;
@@ -23,6 +24,14 @@ namespace DndMcp.Domain.Dpr;
 /// <para>
 /// Neither is a rule: both are conventions, and <see cref="RpgbotSource"/> and <see cref="WarlockSource"/> say whose.
 /// </para>
+/// <para>
+/// <b>Under an empirical target profile</b> (<c>target.profile</c> mm2014 / mm2024) the warlock baseline is evaluated
+/// against THAT profile's CR = level target (<see cref="At(int, string)"/>): a build measured against the 2024 SRD's
+/// typical CR 5 monster (AC 13) beside a warlock measured against the DMG's (AC 15) would look two points of AC better
+/// than it is. RPGBOT's target stays the DMG hit points ÷ 12 under every profile: it is a damage budget read from the
+/// DMG's hit-point range by definition, involves no AC or save, and is also the level-equivalent fallback slope, which
+/// must not move with a profile.
+/// </para>
 /// </summary>
 public static class ReferenceCurves
 {
@@ -35,6 +44,9 @@ public static class ReferenceCurves
         "levels 1/4/8, against the DMG 2014 row for CR = level; evaluated by this engine from the warlock_baseline preset";
 
     private static readonly Lazy<IReadOnlyList<DprTargetRow>> Rows = new(BuildRows);
+
+    // The warlock baseline against an empirical profile's CR = level target, evaluated on first use per (profile, level).
+    private static readonly ConcurrentDictionary<(string Profile, int Level), double> ProfileWarlock = new();
 
     /// <summary>The DMG 2014 "Monster Statistics by Challenge Rating" row for CR = <paramref name="level"/>.</summary>
     public static MonsterStatsRow Row(int level)
@@ -53,8 +65,30 @@ public static class ReferenceCurves
         return Rows.Value[level - 1].WarlockBaseline;
     }
 
-    /// <summary>Both reference values at a level.</summary>
+    /// <summary>Both reference values at a level, against the default (DMG 2014) target.</summary>
     public static ReferencePoint At(int level) => new(level, RpgbotTarget(level), WarlockBaseline(level));
+
+    /// <summary>
+    /// Both reference values at a level under a target profile: the warlock baseline against the profile's CR = level
+    /// target (the DMG row for dmg2014, the pinned curve), RPGBOT's target unchanged (see the type's remarks).
+    /// </summary>
+    /// <param name="profile">A canonical <see cref="DslValues.Profiles"/> value.</param>
+    public static ReferencePoint At(int level, string profile)
+    {
+        CheckLevel(level);
+        if (profile == DslValues.Profiles.Dmg2014)
+        {
+            return At(level);
+        }
+
+        if (!DslValues.Profiles.Set.Contains(profile))
+        {
+            throw new ArgumentOutOfRangeException(nameof(profile), profile, "Not a target profile.");
+        }
+
+        var warlock = ProfileWarlock.GetOrAdd((profile, level), key => Warlock(key.Level, new TargetSpec { Profile = key.Profile }));
+        return new ReferencePoint(level, RpgbotTarget(level), warlock) { Profile = profile };
+    }
 
     /// <summary>
     /// Levels 1–20: the target a level's DPR is measured against (the CR = level row's AC, attack bonus, save DC and
@@ -70,8 +104,6 @@ public static class ReferenceCurves
         {
             var row = Row(level);
             var build = BuildResolver.Resolve(BuildPresets.WarlockBaseline(level), level);
-            var target = TargetResolver.Resolve(null, level);
-            var result = DprEngine.Evaluate(build, target, DprOptions.Fight() with { IncludeDistribution = false });
             var blast = build.Attacks[0];
             rows.Add(new DprTargetRow(
                 level,
@@ -82,12 +114,20 @@ public static class ReferenceCurves
                 row.SaveDc,
                 TypicalSaveBonus.For(row.ChallengeRating),
                 row.HitPointsMax / 12.0,
-                result.DamagePerRound,
+                Warlock(level, null),
                 blast.AttackBonus,
                 AttackRoll.Odds(blast.AttackBonus, row.ArmorClass, blast.CritMin, D20Options.Normal).Hit));
         }
 
         return rows;
+    }
+
+    // The warlock_baseline preset's fight DPR at a level against a target spec's target at that level.
+    private static double Warlock(int level, TargetSpec? target)
+    {
+        var build = BuildResolver.Resolve(BuildPresets.WarlockBaseline(level), level);
+        var resolved = TargetResolver.Resolve(target, level);
+        return DprEngine.Evaluate(build, resolved, DprOptions.Fight() with { IncludeDistribution = false }).DamagePerRound;
     }
 
     private static void CheckLevel(int level)
@@ -98,7 +138,11 @@ public static class ReferenceCurves
 }
 
 /// <summary>The two reference DPR values at one level.</summary>
-public sealed record ReferencePoint(int Level, double RpgbotTarget, double WarlockBaseline);
+public sealed record ReferencePoint(int Level, double RpgbotTarget, double WarlockBaseline)
+{
+    /// <summary>The target profile the warlock baseline was evaluated against (<see cref="DslValues.Profiles"/>).</summary>
+    public string Profile { get; init; } = DslValues.Profiles.Default;
+}
 
 /// <summary>
 /// One level of the DPR-targets table: the CR = level monster a level-L character is measured against (DMG 2014 row;

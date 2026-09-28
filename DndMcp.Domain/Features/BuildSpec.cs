@@ -47,8 +47,8 @@ public sealed class BuildSpec
 
     [Description(
         "\"gwf\" (Great Weapon Fighting on two-handed or versatile melee weapons: 2014 reroll 1-2, 2024 1-2 count as 3), " +
-        "\"archery\" (+2 to hit, ranged weapons), \"dueling\" (+2 damage, one-handed melee weapons), \"twf\" (offhand " +
-        "attacks add the ability modifier).")]
+        "\"archery\" (+2 to hit, ranged weapons, not thrown melee weapons), \"dueling\" (+2 damage, one-handed melee weapons, " +
+        "thrown too), \"twf\" (offhand attacks add the ability modifier).")]
     public string? FightingStyle { get; init; }
 
     [Description(

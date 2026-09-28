@@ -1,3 +1,4 @@
+using DndMcp.Formatting.Srd;
 using DndMcp.IntegrationTests.Infrastructure;
 using Xunit;
 
@@ -333,8 +334,14 @@ public sealed class RulesGetToolTests : IClassFixture<McpServerHarness>
     }
 
     [Theory]
-    [InlineData("""{"name":"Fireball","format":"short"}""", "format must be \"concise\" or \"full\" (got \"short\").")]
-    [InlineData("""{"name":"Fireball","format":"combatant"}""", "format must be \"concise\" or \"full\" (got \"combatant\").")]
+    [InlineData("""{"name":"Fireball","format":"short"}""", "format must be " + SrdMarkdown.FormatsText + " (got \"short\").")]
+    // combatant is a real format, for monsters only: a spell is refused with the formats, never answered in another one.
+    [InlineData("""{"name":"Fireball","format":"combatant"}""",
+        "format \"combatant\" is for monsters (a stat block as balance_simulate reads it); `2024/spell/fireball` is a spell. " +
+        "Formats: " + SrdMarkdown.FormatsText + ".")]
+    [InlineData("""{"ref":"2014/condition/grappled","format":"combatant","edition":"both"}""",
+        "format \"combatant\" is for monsters (a stat block as balance_simulate reads it); `2014/condition/grappled` is a condition. " +
+        "Formats: " + SrdMarkdown.FormatsText + ".")]
     [InlineData("""{"name":"Fireball","edition":"5.5e"}""", "edition must be \"2014\", \"2024\" or \"both\" (got \"5.5e\").")]
     [InlineData("""{"ref":"spell/fireball","edition":"2025"}""", "edition must be \"2014\", \"2024\" or \"both\" (got \"2025\").")]
     public async Task CallTool_UnknownFormatOrEdition_ListsTheAcceptedValues(string argumentsJson, string message)

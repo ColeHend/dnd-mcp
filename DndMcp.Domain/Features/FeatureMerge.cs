@@ -17,23 +17,47 @@ namespace DndMcp.Domain.Features;
 /// <para>
 /// The feature is validated on its own terms first (its items numbered as in the feature, with attack references checked
 /// against the merged attacks), so a mistake in it is reported as "Invalid feature: modifiers item 1 …" rather than at a
-/// shifted position in the merged build. The merged build is then validated as a whole by whoever resolves it.
+/// shifted position in the merged build. The merged build is then validated as a whole by whoever resolves it; with the
+/// origins <see cref="MergeWithOrigins"/> returns, that validation still names every item in the list the model wrote it
+/// in (<see cref="ItemNames"/>), so a problem that only shows at a level ("dice has no value at level 1") reads
+/// "Invalid feature: modifiers item 1 (extra_damage) …", never "Invalid variant: modifiers item 3 …".
 /// </para>
 /// </summary>
 public static class FeatureMerge
 {
     /// <summary>The variant: <paramref name="baseline"/> with <paramref name="feature"/> merged in.</summary>
     /// <exception cref="DndInputException">The feature is not valid (every problem, up to five), or the baseline's preset is unknown.</exception>
-    public static BuildSpec Merge(BuildSpec baseline, FeatureSpec feature)
+    public static BuildSpec Merge(BuildSpec baseline, FeatureSpec feature) => MergeWithOrigins(baseline, feature).Variant;
+
+    /// <summary>
+    /// The variant, and where each of its items came from: baseline attacks and modifiers keep their positions (merged
+    /// 1..B are baseline 1..B), the feature's follow (merged B + k is feature item k), a feature attack that replaces a
+    /// baseline attack sits at the baseline's position but is the feature's item; the ability scores and fighting style
+    /// the feature gave are the feature's. A preset baseline's items are the preset's, which the model never wrote out.
+    /// </summary>
+    /// <exception cref="DndInputException">The feature is not valid, or the baseline's preset is unknown.</exception>
+    internal static (BuildSpec Variant, ItemOrigins Origins) MergeWithOrigins(BuildSpec baseline, FeatureSpec feature)
     {
         ArgumentNullException.ThrowIfNull(baseline);
         ArgumentNullException.ThrowIfNull(feature);
 
         var expanded = BuildPresets.Expand(baseline);
-        var attacks = MergeAttacks(expanded.Attacks ?? [], feature.Attacks ?? []);
+        var (attacks, attackOrigins) = MergeAttacks(expanded.Attacks ?? [], feature.Attacks ?? []);
         DslProblems.ThrowIfAny(DslProblems.Messages(FeatureSpecValidator.Instance.Validate(new FeatureInput(feature, attacks))), "feature");
 
-        return new BuildSpec
+        var baselineModifiers = expanded.Modifiers ?? [];
+        var featureModifiers = feature.Modifiers ?? [];
+        var origins = new ItemOrigins(
+            attackOrigins,
+            [
+                .. baselineModifiers.Select((_, i) => new ItemOrigin(false, i + 1)),
+                .. featureModifiers.Select((_, k) => new ItemOrigin(true, k + 1)),
+            ],
+            V.Abilities.All.Where(a => LevelValue.IsGiven(feature.Abilities?.Get(a))).ToHashSet(StringComparer.Ordinal),
+            feature.FightingStyle is not null,
+            baseline.Preset is { } preset && V.Presets.Set.TryMatch(preset, out var canonical) ? $"the {canonical} preset's" : "baseline");
+
+        var variant = new BuildSpec
         {
             Name = VariantName(expanded.Name, feature.Name!),
             Edition = expanded.Edition,
@@ -42,29 +66,34 @@ public static class FeatureMerge
             ProficiencyBonus = expanded.ProficiencyBonus,
             FightingStyle = feature.FightingStyle ?? expanded.FightingStyle,
             Attacks = attacks,
-            Modifiers = [.. expanded.Modifiers ?? [], .. feature.Modifiers ?? []],
+            Modifiers = [.. baselineModifiers, .. featureModifiers],
         };
+        return (variant, origins);
     }
 
-    private static List<AttackSpec> MergeAttacks(IReadOnlyList<AttackSpec> baseline, IReadOnlyList<AttackSpec> added)
+    private static (List<AttackSpec> Attacks, List<ItemOrigin> Origins) MergeAttacks(IReadOnlyList<AttackSpec> baseline, IReadOnlyList<AttackSpec> added)
     {
         var merged = baseline.ToList();
-        foreach (var attack in added)
+        var origins = baseline.Select((_, i) => new ItemOrigin(false, i + 1)).ToList();
+        for (var k = 0; k < added.Count; k++)
         {
+            var attack = added[k];
             var index = attack?.Name is { } name
                 ? merged.FindIndex(a => string.Equals(a?.Name?.Trim(), name.Trim(), StringComparison.OrdinalIgnoreCase))
                 : -1;
             if (index >= 0)
             {
                 merged[index] = attack!;
+                origins[index] = new ItemOrigin(true, k + 1);
             }
             else
             {
                 merged.Add(attack!);
+                origins.Add(new ItemOrigin(true, k + 1));
             }
         }
 
-        return merged;
+        return (merged, origins);
     }
 
     private static AbilitiesSpec? MergeAbilities(AbilitiesSpec? baseline, AbilitiesSpec? feature)

@@ -66,6 +66,14 @@ public sealed record ResolvedBuild
     /// <summary>ac, resistance and temp_hp modifiers: reported, never part of damage dealt.</summary>
     public required IReadOnlyList<ResolvedDefensive> Defensive { get; init; }
 
+    /// <summary>
+    /// heal modifiers (Healing Word, Cure Wounds, Second Wind): the simulator's healing. Like <see cref="Defensive"/>
+    /// they never change damage dealt, so the DPR engine reports them and otherwise ignores them; they are not in
+    /// <see cref="BonusActionConsumers"/>, since in the closed form a heal never competes with damage for the Bonus
+    /// Action (the simulator weighs it each turn).
+    /// </summary>
+    public IReadOnlyList<ResolvedHeal> Heals { get; init; } = [];
+
     public required ResolvedRulings Rulings { get; init; }
 
     /// <summary>
@@ -209,8 +217,13 @@ public sealed record ResolvedAttack
     /// <summary><see cref="DslValues.AttackActions"/>: action or bonus_action.</summary>
     public required string Action { get; init; }
 
-    /// <summary>Made as part of the Attack action (for attack_action_only bonuses): the action attacks.</summary>
-    public bool IsPartOfAttackAction => Action == DslValues.AttackActions.Action;
+    /// <summary>
+    /// Made as part of the Attack action (for attack_action_only bonuses, and what lets the Light weapon's offhand attack
+    /// follow): an action WEAPON attack. A spell attack made with the Action is the spell's casting action (2024 Magic
+    /// action, 2014 Cast a Spell), not the Attack action: 2024 "Attack [Action]: an attack roll with a weapon or an Unarmed
+    /// Strike".
+    /// </summary>
+    public bool IsPartOfAttackAction => Action == DslValues.AttackActions.Action && IsWeapon;
 
     /// <summary>The to_hit ability key, or <see cref="DslValues.Abilities.None"/>.</summary>
     public required string Ability { get; init; }
@@ -270,6 +283,19 @@ public sealed record ResolvedAttack
 
     public bool IsWeapon => !IsSpell;
 
+    /// <summary>
+    /// Magical damage for a qualified resistance ("from nonmagical attacks"): a spell attack, or an attack given the
+    /// <see cref="DslValues.Properties.Magical"/> property. Read through <see cref="DamageProperties.Of(ResolvedAttack)"/>
+    /// by the DPR engine against a stat block target, for the attack and every rider on it, and by the simulator.
+    /// </summary>
+    public bool IsMagical => IsSpell || HasProperty(DslValues.Properties.Magical);
+
+    /// <summary>Overcomes "nonmagical attacks that aren't silvered".</summary>
+    public bool IsSilvered => HasProperty(DslValues.Properties.Silvered);
+
+    /// <summary>Overcomes "nonmagical attacks that aren't adamantine".</summary>
+    public bool IsAdamantine => HasProperty(DslValues.Properties.Adamantine);
+
     public required bool Offhand { get; init; }
 
     /// <summary>A <see cref="DslValues.Masteries"/> value, or null.</summary>
@@ -305,6 +331,11 @@ public sealed record ResolvedRider : IAttackFilter
     /// <summary>Dice plus flat amount at this level. Dice double on a crit when <see cref="CritDoubles"/>; flat never does.</summary>
     public required DamageFormula Damage { get; init; }
 
+    /// <summary>
+    /// The rider's damage type, or null for none given: then it deals the damage type of the attack it lands with (2024
+    /// Sneak Attack: "The extra damage's type is the same as the weapon's type"; 2014 Hex and Hunter's Mark are read the
+    /// same way), resolved per attack line by the engine, so one rider on a piercing and a fire attack is each.
+    /// </summary>
     public string? DamageType { get; init; }
 
     /// <summary><see cref="DslValues.When"/>: every_hit, first_hit_per_turn, on_crit or on_miss.</summary>
@@ -375,6 +406,9 @@ public sealed record ResolvedSaveEffect
     /// <summary>("given", 15) or ("base", 8), ("proficiency", 3), ("Cha", 4), ("dc_bonus", 1).</summary>
     public required IReadOnlyList<NamedValue> DcParts { get; init; }
 
+    /// <summary>The ability the DC comes from (dc_ability), or null when the DC was given: what an ASI would raise.</summary>
+    public string? DcAbility { get; init; }
+
     /// <summary>Damage on a failed save (dice + amount, cantrip-scaled), or null for an effect with only a condition.</summary>
     public DamageFormula? Damage { get; init; }
 
@@ -398,6 +432,9 @@ public sealed record ResolvedSaveEffect
 
     public string? Condition { get; init; }
 
+    /// <summary><see cref="DslValues.Durations"/> of <see cref="Condition"/> for the simulator, or null for the default (save_ends).</summary>
+    public string? Duration { get; init; }
+
     /// <summary>Whether <see cref="Condition"/> changes the maths, or is a label only.</summary>
     public bool ConditionIsMechanical => Condition is not null && DslValues.Conditions.IsMechanical(Condition);
 
@@ -410,6 +447,13 @@ public sealed record ResolvedSaveEffect
 
     /// <summary>1–4 when the dice scale like a cantrip's, else 1.</summary>
     public required int CantripMultiplier { get; init; }
+
+    /// <summary>
+    /// Given as a cantrip (cantrip: true). <see cref="CantripMultiplier"/> cannot say it (it is 1 for a cantrip at levels
+    /// 1–4); a save effect that is neither a cantrip nor limited by a resource is used every round of every fight, which
+    /// the result notes.
+    /// </summary>
+    public bool IsCantrip { get; init; }
 
     /// <summary>Damage types whose dice here count a 1 as a 2 (Elemental Adept of <see cref="DamageType"/>).</summary>
     public required IReadOnlyList<string> ElementalAdeptTypes { get; init; }
@@ -436,6 +480,9 @@ public sealed record ResolvedConditionOnHit : IAttackFilter
 
     /// <summary>every_hit or first_hit_per_turn.</summary>
     public required string When { get; init; }
+
+    /// <summary><see cref="DslValues.Durations"/> for the simulator, or null for the edition's default (see there).</summary>
+    public string? Duration { get; init; }
 
     /// <summary><see cref="DslValues.Policies"/>: a condition on hit is always optional.</summary>
     public required string Policy { get; init; }
@@ -472,3 +519,29 @@ public sealed record ResolvedSetupCost(ModifierRef Source, string Cost);
 
 /// <summary>A defensive modifier (ac, resistance, temp_hp): kept for the simulator; no effect on damage dealt.</summary>
 public sealed record ResolvedDefensive(ModifierRef Source, string Kind, int? Amount, string? DamageType, ResolvedResource? Resource);
+
+/// <summary>
+/// A heal modifier at one level: what the simulator restores and what it costs. Healing is capped at the target's
+/// hit point maximum, brings a creature at 0 HP back up and resets its death saves (engine rules, not this record's).
+/// </summary>
+public sealed record ResolvedHeal
+{
+    public required ModifierRef Source { get; init; }
+
+    /// <summary>
+    /// HP restored per target at this level: dice plus flat parts (an ability modifier, the level for Second Wind). The
+    /// flat part may be negative with a negative ability modifier; healing never goes below 0 in the rules.
+    /// </summary>
+    public required DamageFormula Healing { get; init; }
+
+    /// <summary><see cref="DslValues.ActionCosts"/>: action or bonus_action.</summary>
+    public required string ActionCost { get; init; }
+
+    /// <summary>Creatures healed per use (Mass Healing Word: up to 6).</summary>
+    public required int Targets { get; init; }
+
+    /// <summary>Heals only the creature itself (Second Wind), never an ally.</summary>
+    public required bool SelfOnly { get; init; }
+
+    public ResolvedResource? Resource { get; init; }
+}

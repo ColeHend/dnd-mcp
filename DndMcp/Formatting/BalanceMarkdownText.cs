@@ -1,7 +1,9 @@
 using System.Globalization;
 using System.Text;
 using DndMcp.Domain.Dpr;
+using DndMcp.Domain.Encounters;
 using DndMcp.Domain.Features;
+using DndMcp.Domain.Simulation;
 using DndMcp.Formatting.Srd;
 using V = DndMcp.Domain.Features.DslValues;
 
@@ -197,7 +199,7 @@ internal static class BalanceMarkdownText
         {
             blocks.Add(SrdMarkdownText.Table(
                 ["Attack", "Per turn", "To hit", "Damage on a hit", "Also"],
-                build.Attacks.Select(a => (IReadOnlyList<string>)[a.Name, PerTurn(a), ToHit(a), DamageText(a), AttackTraits(a)])));
+                build.Attacks.Select(a => (IReadOnlyList<string>)[a.Name, PerTurn(a, build.Edition), ToHit(a), DamageText(a), AttackTraits(a)])));
         }
         else
         {
@@ -213,8 +215,16 @@ internal static class BalanceMarkdownText
         return SrdMarkdownText.Blocks(blocks);
     }
 
-    private static string PerTurn(ResolvedAttack attack) =>
-        $"{Number(attack.Count)} × {(attack.Action == V.AttackActions.BonusAction ? "Bonus Action" : "Attack action")}";
+    private static string PerTurn(ResolvedAttack attack, string edition) =>
+        $"{Number(attack.Count)} × {(attack.Action == V.AttackActions.BonusAction ? "Bonus Action" : ActionName(attack.IsSpell, edition))}";
+
+    /// <summary>
+    /// What the Action is called for an attack made with it: the Attack action for a weapon, the spell's casting action for
+    /// a spell attack (2024 "Magic action", 2014 "Cast a Spell action"), which the engine does not count as part of the
+    /// Attack action either (no attack_action_only bonus, no offhand attack after it).
+    /// </summary>
+    private static string ActionName(bool spell, string edition) =>
+        !spell ? "Attack action" : edition == V.Editions.E2014 ? "Cast a Spell action" : "Magic action";
 
     // "+7 (Str +4, proficiency +3) +1d4 (Bless); crit 19–20; Lucky".
     private static string ToHit(ResolvedAttack attack)
@@ -325,7 +335,8 @@ internal static class BalanceMarkdownText
         var lines = new List<(int Number, string Text)>();
         foreach (var rider in build.Riders)
         {
-            var parts = new List<string> { $"{rider.Damage.Text} {rider.DamageType ?? "typeless"}", WhenText(rider.When) };
+            // A rider without a type deals the type of the attack it lands with (so the target's resistances apply to it).
+            var parts = new List<string> { $"{rider.Damage.Text} {rider.DamageType ?? "(the attack's damage type)"}", WhenText(rider.When) };
             if (rider.IsOptional)
             {
                 parts.Add(PolicyText(rider.Policy, rider.UseValue));
@@ -361,6 +372,7 @@ internal static class BalanceMarkdownText
             {
                 V.Triggers.Hit => ", after a hit this turn",
                 V.Triggers.Crit => ", after a melee crit this turn",
+                V.Triggers.CritOrKill => ", after a melee crit or a kill this turn (kills: balance_simulate only)",
                 _ => string.Empty,
             };
             lines.Add((extra.Source.Number, Line(extra.Source, [$"{Number(extra.Count)} × {extra.Attack} {how}{trigger}"], extra.Resource, extra.Concentration, build, null)));
@@ -380,6 +392,10 @@ internal static class BalanceMarkdownText
             if (effect.Condition is { } condition)
             {
                 parts.Add(effect.ConditionIsMechanical ? condition : $"{condition} (a label only)");
+                if (effect.Duration is { } duration)
+                {
+                    parts.Add($"duration {duration} (balance_simulate)");
+                }
             }
 
             parts.Add(effect.ActionCost switch
@@ -407,6 +423,10 @@ internal static class BalanceMarkdownText
                 WhenText(condition.When),
                 PolicyText(condition.Policy, condition.UseValue),
             };
+            if (condition.Duration is { } duration)
+            {
+                parts.Add($"duration {duration} (balance_simulate)");
+            }
             lines.Add((condition.Source.Number, Line(condition.Source, parts, condition.Resource, condition.Concentration, build, condition.Attacks)));
         }
 
@@ -445,6 +465,18 @@ internal static class BalanceMarkdownText
             }
 
             lines.Add((defensive.Source.Number, Line(defensive.Source, parts, defensive.Resource, false, build, null)));
+        }
+
+        foreach (var heal in build.Heals)
+        {
+            var parts = new List<string>
+            {
+                $"{heal.Healing.Text} healing",
+                heal.SelfOnly ? "itself only" : Plural(heal.Targets, "creature"),
+                heal.ActionCost == V.ActionCosts.BonusAction ? "uses the Bonus Action" : "uses the Action",
+                "healing: kept for the simulator (balance_simulate), no effect on damage dealt",
+            };
+            lines.Add((heal.Source.Number, Line(heal.Source, parts, heal.Resource, false, build, null)));
         }
 
         return lines.OrderBy(l => l.Number).Select(l => l.Text);
@@ -502,17 +534,19 @@ internal static class BalanceMarkdownText
 
     /// <summary>
     /// "AC 15", or for a build with no attack rolls "a target with +2 on every save": what the headline says the build was
-    /// measured against. The AC of a save-only build's target is true but beside the point.
+    /// measured against. The AC of a save-only build's target is true but beside the point. A stat block target is named
+    /// first ("Ogre (2024 SRD stat block), AC 11"), since "AC 11" alone would hide that the numbers are a real monster's.
     /// </summary>
     public static string TargetShort(ResolvedTarget target, ResolvedBuild build)
     {
         if (build.Attacks.Count == 0)
         {
-            return "a target with " + SavesText(target);
+            return target.MonsterLabel is { } monster ? $"{monster} with {SavesText(target)}" : "a target with " + SavesText(target);
         }
 
-        return $"AC {Number(target.ArmorClass)}" +
-               (target.CoverBonus > 0 ? $" (+{Number(target.CoverBonus)} for {target.Cover?.Replace('_', '-')} cover)" : string.Empty);
+        var ac = $"AC {Number(target.ArmorClass)}" +
+                 (target.CoverBonus > 0 ? $" (+{Number(target.CoverBonus)} for {target.Cover?.Replace('_', '-')} cover)" : string.Empty);
+        return target.MonsterLabel is { } label ? $"{label}, {ac}" : ac;
     }
 
     // "+2 on every save", or "Str +0, Dex +2, …" when they differ.
@@ -521,26 +555,39 @@ internal static class BalanceMarkdownText
             ? $"{Signed(target.SaveBonuses.Values.First())} on every save"
             : string.Join(", ", V.Abilities.All.Select(a => $"{V.Abilities.Display(a)} {Signed(target.SaveBonus(a))}"));
 
-    /// <summary>The target at one level: AC and saves with their sources, and every other setting that was given.</summary>
+    /// <summary>
+    /// The target at one level: the stat block it is (name, edition, CR), AC and saves with their sources, and every other
+    /// setting that was given or read from the stat block. Qualified adjustments keep their qualifiers ("bludgeoning,
+    /// piercing and slashing from nonmagical attacks that aren't silvered"): the notes say which attacks each one met.
+    /// </summary>
     public static string Target(ResolvedTarget target, string heading)
     {
         var uniform = target.SaveBonuses.Values.Distinct().Count() == 1;
         var saves = SavesText(target);
-        var lines = new List<string>
+        var lines = new List<string>();
+        if (target.MonsterLabel is { } monster)
         {
-            $"AC {Number(target.ArmorClass)} ({target.ArmorClassSource}).",
-            $"Saves {saves} ({SaveSource(target, uniform)}).",
-        };
+            lines.Add($"{monster}, CR {target.Monster!.ChallengeRating}.");
+        }
+
+        lines.Add($"AC {Number(target.ArmorClass)} ({target.ArmorClassSource}).");
+        lines.Add($"Saves {saves} ({SaveSource(target, uniform)}).");
 
         var other = new List<string>();
+        var qualified = new List<string>();
         if (target.HitPoints is { } hp)
         {
             other.Add($"{Number(hp)} hit points");
         }
 
-        AddTypes(other, "resists", target.Resistances);
-        AddTypes(other, "vulnerable to", target.Vulnerabilities);
-        AddTypes(other, "immune to", target.Immunities);
+        AddAdjustments(other, qualified, "resists", target.Resistances, target.QualifiedResistances);
+        AddAdjustments(other, qualified, "vulnerable to", target.Vulnerabilities, target.QualifiedVulnerabilities);
+        AddAdjustments(other, qualified, "immune to", target.Immunities, target.QualifiedImmunities);
+        if (target.ConditionImmunities.Count > 0)
+        {
+            other.Add($"immune to the {DamageQualifierText.And(target.ConditionImmunities)} condition{(target.ConditionImmunities.Count == 1 ? "" : "s")}");
+        }
+
         if (target.MagicResistance)
         {
             other.Add("Magic Resistance (Advantage on saves against magical effects)");
@@ -581,6 +628,7 @@ internal static class BalanceMarkdownText
             lines.Add(char.ToUpperInvariant(other[0][0]) + string.Join("; ", other)[1..] + ".");
         }
 
+        lines.AddRange(qualified);
         return heading + "\n\n" + string.Join(" ", lines);
     }
 
@@ -599,9 +647,17 @@ internal static class BalanceMarkdownText
         return source.StartsWith(prefix, StringComparison.Ordinal) ? source[prefix.Length..] : source;
     }
 
-    private static void AddTypes(List<string> into, string verb, IReadOnlyList<string> types)
+    // A plain list joins the other settings ("resists cold, fire"); one with qualifiers is a sentence of its own ("Resists
+    // cold; bludgeoning, piercing and slashing from nonmagical attacks that aren't silvered."), since its semicolons would
+    // otherwise run into the settings' own.
+    private static void AddAdjustments(
+        List<string> into, List<string> sentences, string verb, IReadOnlyList<string> types, IReadOnlyList<Domain.Simulation.DamageAdjustment> qualified)
     {
-        if (types.Count > 0)
+        if (qualified.Count > 0)
+        {
+            sentences.Add($"{char.ToUpperInvariant(verb[0])}{verb[1..]} {DamageQualifierText.Describe(types, qualified)}.");
+        }
+        else if (types.Count > 0)
         {
             into.Add($"{verb} {string.Join(", ", types)}");
         }
@@ -630,7 +686,7 @@ internal static class BalanceMarkdownText
                 result.Attacks.Select(a => (IReadOnlyList<string>)
                 [
                     a.Attack,
-                    UseText(a),
+                    UseText(a, result.Build),
                     Rate(a.AttacksPerRound),
                     $"{Signed(a.AttackBonus)} vs AC {Number(a.TargetArmorClass)}",
                     Percent(a.HitChance),
@@ -656,6 +712,7 @@ internal static class BalanceMarkdownText
                     r.DamagePerUse is { } perUse ? Dpr(perUse) : "never used",
                     Dpr(r.DamagePerRound),
                 ])));
+            blocks.Add(RidersIncluded);
         }
 
         // An extra attack's own row is in the table; its uses are worth a line only when they are a resource's (Action
@@ -666,12 +723,26 @@ internal static class BalanceMarkdownText
             lines.Add($"{extra.Name}: taken {Times(extra.UsesPerRound)} a round ({ResourceText(extra.Resource!)}), {Dpr(extra.DamagePerRound)} damage a round.");
         }
 
+        var legendary = result.Target.LegendaryResistance;
         foreach (var condition in result.Conditions)
         {
+            if (condition.Immune)
+            {
+                lines.Add($"{condition.Name}: never attempted, since the target is immune to the {condition.Condition} condition.");
+                continue;
+            }
+
             var perFight = condition.LandChancePerFight is { } fight ? $", at least once in the fight {Percent(fight)}" : string.Empty;
-            lines.Add(
+            var text =
                 $"{condition.Name}: {Rate(condition.AttemptsPerRound)} {V.Abilities.Display(condition.Ability)} saves forced and " +
-                $"{Rate(condition.LandsPerRound)} failed a round; the target is {condition.Condition} in a turn {Percent(condition.LandChancePerTurn)}{perFight}.");
+                $"{Rate(condition.LandsPerRound)} failed a round; the target is {condition.Condition} for the rest of a turn " +
+                $"{Percent(condition.LandChancePerTurn)}{perFight}";
+            if (legendary > 0)
+            {
+                text += $" (ignoring Legendary Resistance){AttemptsText(condition.ExpectedAttemptsToLand, legendary)}";
+            }
+
+            lines.Add(text + ".");
         }
 
         // The engine tallies a choice only where one was open (an option available, the Bonus Action still free): "none"
@@ -703,6 +774,32 @@ internal static class BalanceMarkdownText
         }
 
         return SrdMarkdownText.Blocks(blocks);
+    }
+
+    /// <summary>
+    /// Under the rider table: an attack's Damage column is the whole of its hits (riders and rerolls included), and the
+    /// rider table breaks a share of it out; adding the two would count the riders twice.
+    /// </summary>
+    public const string RidersIncluded =
+        "Each attack's Damage already includes its riders (and damage rerolls); the rider table breaks that share out, so do not add the two tables.";
+
+    // "; expected attempts to land it past 3 Legendary Resistances: 6.67".
+    private static string AttemptsText(double? attempts, int legendary) => attempts switch
+    {
+        null => string.Empty,
+        { } a when double.IsPositiveInfinity(a) => "; it never lands (no chance to fail)",
+        { } a => $"; expected attempts to land it past {Plural(legendary, "Legendary Resistance")}: {a.ToString("0.##", Invariant)}",
+    };
+
+    private static string UseText(AttackReport attack, ResolvedBuild build)
+    {
+        var spell = build.FindAttack(attack.Attack)?.IsSpell ?? false;
+        return attack.Use switch
+        {
+            AttackUses.AttackAction => ActionName(spell, build.Edition),
+            AttackUses.ActionSurge when spell => $"second action ({attack.Source ?? "Action Surge"})",
+            _ => UseText(attack),
+        };
     }
 
     private static string UseText(AttackReport attack) => attack.Use switch
@@ -817,17 +914,24 @@ internal static class BalanceMarkdownText
                 text.Append('.');
             }
 
-            if (effect.Condition is { } condition)
+            if (effect.Condition is { } immuneTo && effect.ConditionImmune)
             {
+                text.Append($" {char.ToUpperInvariant(immuneTo[0])}{immuneTo[1..]}: never lands (the target is immune to it).");
+            }
+            else if (effect.Condition is { } condition)
+            {
+                // With Legendary Resistance the landing chances are the fight model's, which spends none: labelled so, so they
+                // never sit unqualified beside the expected casts that do.
+                var ignoring = result.Target.LegendaryResistance > 0 ? " (ignoring Legendary Resistance)" : string.Empty;
                 var parts = new List<string>();
                 if (effect.LandChancePerTurn is { } perTurn)
                 {
-                    parts.Add($"lands on a given target in a turn {Percent(perTurn)}");
+                    parts.Add($"lands on the main target in a turn {Percent(perTurn)}{ignoring}");
                 }
 
                 if (effect.LandChancePerFight is { } perFight)
                 {
-                    parts.Add($"at least once in the fight {Percent(perFight)}");
+                    parts.Add($"at least once in the fight {Percent(perFight)}{ignoring}");
                 }
 
                 if (effect.ExpectedCastsToLand is { } casts)
@@ -971,13 +1075,37 @@ internal static class BalanceMarkdownText
     /// The sources behind what the result used: the DMG row (a default target), the typical save bonus, the area table,
     /// the reference curves. None of them is SRD text, and the model must be able to say whose convention a number is.
     /// </summary>
-    public static string Sources(IEnumerable<ResolvedTarget> targets, IEnumerable<ResolvedBuild> builds, bool references)
+    /// <param name="referenceProfile">
+    /// The target profile the warlock reference curve was evaluated against (<see cref="ReferencePoint.Profile"/>), when the
+    /// result shows the reference curves; an empirical one is named beside them.
+    /// </param>
+    public static string Sources(IEnumerable<ResolvedTarget> targets, IEnumerable<ResolvedBuild> builds, bool references, string? referenceProfile = null)
     {
         var targetList = targets.ToList();
         var sources = new List<string>();
+        foreach (var monster in targetList.Select(t => t.Monster).OfType<StatBlock>().DistinctBy(m => m.Ref))
+        {
+            sources.Add($"the target's stat block: the {monster.Edition} SRD's {monster.Name} (rules_get ref \"{monster.Ref}\"), as the monster normalizer reads it");
+        }
+
         if (targetList.Any(t => t.Row is not null))
         {
             sources.Add($"the target's CR row (the CR = level convention unless cr was given): {DmgRowSource}");
+        }
+
+        var empirical = targetList.Select(t => t.Profile)
+            .Append(references ? referenceProfile : null)
+            .OfType<string>()
+            .Where(p => TargetProfiles.Edition(p) is not null)
+            .Distinct()
+            .Order(StringComparer.Ordinal)
+            .ToList();
+        foreach (var profile in empirical)
+        {
+            sources.Add(
+                $"profile {profile}: {MonsterStatsEmpirical.Source} (the {TargetProfiles.Edition(profile)} rows of rules_get ref " +
+                $"\"{RulesTables.UriPrefix}{RulesTables.EmpiricalSlug}\"; medians of the data, not a published table, AC and mean " +
+                "save bonus rounded to whole numbers, halves up)");
         }
 
         if (targetList.Any(t => t.SaveBonusSource.Contains(TypicalSaveBonus.Source, StringComparison.Ordinal)))
@@ -992,7 +1120,11 @@ internal static class BalanceMarkdownText
 
         if (references)
         {
-            sources.Add("reference curves: RPGBOT's DPR target and the community Warlock Baseline (Form of Dread), community conventions, not rules");
+            sources.Add(
+                "reference curves: RPGBOT's DPR target and the community Warlock Baseline (Form of Dread), community conventions, not rules" +
+                (referenceProfile is { } reference && TargetProfiles.Edition(reference) is not null
+                    ? $" (the warlock baseline here against the {reference} target for CR = level; RPGBOT's target stays the DMG 2014 hit points ÷ 12)"
+                    : string.Empty));
         }
 
         var tables =

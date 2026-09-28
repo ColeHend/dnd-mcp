@@ -15,6 +15,12 @@ public sealed record DprRequest
 
     public TargetSpec? Target { get; init; }
 
+    /// <summary>
+    /// The stat block <see cref="TargetSpec.Monster"/> names, looked up by the host (the Domain cannot resolve names);
+    /// required when the target names one (<see cref="TargetResolver.Resolve"/>). The same creature at every level.
+    /// </summary>
+    public Simulation.StatBlock? TargetMonster { get; init; }
+
     public RulingsSpec? Rulings { get; init; }
 
     /// <summary>Levels to evaluate (1–20; duplicates and order ignored); null or empty: the build's own level.</summary>
@@ -41,8 +47,14 @@ public sealed record DprRequest
 /// <summary>What a level curve marks, as wire values.</summary>
 public static class LevelMarkKinds
 {
-    /// <summary>An attack's count rose since the previous level evaluated (Extra Attack, a cantrip's beams).</summary>
+    /// <summary>
+    /// An attack's own count rose since the previous level evaluated (Extra Attack). A cantrip's beams rising is a
+    /// <see cref="CantripUpgrade"/>, not an Extra Attack: the rules terms a model repeats to a user must be right.
+    /// </summary>
     public const string ExtraAttack = "extra_attack";
+
+    /// <summary>A cantrip's scaling rose (the 2024 spells' "Cantrip Upgrade"): Eldritch Blast's beams, Fire Bolt's dice.</summary>
+    public const string CantripUpgrade = "cantrip_upgrade";
 
     /// <summary>An ability score rose since the previous level evaluated.</summary>
     public const string Asi = "asi";
@@ -50,7 +62,7 @@ public static class LevelMarkKinds
 
 /// <summary>A jump in the curve at <see cref="Level"/>, relative to the previous level evaluated.</summary>
 /// <param name="Kind">A <see cref="LevelMarkKinds"/> value.</param>
-/// <param name="Text">"Extra Attack: Greatsword 1 → 2 attacks", "ASI: Str 18 → 20".</param>
+/// <param name="Text">"Extra Attack: Greatsword 1 → 2 attacks", "Cantrip Upgrade: Eldritch Blast 1 → 2 beams", "ASI: Str 18 → 20".</param>
 public sealed record LevelMark(int Level, string Kind, string Text);
 
 /// <summary>One evaluated level: the build and target at that level, the horizon's result, and the reference values.</summary>
@@ -149,7 +161,7 @@ public static class DprAnalysis
         var horizon = HorizonSettings.Resolve(request.Horizon, request.Rounds, request.RestPreset, request.EncountersPerDay, request.ShortRests);
         var levels = DistinctLevels(request.Levels);
         var armorClasses = AcRange(request.AcRange);
-        TargetResolver.Validate(request.Target);
+        TargetResolver.Validate(request.Target, request.TargetMonster);
         var builds = BuildResolver.Resolve(request.Build, levels, request.Rulings, "build");
         if (armorClasses is not null && builds.Count * armorClasses.Count > DprLimits.MaxGridCells)
         {
@@ -162,15 +174,21 @@ public static class DprAnalysis
         var detailLevel = builds.Any(b => b.Level == ownLevel) ? ownLevel : builds[0].Level;
         var runner = new DprRunner(cancellationToken, request.WorkBudget);
         var results = new List<LevelResult>(builds.Count);
+
+        // The reference curves follow the target's profile (the typical CR = level monster it names); a stat block target
+        // takes none, so it is read against the default.
+        var referenceProfile = request.TargetMonster is null
+            ? CompiledBuild.Match(DslValues.Profiles.Set, request.Target?.Profile) ?? DslValues.Profiles.Default
+            : DslValues.Profiles.Default;
         AcGrid? grid = null;
         HorizonSummary summary;
         try
         {
             foreach (var build in builds)
             {
-                var target = TargetResolver.Resolve(request.Target, build.Level);
+                var target = TargetResolver.Resolve(request.Target, build.Level, request.TargetMonster);
                 var result = HorizonEvaluator.Full(build, target, horizon, build.Level == detailLevel, runner);
-                results.Add(new LevelResult(build.Level, result, ReferenceCurves.At(build.Level)));
+                results.Add(new LevelResult(build.Level, result, ReferenceCurves.At(build.Level, referenceProfile)));
             }
 
             summary = HorizonEvaluator.Summary(results.First(r => r.Level == detailLevel).Result, runner);
@@ -245,9 +263,9 @@ public static class DprAnalysis
     }
 
     /// <summary>
-    /// The curve's jumps from one evaluated level to the next: an attack whose count rose (Extra Attack, a cantrip's beams)
-    /// and the ability scores that rose (an ASI or a feat's +1). Compared on the resolved builds, so a step value, a
-    /// from_level and a preset all count.
+    /// The curve's jumps from one evaluated level to the next: an attack whose own count rose (Extra Attack), a cantrip
+    /// whose scaling rose (Cantrip Upgrade: more beams or more dice), and the ability scores that rose (an ASI or a feat's
+    /// +1). Compared on the resolved builds, so a step value, a from_level and a preset all count.
     /// </summary>
     public static IReadOnlyList<LevelMark> Marks(IReadOnlyList<ResolvedBuild> builds)
     {
@@ -258,9 +276,22 @@ public static class DprAnalysis
             var (before, after) = (builds[i - 1], builds[i]);
             foreach (var attack in after.Attacks)
             {
-                if (before.FindAttack(attack.Name) is { } earlier && attack.Count > earlier.Count)
+                if (before.FindAttack(attack.Name) is not { } earlier)
                 {
-                    marks.Add(new LevelMark(after.Level, LevelMarkKinds.ExtraAttack, $"Extra Attack: {attack.Name} {Text(earlier.Count)} → {Text(attack.Count)} attacks"));
+                    continue;
+                }
+
+                var (ownBefore, ownAfter) = (OwnCount(earlier), OwnCount(attack));
+                if (ownAfter > ownBefore)
+                {
+                    marks.Add(new LevelMark(after.Level, LevelMarkKinds.ExtraAttack, $"Extra Attack: {attack.Name} {Text(ownBefore)} → {Text(ownAfter)} attacks"));
+                }
+
+                if (attack.Cantrip is { } cantrip && attack.CantripMultiplier > earlier.CantripMultiplier)
+                {
+                    marks.Add(new LevelMark(after.Level, LevelMarkKinds.CantripUpgrade, cantrip == DslValues.Cantrips.Beams
+                        ? $"Cantrip Upgrade: {attack.Name} {Text(earlier.Count)} → {Text(attack.Count)} beams"
+                        : $"Cantrip Upgrade: {attack.Name} {earlier.Damage.Text} → {attack.Damage.Text}"));
                 }
             }
 
@@ -336,6 +367,10 @@ public static class DprAnalysis
     }
 
     private static string Capitalized(string ability) => char.ToUpperInvariant(ability[0]) + ability[1..];
+
+    // The attack's count before a cantrip's beams multiply it.
+    private static int OwnCount(ResolvedAttack attack) =>
+        attack.Cantrip == DslValues.Cantrips.Beams ? attack.Count / attack.CantripMultiplier : attack.Count;
 
     private static string Text(int value) => value.ToString(CultureInfo.InvariantCulture);
 }

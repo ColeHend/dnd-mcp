@@ -48,7 +48,8 @@ public sealed class RulesResources
     /// The served tables that are not from either SRD. The CC-BY statements above cover only SRD text, and a reader of this
     /// page must not take the 2014 DMG's encounter tables for it (PLAN.md, open question 1: included for personal use). The
     /// DPR tools' tables add sources that are not rules at all (The Finished Book's save bonus, RPGBOT's target, the Warlock
-    /// Baseline): each is named, so a model never cites a community convention as the DMG's.
+    /// Baseline): each is named, so a model never cites a community convention as the DMG's. The empirical monster
+    /// statistics are derived from SRD data rather than copied from it, which CC-BY 4.0 asks to be indicated as a change.
     /// </summary>
     public const string NotSrdText =
         "The 2014 encounter-building tables (`rules://tables/xp-thresholds-2014`, `rules://tables/encounter-multipliers-2014`, " +
@@ -58,7 +59,9 @@ public sealed class RulesResources
         "that is not SRD text: `rules://tables/dpr-targets-by-level` (the same DMG monster row by CR; a typical save bonus by CR " +
         "from The Finished Book (tomedunn), not a DMG table; RPGBOT's DPR target and the Warlock Baseline from Form of Dread, " +
         "both community conventions) and `rules://tables/aoe-targets` (the DMG 2014's Targets in Areas of Effect, p. 249); " +
-        "`rules://tables/gwf-expected-values` is arithmetic on the SRD's Great Weapon Fighting and Savage Attacker rules. These " +
+        "`rules://tables/gwf-expected-values` is arithmetic on the SRD's Great Weapon Fighting and Savage Attacker rules, and " +
+        "`rules://tables/monster-stats-by-cr-empirical` is computed by this server from the SRD 5.1 and SRD 5.2.1 monster stat " +
+        "blocks (medians of their numbers, not SRD text), with the DMG 2014 monster statistics beside it for comparison. These " +
         "are served for personal use, and every result that uses them names that source.";
 
     /// <summary>The 5e-database licence, relative to the content root.</summary>

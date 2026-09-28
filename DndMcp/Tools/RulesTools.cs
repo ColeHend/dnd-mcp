@@ -43,6 +43,12 @@ namespace DndMcp.Tools;
 /// A query that finds srd.db deleted, replaced or damaged under the running server reopens the index and runs once more
 /// (see <see cref="SrdIndexService.QueryAsync"/>), rather than failing every call until a restart the model cannot perform.
 /// </para>
+/// <para>
+/// <b>Format <c>combatant</c></b> shows a monster as <c>balance_simulate</c> reads it (<see cref="CombatantMarkdown"/>),
+/// normalized through the same cached <see cref="StatBlockService"/> the simulator uses, so the view and the fight can never
+/// read one stat block two ways. It is refused for any other kind of entry, with the formats listed: answering a spell in
+/// another format would let the model take its text for "what the simulator does".
+/// </para>
 /// </summary>
 public sealed partial class RulesTools
 {
@@ -81,14 +87,16 @@ public sealed partial class RulesTools
 
     private readonly SrdIndexService _indexService;
     private readonly DndMcpServerOptions _options;
+    private readonly StatBlockService _statBlocks;
 
     // Optional string arguments are nullable even where they have a default: models send null for "use the default", the
     // binder accepts it, and a non-nullable schema would make ToolArgumentGuard refuse the call for nothing.
 
-    public RulesTools(SrdIndexService indexService, DndMcpServerOptions options)
+    public RulesTools(SrdIndexService indexService, DndMcpServerOptions options, StatBlockService statBlocks)
     {
         _indexService = indexService;
         _options = options;
+        _statBlocks = statBlocks;
     }
 
     // Idempotent and closed-world: the answers are a pure function of the vendored content this binary ships.
@@ -152,17 +160,17 @@ public sealed partial class RulesTools
         "prerequisites); say a rule is not in this server's data rather than quoting it from memory.\n" +
         "Give exactly one of:\n" +
         "- ref: an entry's ref from rules_search or an earlier result, e.g. \"2024/spell/fireball\"; \"spell/fireball\" uses " +
-        "edition; an API URL like \"/api/2014/monsters/goblin\" works too. \"rules://attribution\" gives the SRD licence text; " +
+        "edition. \"rules://attribution\" gives the SRD licence text; " +
         "\"rules://tables\" lists the rules tables (XP by CR, encounter budgets and thresholds, DMG monster statistics by CR, " +
         "DPR targets, GWF and area-of-effect tables), " +
-        "each also by its name, e.g. name \"XP Budget per Character\".\n" +
+        "each also by its name.\n" +
         "- name: the entry's name, e.g. \"Fireball\", \"Adult Red Dragon\", \"Grappled\". Case and punctuation don't matter, and " +
         "the other edition's name for a renamed entry works (\"Thug\" finds the 2024 Tough).\n" +
         "Optional:\n" +
         "- kind: which kind of entry a name means when several share it, e.g. name \"Shield\" with kind \"magic-item\". Without " +
         "it the likeliest is shown (the spell) and the others are listed.\n" +
         "- edition: \"2024\" (default), \"2014\", or \"both\" to compare. A ref's own edition is used when edition is omitted.\n" +
-        "- format: \"concise\" (default) or \"full\", which adds the raw SRD JSON.\n" +
+        "- format: " + SrdMarkdown.FormatsText + ".\n" +
         "When nothing matches, the error lists close names and whether the other edition has the entry.\n" +
         "Example: {\"name\":\"grappled\",\"edition\":\"both\"}")]
     public async Task<string> Get(
@@ -170,7 +178,8 @@ public sealed partial class RulesTools
         [Description("An entry's name, e.g. \"Fireball\". Give ref or name, not both.")] string? name = null,
         [Description("Optional kind for name, e.g. \"spell\", \"monster\", \"magic-item\", \"rule\".")] string? kind = null,
         [Description("\"2024\" (default), \"2014\" or \"both\" (compare the editions).")] string? edition = null,
-        [Description("\"concise\" (default) or \"full\" (adds the raw SRD JSON).")] string? format = SrdMarkdown.Concise,
+        [Description("\"concise\" (default), \"full\" (adds the raw SRD JSON) or \"combatant\" (a monster as balance_simulate reads it).")]
+        string? format = SrdMarkdown.Concise,
         IProgress<ProgressNotificationValue>? progress = null,
         CancellationToken cancellationToken = default)
     {
@@ -245,9 +254,10 @@ public sealed partial class RulesTools
             index =>
             {
                 var doc = index.Get(reference) ?? throw RefNotFound(index, reference);
+                CheckFormatFits(doc, format);
                 return edition == Both
-                    ? Compare(index, doc, format, alsoNamed: null, typedName: null)
-                    : SrdMarkdown.Format(doc, format, index);
+                    ? Compare(index, doc, format, alsoNamed: null, typedName: null, Combatants(index))
+                    : SrdMarkdown.Format(doc, format, index, combatant: Combatants(index));
             },
             progress,
             cancellationToken);
@@ -289,12 +299,14 @@ public sealed partial class RulesTools
                 }
 
                 var best = matches[0];
+                CheckFormatFits(best.Document, format);
                 var others = matches.Skip(1).Select(m => m.Document).Where(d => d.Ref != best.Document.Ref).DistinctBy(d => d.Ref).ToList();
                 var alsoNamed = AlsoNamed(name, best.Document, others, kindGiven: kind is not null);
 
                 return edition == Both
-                    ? Compare(index, best.Document, format, alsoNamed, typedName: best.MatchedAlias ?? name)
-                    : SrdMarkdown.Format(best.Document, format, index, alsoNamed, HeadingNote(best.Document, best.MatchedAlias ?? name));
+                    ? Compare(index, best.Document, format, alsoNamed, typedName: best.MatchedAlias ?? name, Combatants(index))
+                    : SrdMarkdown.Format(
+                        best.Document, format, index, alsoNamed, HeadingNote(best.Document, best.MatchedAlias ?? name), Combatants(index));
             },
             progress,
             cancellationToken);
@@ -388,7 +400,8 @@ public sealed partial class RulesTools
     /// else the first, and the rest are listed so the model can compare those too.
     /// </summary>
     /// <param name="typedName">The name the caller asked for (or the alias it matched), looked up in the other edition too.</param>
-    private static string Compare(SrdIndex index, SrdDocument doc, string format, string? alsoNamed, string? typedName)
+    private static string Compare(
+        SrdIndex index, SrdDocument doc, string format, string? alsoNamed, string? typedName, Func<SrdDocument, Domain.Simulation.StatBlock>? combatants)
     {
         var side = OtherSide(index, doc, typedName);
         var other = side?.Best;
@@ -413,7 +426,7 @@ public sealed partial class RulesTools
                 HeadingNote(other, typedName ?? doc.Name) ?? (typedName is null ? null : HeadingNote(other, doc.Name)));
         var (note2014, note2024) = doc.Edition == SrdEdition.Edition2014 ? (docNote, otherNote) : (otherNote, docNote);
 
-        return SrdMarkdown.Compare(doc2014, doc2024, format, index, Notes(moreCounterparts, alsoNamed), note2014, note2024);
+        return SrdMarkdown.Compare(doc2014, doc2024, format, index, Notes(moreCounterparts, alsoNamed), note2014, note2024, combatants);
     }
 
     /// <summary>
@@ -1046,9 +1059,26 @@ public sealed partial class RulesTools
         var value = string.IsNullOrWhiteSpace(format) ? SrdMarkdown.Concise : format.Trim().ToLowerInvariant();
         return SrdMarkdown.Formats.Contains(value)
             ? value
-            : throw new DndInputException(
-                $"format must be {string.Join(" or ", SrdMarkdown.Formats.Select(f => $"\"{f}\""))} (got \"{Echo(format!)}\").");
+            : throw new DndInputException($"format must be {SrdMarkdown.FormatsText} (got \"{Echo(format!)}\").");
     }
+
+    /// <summary>
+    /// The combatant format is a monster's normalized stat block; any other entry is refused with the formats it can
+    /// have, rather than answered in concise format as if the format had worked (the model would read a spell's text as
+    /// "what the simulator does with it").
+    /// </summary>
+    private static void CheckFormatFits(SrdDocument doc, string format)
+    {
+        if (format == SrdMarkdown.Combatant && doc.Kind != SrdKinds.Monster)
+        {
+            throw new DndInputException(
+                $"format \"combatant\" is for monsters (a stat block as balance_simulate reads it); `{doc.Ref}` is a {doc.Kind}. " +
+                $"Formats: {SrdMarkdown.FormatsText}.");
+        }
+    }
+
+    // The host's cached normalizer, reading spells through this index.
+    private Func<SrdDocument, Domain.Simulation.StatBlock> Combatants(SrdIndex index) => doc => _statBlocks.Normalize(doc, index);
 
     private static string FormatSearch(
         string query,

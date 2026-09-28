@@ -128,15 +128,22 @@ internal static class BalanceRulesTables
         return RulesTables.Page(
             table,
             "**Per die** (expected value of one die):\n\n" + perDie,
-            "Great Weapon Fighting 2014: reroll a 1 or 2 on a damage die once and use the new roll. 2024: treat a 1 or 2 as a 3. " +
-            "Both apply to the weapon's own dice; balance_dpr applies them to rider dice (smites, Hex) only with ruling " +
-            "gwf_on_riders.",
+            // The rules cover "the damage dice you roll for an attack with the weapon"; whether a rider's dice count is the
+            // table's call, so this names the default as balance_dpr's, not as the rule.
+            GwfCoverage,
             "**Savage Attacker** (2024 feat: once per turn, roll a weapon hit's damage dice twice and use either), per weapon's " +
             "dice, flat damage excluded since a reroll never changes it:\n\n" + savage,
             "On a crit the rules text does not settle what is rerolled. By default (ruling savage_attacker_on_crit_dice false) the " +
             "better of two rolls of one set of the weapon's dice plus the extra crit set once; with the ruling on, the better of " +
             "two rolls of the whole doubled set.");
     }
+
+    /// <summary>What Great Weapon Fighting covers, and which dice balance_dpr remaps by default.</summary>
+    internal const string GwfCoverage =
+        "Great Weapon Fighting 2014: reroll a 1 or 2 on a damage die once and use the new roll. 2024: treat a 1 or 2 as a 3. " +
+        "Both texts cover the damage dice you roll for an attack with the weapon; they do not settle whether dice that another " +
+        "feature adds to the hit (smites, Hex) count, which is a table ruling. By default (ruling gwf_on_riders false) " +
+        "balance_dpr remaps only the weapon's own dice; with the ruling on, it remaps rider dice too.";
 
     private static string AreaTargets(RulesTable table) => RulesTables.Page(
         table,

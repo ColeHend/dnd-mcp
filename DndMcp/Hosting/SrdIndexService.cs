@@ -127,8 +127,16 @@ public sealed class SrdIndexService : IDisposable
             {
                 return await task.WaitAsync(remaining < ProgressInterval ? remaining : ProgressInterval, cancellationToken);
             }
-            catch (TimeoutException) when (!task.IsCompleted)
+            catch (TimeoutException)
             {
+                if (task.IsCompleted)
+                {
+                    // The build finished just as this wait timed out. Filtering the catch on "not completed" let that
+                    // TimeoutException escape as the SDK's generic error (seen when a simulation and a search both waited on
+                    // the first build); the finished task has the answer, or the build's own exception.
+                    return await task;
+                }
+
                 // Progress must increase with every notification (MCP spec), so it is the seconds waited so far.
                 progress?.Report(new ProgressNotificationValue
                 {

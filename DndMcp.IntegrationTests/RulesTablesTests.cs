@@ -64,6 +64,7 @@ public sealed class RulesTablesTests : IClassFixture<McpServerHarness>
     [InlineData("encounter-multipliers-2014", 6)]
     [InlineData("adventuring-day-xp-2014", 20)]
     [InlineData("monster-stats-by-cr-2014", 34)]
+    [InlineData("monster-stats-by-cr-empirical", 34)]
     [InlineData("dpr-targets-by-level", 20)]
     public async Task RulesGet_EveryTable_HasEveryRow(string slug, int rows)
     {
@@ -111,6 +112,12 @@ public sealed class RulesTablesTests : IClassFixture<McpServerHarness>
     [InlineData("aoe-targets", "| Fireball | 20-ft sphere | 4 |")]
     [InlineData("aoe-targets", "| Lightning Bolt | 100-ft line | 4 |")]
     [InlineData("aoe-targets", "| Cone of Cold | 60-ft cone | 6 |")]
+    // MonsterStatsEmpirical's pinned medians beside the DMG row (both editions have 41-42 CR 2 monsters).
+    [InlineData("monster-stats-by-cr-empirical", "| 2 | 41 | 13 | 45 | +5 | 12 (14) | +0.50 | 42 | 13 | 45 | +5 | 12 (16) | +0.67 | 13 | 86–100 | +3 | 13 |")]
+    // CR 19: one monster per edition, neither with a save DC.
+    [InlineData("monster-stats-by-cr-empirical", "| 19 | 1 | 19 | 262 | +14 | — | +9.00 | 1 | 19 | 287 | +14 | — | +7.00 | 19 | 341–355 | +10 | 19 |")]
+    // CR 18: no SRD monster in either edition, so every value is interpolated and marked, with no count.
+    [InlineData("monster-stats-by-cr-empirical", "| 18 | — | ~19 | ~259 | ~+13.75 | ~20.67 | ~+8.50 | — | ~19 |")]
     public async Task RulesGet_Table_RendersTheDomainValues(string slug, string row)
     {
         Assert.Contains(row, await Get(new() { ["ref"] = RulesTables.UriPrefix + slug }), StringComparison.Ordinal);
@@ -150,6 +157,40 @@ public sealed class RulesTablesTests : IClassFixture<McpServerHarness>
             .Split('\n').Where(l => l.StartsWith("| ", StringComparison.Ordinal)).Skip(1).Select(l => l.Split(" | ")).ToList();
 
         Assert.Equal(published.Select(p => p.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)), rows.Select(r => r[8]));
+    }
+
+    [Fact]
+    public async Task RulesGet_EmpiricalMonsterStats_SaysItIsComputedFromTheSrdAndTheAttributionSaysSo()
+    {
+        // Derived from SRD data rather than copied, beside a DMG table: both facts are stated where the table is and in the
+        // attribution, so a model quotes neither the medians as SRD text nor the DMG columns as SRD.
+        var line = (await Get(new() { ["ref"] = RulesTables.UriPrefix + RulesTables.EmpiricalSlug })).Split('\n')[2];
+        var attribution = await Get(new() { ["ref"] = "rules://attribution" });
+
+        Assert.Contains("medians computed by this server (not a table in either SRD)", line, StringComparison.Ordinal);
+        Assert.Contains("the DMG columns: Dungeon Master's Guide (2014), pp. 274–275", line, StringComparison.Ordinal);
+        Assert.Contains(
+            "`rules://tables/monster-stats-by-cr-empirical` is computed by this server from the SRD 5.1 and SRD 5.2.1 monster stat blocks",
+            attribution, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RulesGet_EmpiricalMonsterStats_EveryRowMatchesTheDomainTable()
+    {
+        // Each cell the page prints for a census row is MonsterStatsEmpirical's own value, never retyped.
+        var rows = (await Get(new() { ["ref"] = RulesTables.UriPrefix + RulesTables.EmpiricalSlug }))
+            .Split('\n').Where(l => l.StartsWith("| ", StringComparison.Ordinal)).Skip(1).Select(l => l.Split(" | ")).ToList();
+
+        foreach (var edition in new[] { ("2014", 1), ("2024", 7) })
+        {
+            foreach (var data in DndMcp.Domain.Encounters.MonsterStatsEmpirical.Rows(edition.Item1))
+            {
+                var row = rows.Single(r => r[0] == "| " + data.ChallengeRating);
+                Assert.Equal(data.Count.ToString(System.Globalization.CultureInfo.InvariantCulture), row[edition.Item2]);
+                Assert.Equal(data.ArmorClass.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture), row[edition.Item2 + 1]);
+                Assert.Equal(data.HitPoints.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture), row[edition.Item2 + 2]);
+            }
+        }
     }
 
     [Fact]

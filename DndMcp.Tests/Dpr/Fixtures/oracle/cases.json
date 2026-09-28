@@ -25703,6 +25703,4119 @@
      ]
     ]
    }
+  },
+  {
+   "id": "fix-untyped-rider-takes-attack-type",
+   "description": "An untyped Sneak Attack on a piercing rapier is resisted with it: 0.6 x 9.25 + 0.05 x 16.75 = 6.3875.",
+   "contract_refs": [
+    "§4.1"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "dex": 18
+    },
+    "attacks": [
+     {
+      "name": "Rapier",
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d8",
+      "damage_type": "piercing",
+      "properties": [
+       "melee",
+       "finesse"
+      ]
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "extra_damage",
+      "name": "Sneak Attack",
+      "dice": "3d6",
+      "when": "first_hit_per_turn"
+     }
+    ]
+   },
+   "target": {
+    "ac": 15,
+    "resistances": [
+     "piercing"
+    ]
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "511/80",
+     "value": 6.3875
+    },
+    "p_zero": {
+     "exact": "7/20",
+     "value": 0.35
+    },
+    "pmf": [
+     [
+      0,
+      "7/20"
+     ],
+     [
+      4,
+      "1/576"
+     ],
+     [
+      5,
+      "1/96"
+     ],
+     [
+      6,
+      "41933/1327104"
+     ],
+     [
+      7,
+      "65321/995328"
+     ],
+     [
+      8,
+      "1002427/9953280"
+     ],
+     [
+      9,
+      "400027/3317760"
+     ],
+     [
+      10,
+      "6797593/59719680"
+     ],
+     [
+      11,
+      "253117/2985984"
+     ],
+     [
+      12,
+      "978581/19906560"
+     ],
+     [
+      13,
+      "218701/9953280"
+     ],
+     [
+      14,
+      "278447/29859840"
+     ],
+     [
+      15,
+      "371/58320"
+     ],
+     [
+      16,
+      "140981/19906560"
+     ],
+     [
+      17,
+      "3641/497664"
+     ],
+     [
+      18,
+      "396247/59719680"
+     ],
+     [
+      19,
+      "3935/746496"
+     ],
+     [
+      20,
+      "108959/29859840"
+     ],
+     [
+      21,
+      "21709/9953280"
+     ],
+     [
+      22,
+      "22093/19906560"
+     ],
+     [
+      23,
+      "1405/2985984"
+     ],
+     [
+      24,
+      "9601/59719680"
+     ],
+     [
+      25,
+      "139/3317760"
+     ],
+     [
+      26,
+      "5/663552"
+     ],
+     [
+      27,
+      "11/14929920"
+     ],
+     [
+      28,
+      "1/59719680"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "fix-attack-action-only-skips-spell-attacks",
+   "description": "A spell attack made with the Action is not the Attack action: an attack_action_only +3 adds nothing to Fire Bolt (7.70).",
+   "contract_refs": [
+    "§4.2"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "dex": 18
+    },
+    "attacks": [
+     {
+      "name": "Fire Bolt",
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d10",
+      "damage_type": "fire",
+      "properties": [
+       "ranged",
+       "spell"
+      ],
+      "ability_to_damage": false,
+      "cantrip": "dice"
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "bonus_damage",
+      "name": "Only AA",
+      "amount": 3,
+      "attack_action_only": true
+     }
+    ]
+   },
+   "target": {
+    "ac": 15
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "77/10",
+     "value": 7.7
+    },
+    "p_zero": {
+     "exact": "7/20",
+     "value": 0.35
+    },
+    "pmf": [
+     [
+      0,
+      "7/20"
+     ],
+     [
+      2,
+      "3/500"
+     ],
+     [
+      3,
+      "3/250"
+     ],
+     [
+      4,
+      "3601/200000"
+     ],
+     [
+      5,
+      "1201/50000"
+     ],
+     [
+      6,
+      "601/20000"
+     ],
+     [
+      7,
+      "361/10000"
+     ],
+     [
+      8,
+      "1687/40000"
+     ],
+     [
+      9,
+      "1207/25000"
+     ],
+     [
+      10,
+      "2721/50000"
+     ],
+     [
+      11,
+      "303/5000"
+     ],
+     [
+      12,
+      "2193/40000"
+     ],
+     [
+      13,
+      "491/10000"
+     ],
+     [
+      14,
+      "4341/100000"
+     ],
+     [
+      15,
+      "1887/50000"
+     ],
+     [
+      16,
+      "1283/40000"
+     ],
+     [
+      17,
+      "33/1250"
+     ],
+     [
+      18,
+      "207/10000"
+     ],
+     [
+      19,
+      "187/12500"
+     ],
+     [
+      20,
+      "1833/200000"
+     ],
+     [
+      21,
+      "33/10000"
+     ],
+     [
+      22,
+      "67/20000"
+     ],
+     [
+      23,
+      "33/10000"
+     ],
+     [
+      24,
+      "633/200000"
+     ],
+     [
+      25,
+      "37/12500"
+     ],
+     [
+      26,
+      "27/10000"
+     ],
+     [
+      27,
+      "3/1250"
+     ],
+     [
+      28,
+      "83/40000"
+     ],
+     [
+      29,
+      "87/50000"
+     ],
+     [
+      30,
+      "141/100000"
+     ],
+     [
+      31,
+      "11/10000"
+     ],
+     [
+      32,
+      "33/40000"
+     ],
+     [
+      33,
+      "3/5000"
+     ],
+     [
+      34,
+      "21/50000"
+     ],
+     [
+      35,
+      "7/25000"
+     ],
+     [
+      36,
+      "7/40000"
+     ],
+     [
+      37,
+      "1/10000"
+     ],
+     [
+      38,
+      "1/20000"
+     ],
+     [
+      39,
+      "1/50000"
+     ],
+     [
+      40,
+      "1/200000"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "fix-dodge-lost-stunned",
+   "description": "A dodging target stunned this turn: Dodge is lost when incapacitated or restrained, its attack Disadvantage when blinded; prone keeps it.",
+   "contract_refs": [
+    "§4.1"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "dex": 18
+    },
+    "attacks": [
+     {
+      "name": "Blade",
+      "count": 2,
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d8",
+      "damage_type": "slashing",
+      "properties": [
+       "melee"
+      ]
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "condition_on_hit",
+      "name": "Hold",
+      "condition": "stunned",
+      "ability": "con",
+      "dc": 40
+     }
+    ]
+   },
+   "target": {
+    "ac": 15,
+    "save_bonus": 0,
+    "condition": "dodging"
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "721571/80000",
+     "value": 9.0196375
+    },
+    "p_zero": {
+     "exact": "53361/160000",
+     "value": 0.33350625
+    },
+    "pmf": [
+     [
+      0,
+      "53361/160000"
+     ],
+     [
+      5,
+      "147/4000"
+     ],
+     [
+      6,
+      "1883/51200"
+     ],
+     [
+      7,
+      "4711/128000"
+     ],
+     [
+      8,
+      "9429/256000"
+     ],
+     [
+      9,
+      "2359/64000"
+     ],
+     [
+      10,
+      "53767/1280000"
+     ],
+     [
+      11,
+      "48369/1024000"
+     ],
+     [
+      12,
+      "34438567/655360000"
+     ],
+     [
+      13,
+      "3472871/163840000"
+     ],
+     [
+      14,
+      "1744807/65536000"
+     ],
+     [
+      15,
+      "5264931/163840000"
+     ],
+     [
+      16,
+      "4945297/131072000"
+     ],
+     [
+      17,
+      "3556049/81920000"
+     ],
+     [
+      18,
+      "6379059/163840000"
+     ],
+     [
+      19,
+      "2809321/81920000"
+     ],
+     [
+      20,
+      "19323271/655360000"
+     ],
+     [
+      21,
+      "4015557/163840000"
+     ],
+     [
+      22,
+      "6354621/327680000"
+     ],
+     [
+      23,
+      "2311569/163840000"
+     ],
+     [
+      24,
+      "5673213/655360000"
+     ],
+     [
+      25,
+      "124371/40960000"
+     ],
+     [
+      26,
+      "193869/81920000"
+     ],
+     [
+      27,
+      "72891/40960000"
+     ],
+     [
+      28,
+      "167193/131072000"
+     ],
+     [
+      29,
+      "140049/163840000"
+     ],
+     [
+      30,
+      "169533/327680000"
+     ],
+     [
+      31,
+      "43173/163840000"
+     ],
+     [
+      32,
+      "61191/655360000"
+     ],
+     [
+      33,
+      "117/16384000"
+     ],
+     [
+      34,
+      "819/163840000"
+     ],
+     [
+      35,
+      "273/81920000"
+     ],
+     [
+      36,
+      "273/131072000"
+     ],
+     [
+      37,
+      "39/32768000"
+     ],
+     [
+      38,
+      "39/65536000"
+     ],
+     [
+      39,
+      "39/163840000"
+     ],
+     [
+      40,
+      "39/655360000"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "fix-dodge-lost-restrained",
+   "description": "A dodging target restrained this turn: Dodge is lost when incapacitated or restrained, its attack Disadvantage when blinded; prone keeps it.",
+   "contract_refs": [
+    "§4.1"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "dex": 18
+    },
+    "attacks": [
+     {
+      "name": "Blade",
+      "count": 2,
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d8",
+      "damage_type": "slashing",
+      "properties": [
+       "melee"
+      ]
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "condition_on_hit",
+      "name": "Hold",
+      "condition": "restrained",
+      "ability": "str",
+      "dc": 40
+     }
+    ]
+   },
+   "target": {
+    "ac": 15,
+    "save_bonus": 0,
+    "condition": "dodging"
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "721571/80000",
+     "value": 9.0196375
+    },
+    "p_zero": {
+     "exact": "53361/160000",
+     "value": 0.33350625
+    },
+    "pmf": [
+     [
+      0,
+      "53361/160000"
+     ],
+     [
+      5,
+      "147/4000"
+     ],
+     [
+      6,
+      "1883/51200"
+     ],
+     [
+      7,
+      "4711/128000"
+     ],
+     [
+      8,
+      "9429/256000"
+     ],
+     [
+      9,
+      "2359/64000"
+     ],
+     [
+      10,
+      "53767/1280000"
+     ],
+     [
+      11,
+      "48369/1024000"
+     ],
+     [
+      12,
+      "34438567/655360000"
+     ],
+     [
+      13,
+      "3472871/163840000"
+     ],
+     [
+      14,
+      "1744807/65536000"
+     ],
+     [
+      15,
+      "5264931/163840000"
+     ],
+     [
+      16,
+      "4945297/131072000"
+     ],
+     [
+      17,
+      "3556049/81920000"
+     ],
+     [
+      18,
+      "6379059/163840000"
+     ],
+     [
+      19,
+      "2809321/81920000"
+     ],
+     [
+      20,
+      "19323271/655360000"
+     ],
+     [
+      21,
+      "4015557/163840000"
+     ],
+     [
+      22,
+      "6354621/327680000"
+     ],
+     [
+      23,
+      "2311569/163840000"
+     ],
+     [
+      24,
+      "5673213/655360000"
+     ],
+     [
+      25,
+      "124371/40960000"
+     ],
+     [
+      26,
+      "193869/81920000"
+     ],
+     [
+      27,
+      "72891/40960000"
+     ],
+     [
+      28,
+      "167193/131072000"
+     ],
+     [
+      29,
+      "140049/163840000"
+     ],
+     [
+      30,
+      "169533/327680000"
+     ],
+     [
+      31,
+      "43173/163840000"
+     ],
+     [
+      32,
+      "61191/655360000"
+     ],
+     [
+      33,
+      "117/16384000"
+     ],
+     [
+      34,
+      "819/163840000"
+     ],
+     [
+      35,
+      "273/81920000"
+     ],
+     [
+      36,
+      "273/131072000"
+     ],
+     [
+      37,
+      "39/32768000"
+     ],
+     [
+      38,
+      "39/65536000"
+     ],
+     [
+      39,
+      "39/163840000"
+     ],
+     [
+      40,
+      "39/655360000"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "fix-dodge-lost-blinded",
+   "description": "A dodging target blinded this turn: Dodge is lost when incapacitated or restrained, its attack Disadvantage when blinded; prone keeps it.",
+   "contract_refs": [
+    "§4.1"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "dex": 18
+    },
+    "attacks": [
+     {
+      "name": "Blade",
+      "count": 2,
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d8",
+      "damage_type": "slashing",
+      "properties": [
+       "melee"
+      ]
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "condition_on_hit",
+      "name": "Hold",
+      "condition": "blinded",
+      "ability": "con",
+      "dc": 40
+     }
+    ]
+   },
+   "target": {
+    "ac": 15,
+    "save_bonus": 0,
+    "condition": "dodging"
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "721571/80000",
+     "value": 9.0196375
+    },
+    "p_zero": {
+     "exact": "53361/160000",
+     "value": 0.33350625
+    },
+    "pmf": [
+     [
+      0,
+      "53361/160000"
+     ],
+     [
+      5,
+      "147/4000"
+     ],
+     [
+      6,
+      "1883/51200"
+     ],
+     [
+      7,
+      "4711/128000"
+     ],
+     [
+      8,
+      "9429/256000"
+     ],
+     [
+      9,
+      "2359/64000"
+     ],
+     [
+      10,
+      "53767/1280000"
+     ],
+     [
+      11,
+      "48369/1024000"
+     ],
+     [
+      12,
+      "34438567/655360000"
+     ],
+     [
+      13,
+      "3472871/163840000"
+     ],
+     [
+      14,
+      "1744807/65536000"
+     ],
+     [
+      15,
+      "5264931/163840000"
+     ],
+     [
+      16,
+      "4945297/131072000"
+     ],
+     [
+      17,
+      "3556049/81920000"
+     ],
+     [
+      18,
+      "6379059/163840000"
+     ],
+     [
+      19,
+      "2809321/81920000"
+     ],
+     [
+      20,
+      "19323271/655360000"
+     ],
+     [
+      21,
+      "4015557/163840000"
+     ],
+     [
+      22,
+      "6354621/327680000"
+     ],
+     [
+      23,
+      "2311569/163840000"
+     ],
+     [
+      24,
+      "5673213/655360000"
+     ],
+     [
+      25,
+      "124371/40960000"
+     ],
+     [
+      26,
+      "193869/81920000"
+     ],
+     [
+      27,
+      "72891/40960000"
+     ],
+     [
+      28,
+      "167193/131072000"
+     ],
+     [
+      29,
+      "140049/163840000"
+     ],
+     [
+      30,
+      "169533/327680000"
+     ],
+     [
+      31,
+      "43173/163840000"
+     ],
+     [
+      32,
+      "61191/655360000"
+     ],
+     [
+      33,
+      "117/16384000"
+     ],
+     [
+      34,
+      "819/163840000"
+     ],
+     [
+      35,
+      "273/81920000"
+     ],
+     [
+      36,
+      "273/131072000"
+     ],
+     [
+      37,
+      "39/32768000"
+     ],
+     [
+      38,
+      "39/65536000"
+     ],
+     [
+      39,
+      "39/163840000"
+     ],
+     [
+      40,
+      "39/655360000"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "fix-dodge-lost-paralyzed",
+   "description": "A dodging target paralyzed this turn: Dodge is lost when incapacitated or restrained, its attack Disadvantage when blinded; prone keeps it.",
+   "contract_refs": [
+    "§4.1"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "dex": 18
+    },
+    "attacks": [
+     {
+      "name": "Blade",
+      "count": 2,
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d8",
+      "damage_type": "slashing",
+      "properties": [
+       "melee"
+      ]
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "condition_on_hit",
+      "name": "Hold",
+      "condition": "paralyzed",
+      "ability": "con",
+      "dc": 40
+     }
+    ]
+   },
+   "target": {
+    "ac": 15,
+    "save_bonus": 0,
+    "condition": "dodging"
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "840209/80000",
+     "value": 10.5026125
+    },
+    "p_zero": {
+     "exact": "53361/160000",
+     "value": 0.33350625
+    },
+    "pmf": [
+     [
+      0,
+      "53361/160000"
+     ],
+     [
+      5,
+      "147/4000"
+     ],
+     [
+      6,
+      "1883/51200"
+     ],
+     [
+      7,
+      "4711/128000"
+     ],
+     [
+      8,
+      "9429/256000"
+     ],
+     [
+      9,
+      "2359/64000"
+     ],
+     [
+      10,
+      "9443/256000"
+     ],
+     [
+      11,
+      "385371/10240000"
+     ],
+     [
+      12,
+      "25625503/655360000"
+     ],
+     [
+      13,
+      "743807/163840000"
+     ],
+     [
+      14,
+      "484639/65536000"
+     ],
+     [
+      15,
+      "71907/6553600"
+     ],
+     [
+      16,
+      "10008509/655360000"
+     ],
+     [
+      17,
+      "1662521/81920000"
+     ],
+     [
+      18,
+      "4266507/163840000"
+     ],
+     [
+      19,
+      "2486401/81920000"
+     ],
+     [
+      20,
+      "4354931/131072000"
+     ],
+     [
+      21,
+      "5678829/163840000"
+     ],
+     [
+      22,
+      "11365029/327680000"
+     ],
+     [
+      23,
+      "5449977/163840000"
+     ],
+     [
+      24,
+      "19923813/655360000"
+     ],
+     [
+      25,
+      "213759/8192000"
+     ],
+     [
+      26,
+      "1666197/81920000"
+     ],
+     [
+      27,
+      "125307/8192000"
+     ],
+     [
+      28,
+      "287469/26214400"
+     ],
+     [
+      29,
+      "1204281/163840000"
+     ],
+     [
+      30,
+      "291681/65536000"
+     ],
+     [
+      31,
+      "371709/163840000"
+     ],
+     [
+      32,
+      "105651/131072000"
+     ],
+     [
+      33,
+      "1053/16384000"
+     ],
+     [
+      34,
+      "7371/163840000"
+     ],
+     [
+      35,
+      "2457/81920000"
+     ],
+     [
+      36,
+      "2457/131072000"
+     ],
+     [
+      37,
+      "351/32768000"
+     ],
+     [
+      38,
+      "351/65536000"
+     ],
+     [
+      39,
+      "351/163840000"
+     ],
+     [
+      40,
+      "351/655360000"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "fix-dodge-lost-prone",
+   "description": "A dodging target prone this turn: Dodge is lost when incapacitated or restrained, its attack Disadvantage when blinded; prone keeps it.",
+   "contract_refs": [
+    "§4.1"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "dex": 18
+    },
+    "attacks": [
+     {
+      "name": "Blade",
+      "count": 2,
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d8",
+      "damage_type": "slashing",
+      "properties": [
+       "melee"
+      ]
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "condition_on_hit",
+      "name": "Hold",
+      "condition": "prone",
+      "ability": "str",
+      "dc": 40
+     }
+    ]
+   },
+   "target": {
+    "ac": 15,
+    "save_bonus": 0,
+    "condition": "dodging"
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "1297971/160000",
+     "value": 8.11231875
+    },
+    "p_zero": {
+     "exact": "53361/160000",
+     "value": 0.33350625
+    },
+    "pmf": [
+     [
+      0,
+      "53361/160000"
+     ],
+     [
+      5,
+      "7791/160000"
+     ],
+     [
+      6,
+      "99799/2048000"
+     ],
+     [
+      7,
+      "249683/5120000"
+     ],
+     [
+      8,
+      "499737/10240000"
+     ],
+     [
+      9,
+      "125027/2560000"
+     ],
+     [
+      10,
+      "540799/10240000"
+     ],
+     [
+      11,
+      "29097/512000"
+     ],
+     [
+      12,
+      "9976501/163840000"
+     ],
+     [
+      13,
+      "667797/40960000"
+     ],
+     [
+      14,
+      "1669601/81920000"
+     ],
+     [
+      15,
+      "1003609/40960000"
+     ],
+     [
+      16,
+      "939379/32768000"
+     ],
+     [
+      17,
+      "673323/20480000"
+     ],
+     [
+      18,
+      "1198317/40960000"
+     ],
+     [
+      19,
+      "523199/20480000"
+     ],
+     [
+      20,
+      "3563541/163840000"
+     ],
+     [
+      21,
+      "29271/1638400"
+     ],
+     [
+      22,
+      "228219/16384000"
+     ],
+     [
+      23,
+      "81143/8192000"
+     ],
+     [
+      24,
+      "189819/32768000"
+     ],
+     [
+      25,
+      "3261/2048000"
+     ],
+     [
+      26,
+      "5083/4096000"
+     ],
+     [
+      27,
+      "1911/2048000"
+     ],
+     [
+      28,
+      "4383/6553600"
+     ],
+     [
+      29,
+      "3671/8192000"
+     ],
+     [
+      30,
+      "4443/16384000"
+     ],
+     [
+      31,
+      "1131/8192000"
+     ],
+     [
+      32,
+      "1601/32768000"
+     ],
+     [
+      33,
+      "3/819200"
+     ],
+     [
+      34,
+      "21/8192000"
+     ],
+     [
+      35,
+      "7/4096000"
+     ],
+     [
+      36,
+      "7/6553600"
+     ],
+     [
+      37,
+      "1/1638400"
+     ],
+     [
+      38,
+      "1/3276800"
+     ],
+     [
+      39,
+      "1/8192000"
+     ],
+     [
+      40,
+      "1/32768000"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "fix-dodge-dex-save-restrained",
+   "description": "A dodging target restrained this turn, then a Dex save: restrained loses Dodge's Advantage (and has Disadvantage), blinded keeps it.",
+   "contract_refs": [
+    "§4.1",
+    "§4.3"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "dex": 18
+    },
+    "attacks": [
+     {
+      "name": "Blade",
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d8",
+      "damage_type": "slashing",
+      "properties": [
+       "melee"
+      ]
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "condition_on_hit",
+      "name": "Hold",
+      "condition": "restrained",
+      "ability": "str",
+      "dc": 40
+     },
+     {
+      "kind": "save_effect",
+      "name": "Push",
+      "ability": "dex",
+      "dc": 13,
+      "amount": 10,
+      "on_success": "none",
+      "action_cost": "bonus_action"
+     }
+    ]
+   },
+   "target": {
+    "ac": 15,
+    "save_bonus": 0,
+    "condition": "dodging"
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "18461/2000",
+     "value": 9.2305
+    },
+    "p_zero": {
+     "exact": "231/625",
+     "value": 0.3696
+    },
+    "save": {
+     "targets": 1,
+     "dc": 13,
+     "per_target_fail": {
+      "exact": "9/25",
+      "value": 0.36
+     },
+     "expected_damage_per_target": {
+      "exact": "18/5",
+      "value": 3.6
+     },
+     "raw": {
+      "exact": "18/5",
+      "value": 3.6
+     }
+    }
+   }
+  },
+  {
+   "id": "fix-dodge-dex-save-blinded",
+   "description": "A dodging target blinded this turn, then a Dex save: restrained loses Dodge's Advantage (and has Disadvantage), blinded keeps it.",
+   "contract_refs": [
+    "§4.1",
+    "§4.3"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "dex": 18
+    },
+    "attacks": [
+     {
+      "name": "Blade",
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d8",
+      "damage_type": "slashing",
+      "properties": [
+       "melee"
+      ]
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "condition_on_hit",
+      "name": "Hold",
+      "condition": "blinded",
+      "ability": "con",
+      "dc": 40
+     },
+     {
+      "kind": "save_effect",
+      "name": "Push",
+      "ability": "dex",
+      "dc": 13,
+      "amount": 10,
+      "on_success": "none",
+      "action_cost": "bonus_action"
+     }
+    ]
+   },
+   "target": {
+    "ac": 15,
+    "save_bonus": 0,
+    "condition": "dodging"
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "2881/400",
+     "value": 7.2025
+    },
+    "p_zero": {
+     "exact": "231/625",
+     "value": 0.3696
+    },
+    "save": {
+     "targets": 1,
+     "dc": 13,
+     "per_target_fail": {
+      "exact": "9/25",
+      "value": 0.36
+     },
+     "expected_damage_per_target": {
+      "exact": "18/5",
+      "value": 3.6
+     },
+     "raw": {
+      "exact": "18/5",
+      "value": 3.6
+     }
+    }
+   }
+  },
+  {
+   "id": "fix-evasion-2024-stunned",
+   "description": "2024 Evasion against a stunned target: 2024 Evasion does not work while Incapacitated; 2014 has no such clause; restrained is not Incapacitated.",
+   "contract_refs": [
+    "§4.3"
+   ],
+   "build": {
+    "name": "Wizard",
+    "edition": "2024",
+    "level": 5,
+    "attacks": [],
+    "modifiers": [
+     {
+      "kind": "save_effect",
+      "name": "Fireball",
+      "ability": "dex",
+      "dc": 15,
+      "dice": "8d6",
+      "type": "fire",
+      "targets": 1
+     }
+    ]
+   },
+   "target": {
+    "save_bonus": 2,
+    "evasion": true,
+    "condition": "stunned",
+    "hp": 20
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "28/1",
+     "value": 28.0
+    },
+    "p_zero": {
+     "exact": "0/1",
+     "value": 0.0
+    },
+    "save": {
+     "targets": 1,
+     "dc": 15,
+     "per_target_fail": {
+      "exact": "1/1",
+      "value": 1.0
+     },
+     "expected_damage_per_target": {
+      "exact": "28/1",
+      "value": 28.0
+     },
+     "raw": {
+      "exact": "28/1",
+      "value": 28.0
+     },
+     "effective": {
+      "exact": "1393349/69984",
+      "value": 19.909536465477824
+     },
+     "p_each_dies": {
+      "exact": "9965/10368",
+      "value": 0.9611304012345679
+     },
+     "p_all_die": {
+      "exact": "9965/10368",
+      "value": 0.9611304012345679
+     },
+     "expected_kills": {
+      "exact": "9965/10368",
+      "value": 0.9611304012345679
+     },
+     "kill_distribution": [
+      [
+       0,
+       "403/10368"
+      ],
+      [
+       1,
+       "9965/10368"
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "id": "fix-evasion-2024-paralyzed",
+   "description": "2024 Evasion against a paralyzed target: 2024 Evasion does not work while Incapacitated; 2014 has no such clause; restrained is not Incapacitated.",
+   "contract_refs": [
+    "§4.3"
+   ],
+   "build": {
+    "name": "Wizard",
+    "edition": "2024",
+    "level": 5,
+    "attacks": [],
+    "modifiers": [
+     {
+      "kind": "save_effect",
+      "name": "Fireball",
+      "ability": "dex",
+      "dc": 15,
+      "dice": "8d6",
+      "type": "fire",
+      "targets": 1
+     }
+    ]
+   },
+   "target": {
+    "save_bonus": 2,
+    "evasion": true,
+    "condition": "paralyzed",
+    "hp": 20
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "28/1",
+     "value": 28.0
+    },
+    "p_zero": {
+     "exact": "0/1",
+     "value": 0.0
+    },
+    "save": {
+     "targets": 1,
+     "dc": 15,
+     "per_target_fail": {
+      "exact": "1/1",
+      "value": 1.0
+     },
+     "expected_damage_per_target": {
+      "exact": "28/1",
+      "value": 28.0
+     },
+     "raw": {
+      "exact": "28/1",
+      "value": 28.0
+     },
+     "effective": {
+      "exact": "1393349/69984",
+      "value": 19.909536465477824
+     },
+     "p_each_dies": {
+      "exact": "9965/10368",
+      "value": 0.9611304012345679
+     },
+     "p_all_die": {
+      "exact": "9965/10368",
+      "value": 0.9611304012345679
+     },
+     "expected_kills": {
+      "exact": "9965/10368",
+      "value": 0.9611304012345679
+     },
+     "kill_distribution": [
+      [
+       0,
+       "403/10368"
+      ],
+      [
+       1,
+       "9965/10368"
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "id": "fix-evasion-2024-unconscious",
+   "description": "2024 Evasion against a unconscious target: 2024 Evasion does not work while Incapacitated; 2014 has no such clause; restrained is not Incapacitated.",
+   "contract_refs": [
+    "§4.3"
+   ],
+   "build": {
+    "name": "Wizard",
+    "edition": "2024",
+    "level": 5,
+    "attacks": [],
+    "modifiers": [
+     {
+      "kind": "save_effect",
+      "name": "Fireball",
+      "ability": "dex",
+      "dc": 15,
+      "dice": "8d6",
+      "type": "fire",
+      "targets": 1
+     }
+    ]
+   },
+   "target": {
+    "save_bonus": 2,
+    "evasion": true,
+    "condition": "unconscious",
+    "hp": 20
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "28/1",
+     "value": 28.0
+    },
+    "p_zero": {
+     "exact": "0/1",
+     "value": 0.0
+    },
+    "save": {
+     "targets": 1,
+     "dc": 15,
+     "per_target_fail": {
+      "exact": "1/1",
+      "value": 1.0
+     },
+     "expected_damage_per_target": {
+      "exact": "28/1",
+      "value": 28.0
+     },
+     "raw": {
+      "exact": "28/1",
+      "value": 28.0
+     },
+     "effective": {
+      "exact": "1393349/69984",
+      "value": 19.909536465477824
+     },
+     "p_each_dies": {
+      "exact": "9965/10368",
+      "value": 0.9611304012345679
+     },
+     "p_all_die": {
+      "exact": "9965/10368",
+      "value": 0.9611304012345679
+     },
+     "expected_kills": {
+      "exact": "9965/10368",
+      "value": 0.9611304012345679
+     },
+     "kill_distribution": [
+      [
+       0,
+       "403/10368"
+      ],
+      [
+       1,
+       "9965/10368"
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "id": "fix-evasion-2014-stunned",
+   "description": "2014 Evasion against a stunned target: 2024 Evasion does not work while Incapacitated; 2014 has no such clause; restrained is not Incapacitated.",
+   "contract_refs": [
+    "§4.3"
+   ],
+   "build": {
+    "name": "Wizard",
+    "edition": "2014",
+    "level": 5,
+    "attacks": [],
+    "modifiers": [
+     {
+      "kind": "save_effect",
+      "name": "Fireball",
+      "ability": "dex",
+      "dc": 15,
+      "dice": "8d6",
+      "type": "fire",
+      "targets": 1
+     }
+    ]
+   },
+   "target": {
+    "save_bonus": 2,
+    "evasion": true,
+    "condition": "stunned",
+    "hp": 20
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "55/4",
+     "value": 13.75
+    },
+    "p_zero": {
+     "exact": "0/1",
+     "value": 0.0
+    },
+    "save": {
+     "targets": 1,
+     "dc": 15,
+     "per_target_fail": {
+      "exact": "1/1",
+      "value": 1.0
+     },
+     "expected_damage_per_target": {
+      "exact": "55/4",
+      "value": 13.75
+     },
+     "raw": {
+      "exact": "55/4",
+      "value": 13.75
+     },
+     "effective": {
+      "exact": "1443199/104976",
+      "value": 13.747894756896814
+     },
+     "p_each_dies": {
+      "exact": "695/93312",
+      "value": 0.007448131001371742
+     },
+     "p_all_die": {
+      "exact": "695/93312",
+      "value": 0.007448131001371742
+     },
+     "expected_kills": {
+      "exact": "695/93312",
+      "value": 0.007448131001371742
+     },
+     "kill_distribution": [
+      [
+       0,
+       "92617/93312"
+      ],
+      [
+       1,
+       "695/93312"
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "id": "fix-evasion-2024-restrained",
+   "description": "2024 Evasion against a restrained target: 2024 Evasion does not work while Incapacitated; 2014 has no such clause; restrained is not Incapacitated.",
+   "contract_refs": [
+    "§4.3"
+   ],
+   "build": {
+    "name": "Wizard",
+    "edition": "2024",
+    "level": 5,
+    "attacks": [],
+    "modifiers": [
+     {
+      "kind": "save_effect",
+      "name": "Fireball",
+      "ability": "dex",
+      "dc": 15,
+      "dice": "8d6",
+      "type": "fire",
+      "targets": 1
+     }
+    ]
+   },
+   "target": {
+    "save_bonus": 2,
+    "evasion": true,
+    "condition": "restrained",
+    "hp": 20
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "231/20",
+     "value": 11.55
+    },
+    "p_zero": {
+     "exact": "4/25",
+     "value": 0.16
+    },
+    "save": {
+     "targets": 1,
+     "dc": 15,
+     "per_target_fail": {
+      "exact": "21/25",
+      "value": 0.84
+     },
+     "expected_damage_per_target": {
+      "exact": "231/20",
+      "value": 11.55
+     },
+     "raw": {
+      "exact": "231/20",
+      "value": 11.55
+     },
+     "effective": {
+      "exact": "10102393/874800",
+      "value": 11.548231595793323
+     },
+     "p_each_dies": {
+      "exact": "973/155520",
+      "value": 0.006256430041152263
+     },
+     "p_all_die": {
+      "exact": "973/155520",
+      "value": 0.006256430041152263
+     },
+     "expected_kills": {
+      "exact": "973/155520",
+      "value": 0.006256430041152263
+     },
+     "kill_distribution": [
+      [
+       0,
+       "154547/155520"
+      ],
+      [
+       1,
+       "973/155520"
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "id": "fix-evasion-stunned-this-turn-2014-plain",
+   "description": "Stunning Strike (always lands on a hit) then a Bonus Action Dex-half 8d6: a 2024 target stunned this turn loses Evasion for it.",
+   "contract_refs": [
+    "§4.3"
+   ],
+   "build": {
+    "name": "Monk",
+    "edition": "2014",
+    "level": 5,
+    "abilities": {
+     "str": 18
+    },
+    "attacks": [
+     {
+      "name": "Longsword",
+      "to_hit": {
+       "ability": "str",
+       "proficient": true
+      },
+      "damage": "1d8",
+      "damage_type": "slashing",
+      "properties": [
+       "melee",
+       "versatile"
+      ]
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "condition_on_hit",
+      "name": "Stunning Strike",
+      "condition": "stunned",
+      "ability": "con",
+      "dc": 30
+     },
+     {
+      "kind": "save_effect",
+      "name": "Burst",
+      "ability": "dex",
+      "dc": 15,
+      "dice": "8d6",
+      "type": "fire",
+      "action_cost": "bonus_action"
+     }
+    ]
+   },
+   "target": {
+    "ac": 1,
+    "saves": {
+     "con": -5,
+     "dex": 2
+    }
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "7203/200",
+     "value": 36.015
+    },
+    "p_zero": {
+     "exact": "0/1",
+     "value": 0.0
+    },
+    "save": {
+     "targets": 1,
+     "dc": 15,
+     "per_target_fail": {
+      "exact": "3/5",
+      "value": 0.6
+     },
+     "expected_damage_per_target": {
+      "exact": "223/10",
+      "value": 22.3
+     },
+     "raw": {
+      "exact": "223/10",
+      "value": 22.3
+     }
+    }
+   }
+  },
+  {
+   "id": "fix-evasion-stunned-this-turn-2014-evasion",
+   "description": "Stunning Strike (always lands on a hit) then a Bonus Action Dex-half 8d6: a 2024 target stunned this turn loses Evasion for it.",
+   "contract_refs": [
+    "§4.3"
+   ],
+   "build": {
+    "name": "Monk",
+    "edition": "2014",
+    "level": 5,
+    "abilities": {
+     "str": 18
+    },
+    "attacks": [
+     {
+      "name": "Longsword",
+      "to_hit": {
+       "ability": "str",
+       "proficient": true
+      },
+      "damage": "1d8",
+      "damage_type": "slashing",
+      "properties": [
+       "melee",
+       "versatile"
+      ]
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "condition_on_hit",
+      "name": "Stunning Strike",
+      "condition": "stunned",
+      "ability": "con",
+      "dc": 30
+     },
+     {
+      "kind": "save_effect",
+      "name": "Burst",
+      "ability": "dex",
+      "dc": 15,
+      "dice": "8d6",
+      "type": "fire",
+      "action_cost": "bonus_action"
+     }
+    ]
+   },
+   "target": {
+    "ac": 1,
+    "saves": {
+     "con": -5,
+     "dex": 2
+    },
+    "evasion": true
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "871/40",
+     "value": 21.775
+    },
+    "p_zero": {
+     "exact": "1/50",
+     "value": 0.02
+    },
+    "save": {
+     "targets": 1,
+     "dc": 15,
+     "per_target_fail": {
+      "exact": "3/5",
+      "value": 0.6
+     },
+     "expected_damage_per_target": {
+      "exact": "33/4",
+      "value": 8.25
+     },
+     "raw": {
+      "exact": "33/4",
+      "value": 8.25
+     }
+    }
+   }
+  },
+  {
+   "id": "fix-evasion-stunned-this-turn-2024-plain",
+   "description": "Stunning Strike (always lands on a hit) then a Bonus Action Dex-half 8d6: a 2024 target stunned this turn loses Evasion for it.",
+   "contract_refs": [
+    "§4.3"
+   ],
+   "build": {
+    "name": "Monk",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "str": 18
+    },
+    "attacks": [
+     {
+      "name": "Longsword",
+      "to_hit": {
+       "ability": "str",
+       "proficient": true
+      },
+      "damage": "1d8",
+      "damage_type": "slashing",
+      "properties": [
+       "melee",
+       "versatile"
+      ]
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "condition_on_hit",
+      "name": "Stunning Strike",
+      "condition": "stunned",
+      "ability": "con",
+      "dc": 30
+     },
+     {
+      "kind": "save_effect",
+      "name": "Burst",
+      "ability": "dex",
+      "dc": 15,
+      "dice": "8d6",
+      "type": "fire",
+      "action_cost": "bonus_action"
+     }
+    ]
+   },
+   "target": {
+    "ac": 1,
+    "saves": {
+     "con": -5,
+     "dex": 2
+    }
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "7203/200",
+     "value": 36.015
+    },
+    "p_zero": {
+     "exact": "0/1",
+     "value": 0.0
+    },
+    "save": {
+     "targets": 1,
+     "dc": 15,
+     "per_target_fail": {
+      "exact": "3/5",
+      "value": 0.6
+     },
+     "expected_damage_per_target": {
+      "exact": "223/10",
+      "value": 22.3
+     },
+     "raw": {
+      "exact": "223/10",
+      "value": 22.3
+     }
+    }
+   }
+  },
+  {
+   "id": "fix-evasion-stunned-this-turn-2024-evasion",
+   "description": "Stunning Strike (always lands on a hit) then a Bonus Action Dex-half 8d6: a 2024 target stunned this turn loses Evasion for it.",
+   "contract_refs": [
+    "§4.3"
+   ],
+   "build": {
+    "name": "Monk",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "str": 18
+    },
+    "attacks": [
+     {
+      "name": "Longsword",
+      "to_hit": {
+       "ability": "str",
+       "proficient": true
+      },
+      "damage": "1d8",
+      "damage_type": "slashing",
+      "properties": [
+       "melee",
+       "versatile"
+      ]
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "condition_on_hit",
+      "name": "Stunning Strike",
+      "condition": "stunned",
+      "ability": "con",
+      "dc": 30
+     },
+     {
+      "kind": "save_effect",
+      "name": "Burst",
+      "ability": "dex",
+      "dc": 15,
+      "dice": "8d6",
+      "type": "fire",
+      "action_cost": "bonus_action"
+     }
+    ]
+   },
+   "target": {
+    "ac": 1,
+    "saves": {
+     "con": -5,
+     "dex": 2
+    },
+    "evasion": true
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "565/16",
+     "value": 35.3125
+    },
+    "p_zero": {
+     "exact": "1/50",
+     "value": 0.02
+    },
+    "save": {
+     "targets": 1,
+     "dc": 15,
+     "per_target_fail": {
+      "exact": "3/5",
+      "value": 0.6
+     },
+     "expected_damage_per_target": {
+      "exact": "33/4",
+      "value": 8.25
+     },
+     "raw": {
+      "exact": "33/4",
+      "value": 8.25
+     }
+    }
+   }
+  },
+  {
+   "id": "fix-offhand-needs-attack-action-setup",
+   "description": "Bless set up with round 1's Action: no Attack action, so no offhand attack either: 0.",
+   "contract_refs": [
+    "§4.2"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "str": 18,
+     "dex": 18
+    },
+    "attacks": [
+     {
+      "name": "Shortsword",
+      "count": 2,
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d6",
+      "damage_type": "piercing",
+      "properties": [
+       "melee",
+       "finesse",
+       "light"
+      ]
+     },
+     {
+      "name": "Dagger",
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d4",
+      "damage_type": "piercing",
+      "properties": [
+       "melee",
+       "light",
+       "finesse"
+      ],
+      "action": "bonus_action",
+      "offhand": true
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "to_hit",
+      "name": "Bless",
+      "dice": "1d4",
+      "setup": "action"
+     }
+    ]
+   },
+   "target": {
+    "ac": 15
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "0/1",
+     "value": 0.0
+    },
+    "p_zero": {
+     "exact": "1/1",
+     "value": 1.0
+    },
+    "pmf": [
+     [
+      0,
+      "1/1"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "fix-offhand-after-action-surge",
+   "description": "Bless set up with the Action, then Action Surge's two blessed swings: a second Attack action, so the blessed Dagger follows: 2 x 5.9875 + 2.0625 = 14.0375.",
+   "contract_refs": [
+    "§4.2"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "str": 18,
+     "dex": 18
+    },
+    "attacks": [
+     {
+      "name": "Shortsword",
+      "count": 2,
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d6",
+      "damage_type": "piercing",
+      "properties": [
+       "melee",
+       "finesse",
+       "light"
+      ]
+     },
+     {
+      "name": "Dagger",
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d4",
+      "damage_type": "piercing",
+      "properties": [
+       "melee",
+       "light",
+       "finesse"
+      ],
+      "action": "bonus_action",
+      "offhand": true
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "to_hit",
+      "name": "Bless",
+      "dice": "1d4",
+      "setup": "action"
+     },
+     {
+      "kind": "extra_attack",
+      "name": "Action Surge",
+      "attack": "Shortsword",
+      "count": 2,
+      "action": "action",
+      "resource": {
+       "uses": 1,
+       "per": "short_rest"
+      }
+     }
+    ]
+   },
+   "target": {
+    "ac": 15
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "1123/80",
+     "value": 14.0375
+    },
+    "p_zero": {
+     "exact": "729/64000",
+     "value": 0.011390625
+    },
+    "pmf": [
+     [
+      0,
+      "729/64000"
+     ],
+     [
+      1,
+      "2349/256000"
+     ],
+     [
+      2,
+      "4779/512000"
+     ],
+     [
+      3,
+      "243/25600"
+     ],
+     [
+      4,
+      "4941/512000"
+     ],
+     [
+      5,
+      "1647/128000"
+     ],
+     [
+      6,
+      "93/4096"
+     ],
+     [
+      7,
+      "16807/512000"
+     ],
+     [
+      8,
+      "4427/102400"
+     ],
+     [
+      9,
+      "2761/51200"
+     ],
+     [
+      10,
+      "599/10240"
+     ],
+     [
+      11,
+      "492059/9216000"
+     ],
+     [
+      12,
+      "2933449/55296000"
+     ],
+     [
+      13,
+      "2284387/41472000"
+     ],
+     [
+      14,
+      "3295297/55296000"
+     ],
+     [
+      15,
+      "591779/9216000"
+     ],
+     [
+      16,
+      "5986849/82944000"
+     ],
+     [
+      17,
+      "6238471/82944000"
+     ],
+     [
+      18,
+      "3033281/41472000"
+     ],
+     [
+      19,
+      "1360603/20736000"
+     ],
+     [
+      20,
+      "217153/4147200"
+     ],
+     [
+      21,
+      "396259/10368000"
+     ],
+     [
+      22,
+      "734053/27648000"
+     ],
+     [
+      23,
+      "701107/41472000"
+     ],
+     [
+      24,
+      "1591573/165888000"
+     ],
+     [
+      25,
+      "204559/41472000"
+     ],
+     [
+      26,
+      "130789/41472000"
+     ],
+     [
+      27,
+      "38369/20736000"
+     ],
+     [
+      28,
+      "165043/165888000"
+     ],
+     [
+      29,
+      "39911/82944000"
+     ],
+     [
+      30,
+      "17663/82944000"
+     ],
+     [
+      31,
+      "1223/13824000"
+     ],
+     [
+      32,
+      "1909/41472000"
+     ],
+     [
+      33,
+      "889/41472000"
+     ],
+     [
+      34,
+      "73/8294400"
+     ],
+     [
+      35,
+      "53/16588800"
+     ],
+     [
+      36,
+      "91/82944000"
+     ],
+     [
+      37,
+      "7/20736000"
+     ],
+     [
+      38,
+      "7/55296000"
+     ],
+     [
+      39,
+      "1/27648000"
+     ],
+     [
+      40,
+      "1/165888000"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "fix-offhand-setup-fight",
+   "description": "The Bless setup build over 3 rounds: round 1 nothing, rounds 2-3 the swings and the offhand Dagger: 2 x 14.0375 / 3.",
+   "contract_refs": [
+    "§4.2",
+    "§4.4"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "str": 18,
+     "dex": 18
+    },
+    "attacks": [
+     {
+      "name": "Shortsword",
+      "count": 2,
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d6",
+      "damage_type": "piercing",
+      "properties": [
+       "melee",
+       "finesse",
+       "light"
+      ]
+     },
+     {
+      "name": "Dagger",
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d4",
+      "damage_type": "piercing",
+      "properties": [
+       "melee",
+       "light",
+       "finesse"
+      ],
+      "action": "bonus_action",
+      "offhand": true
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "to_hit",
+      "name": "Bless",
+      "dice": "1d4",
+      "setup": "action"
+     }
+    ]
+   },
+   "target": {
+    "ac": 15
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "fight",
+    "rounds": 3,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "1123/120",
+     "value": 9.358333333333333
+    }
+   }
+  },
+  {
+   "id": "fix-offhand-setup-keeps-other-bonus-attacks",
+   "description": "In the setup round only the non-offhand bonus_action attack is made: the blessed Spiritual Weapon, 0.725 x 4.5 + 0.05 x 9.",
+   "contract_refs": [
+    "§4.2"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "str": 18,
+     "dex": 18
+    },
+    "attacks": [
+     {
+      "name": "Shortsword",
+      "count": 2,
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d6",
+      "damage_type": "piercing",
+      "properties": [
+       "melee",
+       "finesse",
+       "light"
+      ]
+     },
+     {
+      "name": "Dagger",
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d4",
+      "damage_type": "piercing",
+      "properties": [
+       "melee",
+       "light",
+       "finesse"
+      ],
+      "action": "bonus_action",
+      "offhand": true
+     },
+     {
+      "name": "Spiritual Weapon",
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d8",
+      "damage_type": "force",
+      "properties": [
+       "spell"
+      ],
+      "action": "bonus_action",
+      "ability_to_damage": false
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "to_hit",
+      "name": "Bless",
+      "dice": "1d4",
+      "setup": "action"
+     }
+    ]
+   },
+   "target": {
+    "ac": 15
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "297/80",
+     "value": 3.7125
+    },
+    "p_zero": {
+     "exact": "9/40",
+     "value": 0.225
+    },
+    "pmf": [
+     [
+      0,
+      "9/40"
+     ],
+     [
+      1,
+      "29/320"
+     ],
+     [
+      2,
+      "117/1280"
+     ],
+     [
+      3,
+      "59/640"
+     ],
+     [
+      4,
+      "119/1280"
+     ],
+     [
+      5,
+      "3/32"
+     ],
+     [
+      6,
+      "121/1280"
+     ],
+     [
+      7,
+      "61/640"
+     ],
+     [
+      8,
+      "123/1280"
+     ],
+     [
+      9,
+      "1/160"
+     ],
+     [
+      10,
+      "7/1280"
+     ],
+     [
+      11,
+      "3/640"
+     ],
+     [
+      12,
+      "1/256"
+     ],
+     [
+      13,
+      "1/320"
+     ],
+     [
+      14,
+      "3/1280"
+     ],
+     [
+      15,
+      "1/640"
+     ],
+     [
+      16,
+      "1/1280"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "fix-offhand-beside-action-save",
+   "description": "Fireball takes the Action every turn: the offhand Dagger is never made, so the turn is Fireball's alone.",
+   "contract_refs": [
+    "§4.2"
+   ],
+   "build": {
+    "name": "Blade caster",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "str": 18,
+     "dex": 18
+    },
+    "attacks": [
+     {
+      "name": "Dagger",
+      "to_hit": {
+       "ability": "dex",
+       "proficient": true
+      },
+      "damage": "1d4",
+      "damage_type": "piercing",
+      "properties": [
+       "melee",
+       "light",
+       "finesse"
+      ],
+      "action": "bonus_action",
+      "offhand": true
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "save_effect",
+      "name": "Fireball",
+      "ability": "dex",
+      "dc": 15,
+      "dice": "8d6",
+      "type": "fire",
+      "targets": 1
+     }
+    ]
+   },
+   "target": {
+    "ac": 15,
+    "save_bonus": 2
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "223/10",
+     "value": 22.3
+    },
+    "p_zero": {
+     "exact": "0/1",
+     "value": 0.0
+    },
+    "save": {
+     "targets": 1,
+     "dc": 15,
+     "per_target_fail": {
+      "exact": "3/5",
+      "value": 0.6
+     },
+     "expected_damage_per_target": {
+      "exact": "223/10",
+      "value": 22.3
+     },
+     "raw": {
+      "exact": "223/10",
+      "value": 22.3
+     }
+    }
+   }
+  },
+  {
+   "id": "fix-area-save-main-target-stunned-4",
+   "description": "A condition imposed on the main target this turn changes only its save, not every creature's in the area.",
+   "contract_refs": [
+    "§4.3"
+   ],
+   "build": {
+    "name": "Monk",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "str": 18
+    },
+    "attacks": [
+     {
+      "name": "Longsword",
+      "count": 2,
+      "to_hit": {
+       "ability": "str",
+       "proficient": true
+      },
+      "damage": "1d8",
+      "damage_type": "slashing",
+      "properties": [
+       "melee",
+       "versatile"
+      ]
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "condition_on_hit",
+      "name": "Stunning Strike",
+      "condition": "stunned",
+      "ability": "con",
+      "dc": 30
+     },
+     {
+      "kind": "save_effect",
+      "name": "Burst",
+      "ability": "dex",
+      "dc": 15,
+      "dice": "4d6",
+      "type": "fire",
+      "targets": 4,
+      "action_cost": "bonus_action"
+     }
+    ]
+   },
+   "target": {
+    "ac": 15,
+    "saves": {
+     "con": -5,
+     "dex": 2
+    }
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "19149/320",
+     "value": 59.840625
+    },
+    "p_zero": {
+     "exact": "0/1",
+     "value": 0.0
+    },
+    "save": {
+     "targets": 4,
+     "dc": 15,
+     "per_target_fail": {
+      "exact": "3/5",
+      "value": 0.6
+     },
+     "expected_damage_per_target": {
+      "exact": "111/10",
+      "value": 11.1
+     },
+     "raw": {
+      "exact": "222/5",
+      "value": 44.4
+     }
+    }
+   }
+  },
+  {
+   "id": "fix-area-save-main-target-restrained-4",
+   "description": "A condition imposed on the main target this turn changes only its save, not every creature's in the area.",
+   "contract_refs": [
+    "§4.3"
+   ],
+   "build": {
+    "name": "Monk",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "str": 18
+    },
+    "attacks": [
+     {
+      "name": "Longsword",
+      "count": 2,
+      "to_hit": {
+       "ability": "str",
+       "proficient": true
+      },
+      "damage": "1d8",
+      "damage_type": "slashing",
+      "properties": [
+       "melee",
+       "versatile"
+      ]
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "condition_on_hit",
+      "name": "Stunning Strike",
+      "condition": "restrained",
+      "ability": "con",
+      "dc": 30
+     },
+     {
+      "kind": "save_effect",
+      "name": "Burst",
+      "ability": "dex",
+      "dc": 15,
+      "dice": "4d6",
+      "type": "fire",
+      "targets": 4,
+      "action_cost": "bonus_action"
+     }
+    ]
+   },
+   "target": {
+    "ac": 15,
+    "saves": {
+     "con": -5,
+     "dex": 2
+    }
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "2352909/40000",
+     "value": 58.822725
+    },
+    "p_zero": {
+     "exact": "0/1",
+     "value": 0.0
+    },
+    "save": {
+     "targets": 4,
+     "dc": 15,
+     "per_target_fail": {
+      "exact": "3/5",
+      "value": 0.6
+     },
+     "expected_damage_per_target": {
+      "exact": "111/10",
+      "value": 11.1
+     },
+     "raw": {
+      "exact": "222/5",
+      "value": 44.4
+     }
+    }
+   }
+  },
+  {
+   "id": "fix-area-save-main-target-stunned-1",
+   "description": "A condition imposed on the main target this turn changes only its save, not every creature's in the area.",
+   "contract_refs": [
+    "§4.3"
+   ],
+   "build": {
+    "name": "Monk",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "str": 18
+    },
+    "attacks": [
+     {
+      "name": "Longsword",
+      "count": 2,
+      "to_hit": {
+       "ability": "str",
+       "proficient": true
+      },
+      "damage": "1d8",
+      "damage_type": "slashing",
+      "properties": [
+       "melee",
+       "versatile"
+      ]
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "condition_on_hit",
+      "name": "Stunning Strike",
+      "condition": "stunned",
+      "ability": "con",
+      "dc": 30
+     },
+     {
+      "kind": "save_effect",
+      "name": "Burst",
+      "ability": "dex",
+      "dc": 15,
+      "dice": "4d6",
+      "type": "fire",
+      "targets": 1,
+      "action_cost": "bonus_action"
+     }
+    ]
+   },
+   "target": {
+    "ac": 15,
+    "saves": {
+     "con": -5,
+     "dex": 2
+    }
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "8493/320",
+     "value": 26.540625
+    },
+    "p_zero": {
+     "exact": "0/1",
+     "value": 0.0
+    },
+    "save": {
+     "targets": 1,
+     "dc": 15,
+     "per_target_fail": {
+      "exact": "3/5",
+      "value": 0.6
+     },
+     "expected_damage_per_target": {
+      "exact": "111/10",
+      "value": 11.1
+     },
+     "raw": {
+      "exact": "111/10",
+      "value": 11.1
+     }
+    }
+   }
+  },
+  {
+   "id": "fix-archery-skips-thrown-2014",
+   "description": "Archery is for ranged weapons: a thrown javelin is a melee weapon, so +7: 2 x (0.6 x 7.5 + 0.05 x 3.5) = 10.10.",
+   "contract_refs": [
+    "§3.6"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2014",
+    "level": 5,
+    "abilities": {
+     "str": 18
+    },
+    "fighting_style": "archery",
+    "attacks": [
+     {
+      "name": "Javelin",
+      "count": 2,
+      "to_hit": {
+       "ability": "str",
+       "proficient": true
+      },
+      "damage": "1d6",
+      "damage_type": "piercing",
+      "properties": [
+       "ranged",
+       "thrown"
+      ]
+     }
+    ],
+    "modifiers": []
+   },
+   "target": {
+    "ac": 15
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "101/10",
+     "value": 10.1
+    },
+    "p_zero": {
+     "exact": "49/400",
+     "value": 0.1225
+    },
+    "pmf": [
+     [
+      0,
+      "49/400"
+     ],
+     [
+      5,
+      "7/100"
+     ],
+     [
+      6,
+      "511/7200"
+     ],
+     [
+      7,
+      "259/3600"
+     ],
+     [
+      8,
+      "7/96"
+     ],
+     [
+      9,
+      "133/1800"
+     ],
+     [
+      10,
+      "611/7200"
+     ],
+     [
+      11,
+      "47/1800"
+     ],
+     [
+      12,
+      "3701/103680"
+     ],
+     [
+      13,
+      "1181/25920"
+     ],
+     [
+      14,
+      "14441/259200"
+     ],
+     [
+      15,
+      "8573/129600"
+     ],
+     [
+      16,
+      "29483/518400"
+     ],
+     [
+      17,
+      "3049/64800"
+     ],
+     [
+      18,
+      "61/1620"
+     ],
+     [
+      19,
+      "359/12960"
+     ],
+     [
+      20,
+      "8909/518400"
+     ],
+     [
+      21,
+      "791/129600"
+     ],
+     [
+      22,
+      "1153/259200"
+     ],
+     [
+      23,
+      "79/25920"
+     ],
+     [
+      24,
+      "989/518400"
+     ],
+     [
+      25,
+      "67/64800"
+     ],
+     [
+      26,
+      "7/16200"
+     ],
+     [
+      27,
+      "7/64800"
+     ],
+     [
+      28,
+      "7/103680"
+     ],
+     [
+      29,
+      "1/25920"
+     ],
+     [
+      30,
+      "1/51840"
+     ],
+     [
+      31,
+      "1/129600"
+     ],
+     [
+      32,
+      "1/518400"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "fix-dueling-takes-thrown-2014",
+   "description": "Dueling's +2 applies to a thrown javelin (a melee weapon): 2 x (0.6 x 9.5 + 0.05 x 3.5) = 12.70.",
+   "contract_refs": [
+    "§3.6"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2014",
+    "level": 5,
+    "abilities": {
+     "str": 18
+    },
+    "fighting_style": "dueling",
+    "attacks": [
+     {
+      "name": "Javelin",
+      "count": 2,
+      "to_hit": {
+       "ability": "str",
+       "proficient": true
+      },
+      "damage": "1d6",
+      "damage_type": "piercing",
+      "properties": [
+       "ranged",
+       "thrown"
+      ]
+     }
+    ],
+    "modifiers": []
+   },
+   "target": {
+    "ac": 15
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "127/10",
+     "value": 12.7
+    },
+    "p_zero": {
+     "exact": "49/400",
+     "value": 0.1225
+    },
+    "pmf": [
+     [
+      0,
+      "49/400"
+     ],
+     [
+      7,
+      "7/100"
+     ],
+     [
+      8,
+      "511/7200"
+     ],
+     [
+      9,
+      "259/3600"
+     ],
+     [
+      10,
+      "7/96"
+     ],
+     [
+      11,
+      "133/1800"
+     ],
+     [
+      12,
+      "539/7200"
+     ],
+     [
+      13,
+      "7/1200"
+     ],
+     [
+      14,
+      "107/7200"
+     ],
+     [
+      15,
+      "29/1200"
+     ],
+     [
+      16,
+      "17497/518400"
+     ],
+     [
+      17,
+      "5653/129600"
+     ],
+     [
+      18,
+      "13937/259200"
+     ],
+     [
+      19,
+      "8321/129600"
+     ],
+     [
+      20,
+      "28979/518400"
+     ],
+     [
+      21,
+      "3049/64800"
+     ],
+     [
+      22,
+      "61/1620"
+     ],
+     [
+      23,
+      "359/12960"
+     ],
+     [
+      24,
+      "8909/518400"
+     ],
+     [
+      25,
+      "791/129600"
+     ],
+     [
+      26,
+      "1153/259200"
+     ],
+     [
+      27,
+      "79/25920"
+     ],
+     [
+      28,
+      "989/518400"
+     ],
+     [
+      29,
+      "67/64800"
+     ],
+     [
+      30,
+      "7/16200"
+     ],
+     [
+      31,
+      "7/64800"
+     ],
+     [
+      32,
+      "7/103680"
+     ],
+     [
+      33,
+      "1/25920"
+     ],
+     [
+      34,
+      "1/51840"
+     ],
+     [
+      35,
+      "1/129600"
+     ],
+     [
+      36,
+      "1/518400"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "fix-archery-skips-thrown-2024",
+   "description": "Archery is for ranged weapons: a thrown javelin is a melee weapon, so +7: 2 x (0.6 x 7.5 + 0.05 x 3.5) = 10.10.",
+   "contract_refs": [
+    "§3.6"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "str": 18
+    },
+    "fighting_style": "archery",
+    "attacks": [
+     {
+      "name": "Javelin",
+      "count": 2,
+      "to_hit": {
+       "ability": "str",
+       "proficient": true
+      },
+      "damage": "1d6",
+      "damage_type": "piercing",
+      "properties": [
+       "ranged",
+       "thrown"
+      ]
+     }
+    ],
+    "modifiers": []
+   },
+   "target": {
+    "ac": 15
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "101/10",
+     "value": 10.1
+    },
+    "p_zero": {
+     "exact": "49/400",
+     "value": 0.1225
+    },
+    "pmf": [
+     [
+      0,
+      "49/400"
+     ],
+     [
+      5,
+      "7/100"
+     ],
+     [
+      6,
+      "511/7200"
+     ],
+     [
+      7,
+      "259/3600"
+     ],
+     [
+      8,
+      "7/96"
+     ],
+     [
+      9,
+      "133/1800"
+     ],
+     [
+      10,
+      "611/7200"
+     ],
+     [
+      11,
+      "47/1800"
+     ],
+     [
+      12,
+      "3701/103680"
+     ],
+     [
+      13,
+      "1181/25920"
+     ],
+     [
+      14,
+      "14441/259200"
+     ],
+     [
+      15,
+      "8573/129600"
+     ],
+     [
+      16,
+      "29483/518400"
+     ],
+     [
+      17,
+      "3049/64800"
+     ],
+     [
+      18,
+      "61/1620"
+     ],
+     [
+      19,
+      "359/12960"
+     ],
+     [
+      20,
+      "8909/518400"
+     ],
+     [
+      21,
+      "791/129600"
+     ],
+     [
+      22,
+      "1153/259200"
+     ],
+     [
+      23,
+      "79/25920"
+     ],
+     [
+      24,
+      "989/518400"
+     ],
+     [
+      25,
+      "67/64800"
+     ],
+     [
+      26,
+      "7/16200"
+     ],
+     [
+      27,
+      "7/64800"
+     ],
+     [
+      28,
+      "7/103680"
+     ],
+     [
+      29,
+      "1/25920"
+     ],
+     [
+      30,
+      "1/51840"
+     ],
+     [
+      31,
+      "1/129600"
+     ],
+     [
+      32,
+      "1/518400"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "fix-dueling-takes-thrown-2024",
+   "description": "Dueling's +2 applies to a thrown javelin (a melee weapon): 2 x (0.6 x 9.5 + 0.05 x 3.5) = 12.70.",
+   "contract_refs": [
+    "§3.6"
+   ],
+   "build": {
+    "name": "L5 test build",
+    "edition": "2024",
+    "level": 5,
+    "abilities": {
+     "str": 18
+    },
+    "fighting_style": "dueling",
+    "attacks": [
+     {
+      "name": "Javelin",
+      "count": 2,
+      "to_hit": {
+       "ability": "str",
+       "proficient": true
+      },
+      "damage": "1d6",
+      "damage_type": "piercing",
+      "properties": [
+       "ranged",
+       "thrown"
+      ]
+     }
+    ],
+    "modifiers": []
+   },
+   "target": {
+    "ac": 15
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "127/10",
+     "value": 12.7
+    },
+    "p_zero": {
+     "exact": "49/400",
+     "value": 0.1225
+    },
+    "pmf": [
+     [
+      0,
+      "49/400"
+     ],
+     [
+      7,
+      "7/100"
+     ],
+     [
+      8,
+      "511/7200"
+     ],
+     [
+      9,
+      "259/3600"
+     ],
+     [
+      10,
+      "7/96"
+     ],
+     [
+      11,
+      "133/1800"
+     ],
+     [
+      12,
+      "539/7200"
+     ],
+     [
+      13,
+      "7/1200"
+     ],
+     [
+      14,
+      "107/7200"
+     ],
+     [
+      15,
+      "29/1200"
+     ],
+     [
+      16,
+      "17497/518400"
+     ],
+     [
+      17,
+      "5653/129600"
+     ],
+     [
+      18,
+      "13937/259200"
+     ],
+     [
+      19,
+      "8321/129600"
+     ],
+     [
+      20,
+      "28979/518400"
+     ],
+     [
+      21,
+      "3049/64800"
+     ],
+     [
+      22,
+      "61/1620"
+     ],
+     [
+      23,
+      "359/12960"
+     ],
+     [
+      24,
+      "8909/518400"
+     ],
+     [
+      25,
+      "791/129600"
+     ],
+     [
+      26,
+      "1153/259200"
+     ],
+     [
+      27,
+      "79/25920"
+     ],
+     [
+      28,
+      "989/518400"
+     ],
+     [
+      29,
+      "67/64800"
+     ],
+     [
+      30,
+      "7/16200"
+     ],
+     [
+      31,
+      "7/64800"
+     ],
+     [
+      32,
+      "7/103680"
+     ],
+     [
+      33,
+      "1/25920"
+     ],
+     [
+      34,
+      "1/51840"
+     ],
+     [
+      35,
+      "1/129600"
+     ],
+     [
+      36,
+      "1/518400"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "fix-crit-or-kill-is-crit-in-closed-form",
+   "description": "2014 GWM's bonus attack on crit_or_kill: no hit points in the closed form, so the crit trigger alone: 19.611625.",
+   "contract_refs": [
+    "§4.2",
+    "§8.2"
+   ],
+   "build": {
+    "name": "2014 L5 Fighter",
+    "edition": "2014",
+    "level": 5,
+    "abilities": {
+     "str": 18
+    },
+    "fighting_style": "gwf",
+    "attacks": [
+     {
+      "name": "Greatsword",
+      "count": 2,
+      "to_hit": {
+       "ability": "str",
+       "proficient": true
+      },
+      "damage": "2d6",
+      "damage_type": "slashing",
+      "properties": [
+       "melee",
+       "heavy",
+       "two-handed"
+      ]
+     }
+    ],
+    "modifiers": [
+     {
+      "kind": "power_attack",
+      "name": "Great Weapon Master (-5/+10)",
+      "policy": "auto"
+     },
+     {
+      "kind": "extra_attack",
+      "name": "GWM crit bonus attack",
+      "attack": "Greatsword",
+      "action": "bonus_action",
+      "trigger": "crit_or_kill"
+     }
+    ]
+   },
+   "target": {
+    "ac": 15
+   },
+   "rulings": null,
+   "horizon": {
+    "kind": "round1",
+    "rounds": null,
+    "encounters_per_day": null,
+    "short_rests": null
+   },
+   "expected": {
+    "dpr": {
+     "exact": "156893/8000",
+     "value": 19.611625
+    },
+    "p_zero": {
+     "exact": "9/25",
+     "value": 0.36
+    },
+    "power_attack": [
+     {
+      "probability": "1/1",
+      "on": true
+     }
+    ]
+   }
   }
  ],
  "deltas": [

@@ -25,6 +25,9 @@ namespace DndMcp.Domain.Dpr;
 /// </summary>
 public static class DprLimits
 {
+    /// <summary>An Ability Score Improvement raises a score to at most 20 (both editions), for the ASI yardstick.</summary>
+    public const int AsiCap = 20;
+
     /// <summary>
     /// Work units for one evaluation, and for one whole balance call: turn states expanded plus the multiply-adds of
     /// every damage convolution. A level-5 fighter's fight horizon spends about a thousand; a build with nearly every

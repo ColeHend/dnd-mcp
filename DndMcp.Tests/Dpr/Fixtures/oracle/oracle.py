@@ -282,6 +282,11 @@ DAMAGE_TYPES = ("acid", "bludgeoning", "cold", "fire", "force", "lightning", "ne
 ADV_CONDITIONS = {"restrained", "blinded", "stunned", "paralyzed", "unconscious"}
 AUTOCRIT_CONDITIONS = {"paralyzed", "unconscious"}
 AUTOFAIL_CONDITIONS = {"stunned", "paralyzed", "unconscious"}
+# Incapacitated (stunned, paralyzed, unconscious) or Speed 0 (restrained) ends Dodge (2014 and 2024 Dodge text); a
+# blinded dodger cannot see its attacker, so attack rolls lose Dodge's Disadvantage too, but its Dex saves keep Advantage.
+INCAPACITATED = {"stunned", "paralyzed", "unconscious"}
+DODGE_LOST = INCAPACITATED | {"restrained"}
+DODGE_LOST_FOR_ATTACKS = DODGE_LOST | {"blinded"}
 DEFAULT_RULINGS = {"hew_gets_pb": False, "cleave_part_of_attack_action": False, "gwf_on_riders": False,
                    "savage_attacker_on_crit_dice": False}
 
@@ -410,7 +415,8 @@ def resolve_build(spec, rulings):
             dtype=a.get("damage_type"), ability_to_damage=atd, ability_part=ability_part, offhand=offhand,
             melee=melee, ranged=ranged, spell=spell, weapon=not spell, props=props, mastery=a.get("mastery"),
             remap=(), ignore_cover=False, lucky=False, elven=False, crit_min=20, bdice=None, bonus=0,
-            dueling=2 if (style == "dueling" and melee and not spell and "two-handed" not in props) else 0,
+            # A thrown weapon is a melee weapon thrown (javelin, dagger): Dueling takes it, Archery does not (review fix).
+            dueling=2 if (style == "dueling" and (melee or "thrown" in props) and not spell and "two-handed" not in props) else 0,
         ))
     rb.attacks = attacks
     by_name = {a.lname: a for a in attacks}
@@ -517,8 +523,8 @@ def resolve_build(spec, rulings):
                                 slot=mid in rb.slots))
         elif kind == "ignore_cover":
             ignores.append(f)
-        elif kind in ("ac", "resistance", "temp_hp"):
-            pass  # defensive: accepted, no effect on damage dealt
+        elif kind in ("ac", "resistance", "temp_hp", "heal"):
+            pass  # defensive and healing: accepted, no effect on damage dealt (the simulator's)
         else:
             raise ValueError(kind)
 
@@ -528,7 +534,7 @@ def resolve_build(spec, rulings):
             bonus = atk.total
         else:
             bonus = atk.mod + (pb if atk.proficient else 0) + atk.base_bonus_extra
-            if style == "archery" and atk.ranged and atk.weapon:
+            if style == "archery" and atk.ranged and atk.weapon and "thrown" not in atk.props:
                 bonus += 2
         bonus += sum(v for f, v in to_hit_amounts if applies(f, atk))
         atk.bonus = bonus
@@ -547,6 +553,7 @@ def resolve_build(spec, rulings):
         atk.ignore_cover = any(applies(f, atk) for f in ignores)
     rb.slot_mids = tuple(sorted(rb.slots))
     rb.action_save = next((s for s in rb.saves if s.action_cost == "action"), None)
+    rb.gates_offhand = any(a.offhand and a.action == "bonus_action" for a in attacks)
     return rb
 
 
@@ -609,9 +616,11 @@ def total_after_adjust(by_type, tg):
     return out
 
 
-def is_attack_action(rb, kind, for_flat_bonus):
+def is_attack_action(rb, kind, for_flat_bonus, atk):
+    # A spell attack made with the Action is the spell's casting action, not the Attack action (2024 "Attack [Action]: an
+    # attack roll with a weapon or an Unarmed Strike"; review fix).
     if kind in ("action", "surge"):
-        return True
+        return atk.weapon
     if kind == "cleave":
         return rb.rulings["cleave_part_of_attack_action"]
     if kind == "hew":
@@ -622,7 +631,7 @@ def is_attack_action(rb, kind, for_flat_bonus):
 def rider_applies(rb, r, atk, kind):
     if not rb.applies(r.filt, atk):
         return False
-    if r.aao and not is_attack_action(rb, kind, False):
+    if r.aao and not is_attack_action(rb, kind, False, atk):
         return False
     return True
 
@@ -675,7 +684,7 @@ def hit_pmf(cc, ai, kind, crit, riders_spent, sa, pa_on_atk):
     else:
         add_flat(t, atk.ability_part)
     for b in rb.bonuses:
-        if rb.applies(b.filt, atk) and (not b.aao or is_attack_action(rb, kind, True)):
+        if rb.applies(b.filt, atk) and (not b.aao or is_attack_action(rb, kind, True, atk)):
             add_flat(t, b.amount)
     add_flat(t, atk.dueling)
     if pa_on_atk:
@@ -839,7 +848,7 @@ def roll(tc, st, atk, kind):
             dis = True
     if conds & ADV_CONDITIONS:
         adv = True
-    if "dodging" in conds:
+    if "dodging" in conds and not conds & DODGE_LOST_FOR_ATTACKS:
         dis = True
     mode = combine_modes(adv, dis)
     autocrit = atk.melee and bool(conds & AUTOCRIT_CONDITIONS)
@@ -905,7 +914,7 @@ def save_fail_for(tc, ability, dc, magical, conds):
     dis = False
     if ability == "dex" and "restrained" in conds:
         dis = True
-    if ability == "dex" and "dodging" in conds:
+    if ability == "dex" and "dodging" in conds and not conds & DODGE_LOST:
         adv = True
     return save_fail_odds(bonus, dc, combine_modes(adv, dis), tg.save_dice, autofail)
 
@@ -1073,13 +1082,17 @@ def ba_phase(tc, st):
     rb = tc.rb
     options = []
     if st.ba:
-        ba_q = tuple((a.idx, "ba") for a in rb.attacks if a.action == "bonus_action" for _ in range(a.count))
+        # The Light weapon's offhand attack needs the Attack action this turn (2014 Two-Weapon Fighting, 2024 Light).
+        attack_action = "attack_action" in st.trig
+        ba_q = tuple((a.idx, "ba") for a in rb.attacks if a.action == "bonus_action" and (attack_action or not a.offhand)
+                     for _ in range(a.count))
         if ba_q:
             options.append(("ba_attacks", ba_q, None))
         for ex in rb.extras:
             if ex.action != "bonus_action":
                 continue
-            if ex.trigger == "crit" and "crit" not in st.trig:
+            # crit_or_kill: the closed form has no hit points, so only the crit can trigger it.
+            if ex.trigger in ("crit", "crit_or_kill") and "crit" not in st.trig:
                 continue
             if ex.trigger == "hit" and "hit" not in st.trig:
                 continue
@@ -1102,7 +1115,7 @@ def ba_phase(tc, st):
         s = st._replace(ba=False)
         if kind == "save":
             child = leaf(t, s)
-            return r_shift(child, save_turn_pmf(t, x, t.tg.conds_initial | st.conds), {}, {}, F0, t.want)
+            return r_shift(child, save_turn_pmf(t, x, st.conds), {}, {}, F0, t.want)
         duses = {}
         if x is not None and x.slot:
             s = s._replace(uses=uses_dec(rb, s.uses, x.mid))
@@ -1137,9 +1150,11 @@ def run_turn(tc, carry, first_round):
     if action_free and rb.action_save is not None:
         se = rb.action_save
         child = go(tc, st, (), "action")
-        return r_shift(child, save_turn_pmf(tc, se, tc.tg.conds_initial), {}, {}, F0, tc.want)
+        return r_shift(child, save_turn_pmf(tc, se, frozenset()), {}, {}, F0, tc.want)
+    attack_action = False
     if action_free:
         queue = tuple((a.idx, "action") for a in rb.attacks if a.action == "action" for _ in range(a.count))
+        attack_action = any(rb.attacks[i].weapon for i, _ in queue)
     for ex in rb.extras:
         if ex.action != "action":
             continue
@@ -1147,9 +1162,12 @@ def run_turn(tc, carry, first_round):
         if ex.slot and left is not None and left <= 0:
             continue
         queue += tuple((ex.attack, "surge") for _ in range(ex.count))
+        attack_action = attack_action or rb.attacks[ex.attack].weapon  # Action Surge: a second Attack action
         if ex.slot:
             st = st._replace(uses=uses_dec(rb, st.uses, ex.mid))
         duses[ex.mid] = F1
+    if attack_action and rb.gates_offhand:
+        st = st._replace(trig=st.trig | {"attack_action"})
     return r_shift(go(tc, st, queue, "action"), {0: F1}, duses, {}, F0, tc.want)
 
 
@@ -1232,10 +1250,14 @@ def save_raw_pmf(cc, se):
     return {x + se.amount: w for x, w in pmf.items()}
 
 
-def save_outcome_damage(cc, se, x):
-    """(damage on a failed save, damage on a success) for raw roll x, after halving / evasion / adjustments."""
+def save_outcome_damage(cc, se, x, conds=frozenset()):
+    """(damage on a failed save, damage on a success) for raw roll x, after halving / evasion / adjustments. conds: the
+    creature's conditions; 2024 Evasion does not work while it is Incapacitated (review fix), 2014 Evasion has no such
+    clause."""
     tg = cc.tg
     evasion = tg.evasion and se.ability == "dex" and se.on_success == "half"
+    if cc.rb.edition == "2024" and set(conds) & INCAPACITATED:
+        evasion = False
     d_fail = adjust(x, se.dtype, tg, half=evasion)
     if se.on_success == "half" and not evasion:
         d_succ = adjust(x, se.dtype, tg, half=True)
@@ -1248,24 +1270,33 @@ def save_fail_effect(tc, se, conds):
     return save_fail_for(tc, se.ability, se.dc, se.magical, set(conds))
 
 
-def save_turn_pmf(tc, se, conds):
-    """The TOTAL damage across the effect's targets: one shared roll x, independent saves, k failures ->
-    k * dmgF(x) + (n - k) * dmgS(x)."""
+def save_turn_pmf(tc, se, applied):
+    """The TOTAL damage across the effect's targets: one shared roll x, independent saves. The first target is the main
+    target, with the conditions imposed on it this turn (applied) as well as the target spec's; the other n - 1 have the
+    target spec's condition only (review fix). Given x: the main target fails with F1 (dmgF1(x)) or not (dmgS1(x)), and k
+    of the others fail with F -> + k * dmgF(x) + (n - 1 - k) * dmgS(x)."""
     cc = tc.cc
-    key = ("save", se.mid, frozenset(conds))
+    key = ("save", se.mid, frozenset(applied))
     if key in cc.memo:
         return cc.memo[key]
-    F = save_fail_effect(tc, se, conds)
+    initial = tc.tg.conds_initial
+    main = initial | frozenset(applied)
+    F1 = save_fail_effect(tc, se, main)
+    F = save_fail_effect(tc, se, initial)
     n = se.targets
     out = {}
     for x, px in save_raw_pmf(cc, se).items():
-        dF, dS = save_outcome_damage(cc, se, x)
-        for k in range(n + 1):
-            pk = math.comb(n, k) * F ** k * (1 - F) ** (n - k)
-            if pk == 0:
+        dF1, dS1 = save_outcome_damage(cc, se, x, main)
+        dF, dS = save_outcome_damage(cc, se, x, initial)
+        for first, pfirst in ((dF1, F1), (dS1, 1 - F1)):
+            if pfirst == 0:
                 continue
-            v = k * dF + (n - k) * dS
-            out[v] = out.get(v, F0) + px * pk
+            for k in range(n):
+                pk = math.comb(n - 1, k) * F ** k * (1 - F) ** (n - 1 - k)
+                if pk == 0:
+                    continue
+                v = first + k * dF + (n - 1 - k) * dS
+                out[v] = out.get(v, F0) + px * pfirst * pk
     cc.memo[key] = out
     return out
 
@@ -1283,7 +1314,7 @@ def save_stats(cc):
     kd = [F0] * (n + 1)
     hp = tg.hp
     for x, px in save_raw_pmf(cc, se).items():
-        dF, dS = save_outcome_damage(cc, se, x)
+        dF, dS = save_outcome_damage(cc, se, x, tg.conds_initial)
         raw += px * (F * dF + (1 - F) * dS)
         if hp is not None:
             eff += px * (F * min(dF, hp) + (1 - F) * min(dS, hp))
@@ -2207,6 +2238,119 @@ def define_cases():
          golden=[("dpr", 5.75, 1e-12)])
     case("target-null-uses-level-row", "No target: the CR = level row (L5 -> AC 15).", ["§3.5", "§4.5"], ls1, None,
          golden=[("dpr", 5.75, 1e-12)])
+
+    # ============================== Phase 4 review fixes (Phase 5, agent F) =========================================
+    # Each reading is in the README ("Readings changed by the Phase 4 review"); the goldens are worked by hand.
+    rapier = weapon("Rapier", "1d8", "piercing", ["melee", "finesse"], ability="dex")
+    case("fix-untyped-rider-takes-attack-type", "An untyped Sneak Attack on a piercing rapier is resisted with it: "
+         "0.6 x 9.25 + 0.05 x 16.75 = 6.3875.", ["§4.1"],
+         plain5([rapier], [md("extra_damage", name="Sneak Attack", dice="3d6", when="first_hit_per_turn")],
+                abilities={"dex": 18}), {"ac": 15, "resistances": ["piercing"]}, golden=[("dpr", 6.3875, 1e-12)])
+    fire_bolt = weapon("Fire Bolt", "1d10", "fire", ["ranged", "spell"], ability="dex", ability_to_damage=False,
+                       cantrip="dice")
+    case("fix-attack-action-only-skips-spell-attacks", "A spell attack made with the Action is not the Attack action: "
+         "an attack_action_only +3 adds nothing to Fire Bolt (7.70).", ["§4.2"],
+         plain5([fire_bolt], [md("bonus_damage", name="Only AA", amount=3, attack_action_only=True)],
+                abilities={"dex": 18}), {"ac": 15}, golden=[("dpr", 7.7, 1e-12)])
+
+    blade2 = weapon("Blade", "1d8", "slashing", ["melee"], count=2, ability="dex")
+    dodging = {"ac": 15, "save_bonus": 0, "condition": "dodging"}
+    for cond, ability, value in (("stunned", "con", 9.0196375), ("restrained", "str", 9.0196375),
+                                 ("blinded", "con", 9.0196375), ("paralyzed", "con", 10.5026125),
+                                 ("prone", "str", 8.11231875)):
+        case(f"fix-dodge-lost-{cond}", f"A dodging target {cond} this turn: Dodge is lost when incapacitated or "
+             "restrained, its attack Disadvantage when blinded; prone keeps it.", ["§4.1"],
+             plain5([blade2], [md("condition_on_hit", name="Hold", condition=cond, ability=ability, dc=40)],
+                    abilities={"dex": 18}), dodging, golden=[("dpr", value, 1e-12)])
+    blade1 = weapon("Blade", "1d8", "slashing", ["melee"], ability="dex")
+    push = md("save_effect", name="Push", ability="dex", dc=13, amount=10, on_success="none",
+              action_cost="bonus_action")
+    for cond, ability, value in (("restrained", "str", 9.2305), ("blinded", "con", 7.2025)):
+        case(f"fix-dodge-dex-save-{cond}", f"A dodging target {cond} this turn, then a Dex save: restrained loses "
+             "Dodge's Advantage (and has Disadvantage), blinded keeps it.", ["§4.1", "§4.3"],
+             plain5([blade1], [md("condition_on_hit", name="Hold", condition=cond, ability=ability, dc=40), push],
+                    abilities={"dex": 18}), dodging, golden=[("dpr", value, 1e-12)], pmf=False)
+
+    def fireball1(edition):
+        return build("Wizard", 5, [], [md("save_effect", name="Fireball", ability="dex", dc=15, dice="8d6", type="fire",
+                                          targets=1)], edition=edition)
+    for edition, cond, value in (("2024", "stunned", 28), ("2024", "paralyzed", 28), ("2024", "unconscious", 28),
+                                 ("2014", "stunned", 13.75), ("2024", "restrained", 11.55)):
+        case(f"fix-evasion-{edition}-{cond}", f"{edition} Evasion against a {cond} target: 2024 Evasion does not "
+             "work while Incapacitated; 2014 has no such clause; restrained is not Incapacitated.", ["§4.3"],
+             fireball1(edition), {"save_bonus": 2, "evasion": True, "condition": cond, "hp": 20},
+             golden=[("dpr", value, 1e-12)], pmf=False)
+    for edition in ("2014", "2024"):
+        for evasion in (False, True):
+            target = {"ac": 1, "saves": {"con": -5, "dex": 2}}
+            if evasion:
+                target["evasion"] = True
+            case(f"fix-evasion-stunned-this-turn-{edition}-{'evasion' if evasion else 'plain'}",
+                 "Stunning Strike (always lands on a hit) then a Bonus Action Dex-half 8d6: a 2024 target stunned "
+                 "this turn loses Evasion for it.", ["§4.3"],
+                 build("Monk", 5, [LONGSWORD],
+                       [md("condition_on_hit", name="Stunning Strike", condition="stunned", ability="con", dc=30),
+                        md("save_effect", name="Burst", ability="dex", dc=15, dice="8d6", type="fire",
+                           action_cost="bonus_action")], edition=edition, abilities=STR18), target, pmf=False)
+
+    short2 = weapon("Shortsword", "1d6", "piercing", ["melee", "finesse", "light"], count=2, ability="dex")
+    dagger = weapon("Dagger", "1d4", "piercing", ["melee", "light", "finesse"], ability="dex", action="bonus_action",
+                    offhand=True)
+    bless_setup = md("to_hit", name="Bless", dice="1d4", setup="action")
+    surge = md("extra_attack", name="Action Surge", attack="Shortsword", count=2, action="action",
+               resource={"uses": 1, "per": "short_rest"})
+    both = {"str": 18, "dex": 18}
+    case("fix-offhand-needs-attack-action-setup", "Bless set up with round 1's Action: no Attack action, so no "
+         "offhand attack either: 0.", ["§4.2"], plain5([short2, dagger], [bless_setup], abilities=both), {"ac": 15},
+         golden=[("dpr", 0, 0)])
+    case("fix-offhand-after-action-surge", "Bless set up with the Action, then Action Surge's two blessed swings: a "
+         "second Attack action, so the blessed Dagger follows: 2 x 5.9875 + 2.0625 = 14.0375.", ["§4.2"],
+         plain5([short2, dagger], [bless_setup, surge], abilities=both), {"ac": 15},
+         golden=[("dpr", 14.0375, 1e-12)])
+    case("fix-offhand-setup-fight", "The Bless setup build over 3 rounds: round 1 nothing, rounds 2-3 the swings "
+         "and the offhand Dagger: 2 x 14.0375 / 3.", ["§4.2", "§4.4"],
+         plain5([short2, dagger], [bless_setup], abilities=both), {"ac": 15}, horizon=fight_h(3),
+         golden=[("dpr", 2 * 14.0375 / 3, 1e-12)])
+    spiritual = weapon("Spiritual Weapon", "1d8", "force", ["spell"], ability="dex", action="bonus_action",
+                       ability_to_damage=False)
+    case("fix-offhand-setup-keeps-other-bonus-attacks", "In the setup round only the non-offhand bonus_action "
+         "attack is made: the blessed Spiritual Weapon, 0.725 x 4.5 + 0.05 x 9.", ["§4.2"],
+         plain5([short2, dagger, spiritual], [bless_setup], abilities=both), {"ac": 15},
+         golden=[("dpr", 0.725 * 4.5 + 0.05 * 9, 1e-12)])
+    fireball_dagger = build("Blade caster", 5, [dagger], [md("save_effect", name="Fireball", ability="dex", dc=15,
+                                                             dice="8d6", type="fire", targets=1)], abilities=both)
+    case("fix-offhand-beside-action-save", "Fireball takes the Action every turn: the offhand Dagger is never "
+         "made, so the turn is Fireball's alone.", ["§4.2"], fireball_dagger, {"ac": 15, "save_bonus": 2},
+         golden=[("dpr", 22.3, 1e-12)], pmf=False)
+
+    def stun_then_burst(cond, targets, extra=None):
+        burst = md("save_effect", name="Burst", ability="dex", dc=15, dice="4d6", type="fire", targets=targets,
+                   action_cost="bonus_action")
+        if extra:
+            burst.update(extra)
+        return build("Monk", 5, [LONGSWORD2],
+                     [md("condition_on_hit", name="Stunning Strike", condition=cond, ability="con", dc=30), burst],
+                     abilities=STR18)
+    crowd = {"ac": 15, "saves": {"con": -5, "dex": 2}}
+    swings = 5.75 + 0.65 * 7.8975 + 0.35 * 5.75
+    for cond, targets, burst_value in (("stunned", 4, 46.94475), ("restrained", 4, 45.92685), ("stunned", 1, 13.64475)):
+        case(f"fix-area-save-main-target-{cond}-{targets}", "A condition imposed on the main target this turn "
+             "changes only its save, not every creature's in the area.", ["§4.3"],
+             stun_then_burst(cond, targets), crowd, pmf=False,
+             golden=[("dpr", (swings if cond == "stunned" else 5.75 + 0.65 * 7.8975 + 0.35 * 5.75) + burst_value, 1e-9)])
+
+    javelin2 = weapon("Javelin", "1d6", "piercing", ["ranged", "thrown"], count=2)
+    for edition in ("2014", "2024"):
+        case(f"fix-archery-skips-thrown-{edition}", "Archery is for ranged weapons: a thrown javelin is a melee "
+             "weapon, so +7: 2 x (0.6 x 7.5 + 0.05 x 3.5) = 10.10.", ["§3.6"],
+             plain5([javelin2], edition=edition, style="archery"), {"ac": 15}, golden=[("dpr", 10.1, 1e-12)])
+        case(f"fix-dueling-takes-thrown-{edition}", "Dueling's +2 applies to a thrown javelin (a melee weapon): "
+             "2 x (0.6 x 9.5 + 0.05 x 3.5) = 12.70.", ["§3.6"],
+             plain5([javelin2], edition=edition, style="dueling"), {"ac": 15}, golden=[("dpr", 12.7, 1e-12)])
+    case("fix-crit-or-kill-is-crit-in-closed-form", "2014 GWM's bonus attack on crit_or_kill: no hit points in the "
+         "closed form, so the crit trigger alone: 19.611625.", ["§4.2", "§8.2"],
+         fighter14([PA_AUTO, dict(GWM14_BA, trigger="crit_or_kill")]), {"ac": 15},
+         golden=[("dpr", 19.611625, 1e-12)])
 
 
 # ----------------------------------------------------------------------------------------------------------------------

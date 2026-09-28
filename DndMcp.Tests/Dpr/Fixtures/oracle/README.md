@@ -1,8 +1,9 @@
 # DPR oracle: independent brute-force cases for the Phase 4 engine
 
 `oracle.py` computes the damage-per-round semantics of the Phase 4 build contract (§4) by a method deliberately
-unlike the C# engine's, and writes `cases.json`: 261 builds with their exact expected results, 33 derived deltas and a
-reference block of non-DPR goldens. The C# tests (agent E) run each case through `DprEngine` and must agree.
+unlike the C# engine's, and writes `cases.json`: 292 builds with their exact expected results, 33 derived deltas and a
+reference block of non-DPR goldens. The 31 `fix-*` cases were added in Phase 5 for the Phase 4 review's rules fixes (see
+"Readings changed by the Phase 4 review" at the end); every earlier case kept its numbers exactly. The C# tests (agent E) run each case through `DprEngine` and must agree.
 
 The oracle was written from the contract and the research notes only. It does not read the C# engine or agent F's
 resolver, so a shared misreading is the only way the two can agree while both are wrong. Every place the contract left
@@ -214,7 +215,8 @@ computed. Items 1–3 change numbers in committed cases. The rest are either pin
     - U = uses for `long_rest`, or uses × (S + 1) for `short_rest`.
     - E may be fractional (the light preset's 3.5).
 22. **Unconscious is not also treated as prone** (the contract lists them separately), so a ranged attack against an
-    unconscious target has advantage.
+    unconscious target has advantage. (The C# engine reads Unconscious as Prone too, per both editions' condition text;
+    no case has a ranged attack against an unconscious target, so no number depends on this reading.)
 23. **Topple is always attempted** on a hit against a target that is not prone, even though prone gives ranged
     attacks disadvantage. No case mixes Topple with ranged attacks. Its DC uses the to-hit ability even with `total`.
     The target's `save_dice` apply, and the save is not magical.
@@ -230,3 +232,40 @@ computed. Items 1–3 change numbers in committed cases. The rest are either pin
 29. **Lucky** is not actually open. Rerolling one natural 1 whenever any die shows one gives the same kept-face
     distribution as rerolling only when it can help, because rerolling a 1 never lowers the max, or the min when the
     other die is higher. §2's closed forms (1.1·p² and so on) come out of the enumeration.
+
+## Readings changed by the Phase 4 review (Phase 5)
+
+The Phase 4 review (rules lens, each finding adversarially verified) found five places where the contract's first
+reading was not the rules. The oracle now follows the fixed reading; no case that existed before changed its numbers
+(`cases.json` was regenerated and compared), and each new reading is pinned by `fix-*` cases with hand-worked goldens.
+
+30. **The Attack action is weapon attacks only.** A spell attack made with the Action (Fire Bolt, Eldritch Blast) is
+    the spell's casting action, not the Attack action (2024 "Attack [Action]: an attack roll with a weapon or an
+    Unarmed Strike"): `attack_action_only` flat bonuses and riders skip it, and it does not enable the offhand attack.
+    Pinned by `fix-attack-action-only-skips-spell-attacks` (7.70).
+31. **Dodge is lost** while the target is Incapacitated (stunned, paralyzed, unconscious) or its Speed is 0
+    (restrained), in both editions ("You lose this benefit if you are incapacitated … or if your speed drops to 0").
+    A blinded dodger cannot see its attacker, so attack rolls lose Dodge's Disadvantage, but its Dex saves keep the
+    Advantage. Prone keeps Dodge. Pinned by `fix-dodge-lost-*` and `fix-dodge-dex-save-*` (9.0196375, 10.5026125,
+    8.11231875, 9.2305, 7.2025).
+32. **2024 Evasion does not work while the creature is Incapacitated** ("You don't benefit from this feature if you
+    have the Incapacitated condition"); 2014 Evasion has no such clause. The conditions read are the creature's own:
+    the target spec's, plus for the main target those imposed on it this turn. Pinned by `fix-evasion-*`.
+33. **A save effect's targets.** The first target is the main target (the one the turn's attacks hit): a condition
+    imposed on it this turn changes its save (and its Evasion) only; the other creatures in the area have the target
+    spec's condition alone. Given the shared roll x, the main target fails with its own chance and the other n − 1
+    fail binomially with theirs. Pinned by `fix-area-save-main-target-*` and `fix-evasion-stunned-this-turn-*`.
+34. **The offhand attack needs the Attack action** that turn (2014 Two-Weapon Fighting "When you take the Attack
+    action …", 2024 Light "When you take the Attack action on your turn …"): taken when the Action makes at least one
+    weapon attack, or when an Action Surge makes weapon attacks. Not after a `setup: action`, not beside an Action save
+    effect. Other `bonus_action` attacks (Spiritual Weapon) are unaffected. Pinned by `fix-offhand-*` (0, 14.0375,
+    9.358333…, 3.7125, 22.3).
+35. **Archery and Dueling read the weapon's category**: an attack with `ranged` and `thrown` is a melee weapon thrown
+    (javelin, dagger, handaxe), so Archery does not apply and Dueling does. Pinned by `fix-archery-skips-thrown-*`
+    (10.10) and `fix-dueling-takes-thrown-*` (12.70), both editions.
+36. **`trigger: crit_or_kill`** (a DSL addition for the simulator) is `crit` here: the closed form has no hit points to
+    reduce to 0. Pinned by `fix-crit-or-kill-is-crit-in-closed-form` (19.611625).
+37. **Reading 7 is now the engine's too**: the C# engine used to treat an untyped rider as typeless; it now deals the
+    attack's type, as this oracle always did. Pinned by `fix-untyped-rider-takes-attack-type` (6.3875; 10.06 was the
+    typeless figure).
+

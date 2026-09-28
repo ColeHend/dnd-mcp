@@ -14,8 +14,8 @@ namespace DndMcp.Domain.Features;
 /// <para>
 /// <b>Deliberate narrowing of "common fields"</b>: <c>attacks</c> is not taken by kinds that do not act on attacks
 /// (extra_attack names its one <c>attack</c>; save_effect and the defensive kinds have none), and <c>resource</c> only by
-/// kinds that are SPENT per use (extra_damage, extra_attack, save_effect, condition_on_hit) or that the simulator will
-/// track (the defensive kinds). A resource on an always-on modifier such as to_hit has no per-use meaning in the DPR
+/// kinds that are SPENT per use (extra_damage, extra_attack, save_effect, condition_on_hit, heal) or that the simulator
+/// will track (the defensive kinds). A resource on an always-on modifier such as to_hit has no per-use meaning in the DPR
 /// engine, and accepting it would suggest it limits something.
 /// </para>
 /// </summary>
@@ -69,6 +69,8 @@ public static class ModifierFields
         new("magical", m => m.Magical is not null),
         new("condition", m => m.Condition is not null),
         new("cantrip", m => m.Cantrip is not null),
+        new("duration", m => m.Duration is not null),
+        new("self_only", m => m.SelfOnly is not null),
     ];
 
     /// <summary>The fields each kind takes beyond <see cref="Common"/>, in the order a message lists them.</summary>
@@ -92,13 +94,15 @@ public static class ModifierFields
         [K.SaveEffect] =
         [
             "ability", "dc", "dc_ability", "dc_bonus", "dice", "amount", "type", "on_success", "targets", "shape", "size", "magical",
-            "condition", "action_cost", "cantrip", "resource",
+            "condition", "duration", "action_cost", "cantrip", "resource",
         ],
-        [K.ConditionOnHit] = ["condition", "ability", "dc", "dc_ability", "when", "policy", "use_value", "magical", "attacks", "resource"],
+        [K.ConditionOnHit] =
+            ["condition", "ability", "dc", "dc_ability", "when", "policy", "use_value", "magical", "duration", "attacks", "resource"],
         [K.IgnoreCover] = ["attacks"],
         [K.Ac] = ["amount", "type", "resource"],
         [K.Resistance] = ["amount", "type", "resource"],
         [K.TempHp] = ["amount", "type", "resource"],
+        [K.Heal] = ["dice", "amount", "action_cost", "targets", "self_only", "resource"],
     };
 
     /// <summary>Whether <paramref name="kind"/> takes the field <paramref name="field"/>.</summary>

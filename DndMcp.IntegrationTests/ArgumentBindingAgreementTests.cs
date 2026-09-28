@@ -233,6 +233,40 @@ public sealed class ArgumentBindingAgreementTests : IClassFixture<TestOnlyToolsS
         Assert.Contains("**15.00** damage per round at level 5 against AC 15", plain, StringComparison.Ordinal);
     }
 
+    private const string Party = """[{"name":"F","build":{"name":"F","level":5,"abilities":{"str":18},"attacks":[{"name":"Greatsword","count":2,"damage":"2d6","damage_type":"slashing","properties":["melee"]}]},"hp":44,"ac":18,"count":2}]""";
+
+    [Fact]
+    public async Task CallTool_BalanceSimulateNullOptionalArguments_MeanTheDefaults()
+    {
+        // Models send null for "use the default"; every optional argument must bind and read as the default: 10,000 fights,
+        // round cap 20, average enemy HP, no surprise, the party's edition, the default policies, a random seed.
+        var text = _server.SuccessText(await _server.CallToolJsonAsync(
+            "balance_simulate",
+            $$"""{"party":{{Party}},"enemies":[{"monster":"Goblin"}],"iterations":null,"seed":null,"round_cap":null,"edition":null,"surprise":null,"enemy_hp":null,"precision":null,"replay":null,"policies":null,"compare":null,"rulings":null}"""));
+
+        Assert.Contains("*2024 rules · 10,000 fights · round cap 20 · enemy HP average · no surprise · seed ", text, StringComparison.Ordinal);
+        Assert.Contains("- party focus_fire: ", text, StringComparison.Ordinal);
+        Assert.Contains("(drawn at random): pass \"seed\": \"", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_BalanceSimulateQuotedNumbers_BindLikeNumbers()
+    {
+        // Numbers quoted at the top level, inside party (a typed array) and inside enemies and compare (published untyped,
+        // read by the tool with the SDK's options) all bind as their numbers.
+        var quoted = _server.SuccessText(await _server.CallToolJsonAsync(
+            "balance_simulate",
+            """{"party":[{"name":"F","build":{"name":"F","level":"5","abilities":{"str":"18"},"attacks":[{"name":"Greatsword","count":"2","damage":"2d6","damage_type":"slashing","properties":["melee"]}]},"hp":"44","ac":"18","count":"2"}]""" +
+            ""","enemies":[{"monster":"Goblin","count":"2"}],"iterations":"300","seed":"7","round_cap":"10","compare":{"member":"1","feature":{"name":"T","modifiers":[{"kind":"to_hit","amount":"1"}]}}}"""));
+        var plain = _server.SuccessText(await _server.CallToolJsonAsync(
+            "balance_simulate",
+            $$"""{"party":{{Party}},"enemies":[{"monster":"Goblin","count":2}],"iterations":300,"seed":7,"round_cap":10""" +
+            ""","compare":{"member":1,"feature":{"name":"T","modifiers":[{"kind":"to_hit","amount":1}]}}}"""));
+
+        Assert.Equal(plain, quoted);
+        Assert.Contains("### Compare: F (party entry 1) with T", plain, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("balance_dpr", "build", ""","target":null,"levels":null,"ac_range":null,"horizon":null,"rounds":null,"rest_preset":null,"encounters_per_day":null,"short_rests":null,"rulings":null""")]
     [InlineData("balance_dpr", "build", ""","levels":[],"ac_range":[]""")]

@@ -14,8 +14,16 @@ namespace DndMcp.Domain.Dpr;
 /// for a GWF or Elemental Adept die, or after a save's halving (floor(floor(X/2)/2) = floor(X/4)).
 /// </para>
 /// <para>
-/// <b>Typeless damage</b> (an attack or rider without a type) is never resisted, made vulnerable or ignored; it is
-/// only halved by a save and floored at 0. The build resolver warns when a target with adjustments meets it.
+/// <b>Typeless damage</b> (an attack without a type, a rider on such an attack, or an untyped save effect) is never
+/// resisted, made vulnerable or ignored; it is only halved by a save and floored at 0. A rider without a type on a typed
+/// attack is NOT typeless: it deals the attack's type (<see cref="DamageModel"/>). <see cref="Features.TargetResolver.Warnings"/>
+/// warns when a target with adjustments meets typeless damage.
+/// </para>
+/// <para>
+/// <b>Qualified adjustments</b> (a stat block's "from nonmagical attacks that aren't silvered") apply only when the
+/// damage's <see cref="DamageProperties"/> admit them: the caller passes the properties of the attack the damage comes
+/// with (riders follow their attack) or of the save effect. Left out, the damage is plain, which every qualified entry
+/// covers.
 /// </para>
 /// </summary>
 public static class DamageAdjustment
@@ -24,24 +32,25 @@ public static class DamageAdjustment
     /// <param name="damage">The rolled total of one type (may be negative with a negative modifier).</param>
     /// <param name="damageType">The type, or null for typeless.</param>
     /// <param name="halve">A successful save's "half as much damage", applied first.</param>
-    public static long Apply(long damage, string? damageType, ResolvedTarget target, bool halve = false)
+    /// <param name="properties">What the damage is made with (magical, silvered, adamantine), for qualified adjustments.</param>
+    public static long Apply(long damage, string? damageType, ResolvedTarget target, bool halve = false, DamageProperties properties = default)
     {
         ArgumentNullException.ThrowIfNull(target);
 
         var x = halve ? FloorHalf(damage) : damage;
         if (damageType is not null)
         {
-            if (target.IsImmune(damageType))
+            if (target.IsImmune(damageType, properties))
             {
                 return 0;
             }
 
-            if (target.IsResistant(damageType))
+            if (target.IsResistant(damageType, properties))
             {
                 x = FloorHalf(x);
             }
 
-            if (target.IsVulnerable(damageType))
+            if (target.IsVulnerable(damageType, properties))
             {
                 x *= 2;
             }

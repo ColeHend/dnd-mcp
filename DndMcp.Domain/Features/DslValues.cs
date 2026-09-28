@@ -88,8 +88,17 @@ public static class DslValues
 
     /// <summary>
     /// Attack properties. Weapon properties plus <see cref="Melee"/>/<see cref="Ranged"/> (how the attack is made, which
-    /// decides Prone's advantage or disadvantage, Archery, Dueling, GWF) and <see cref="Spell"/> (a spell attack, which is
-    /// not a weapon: Savage Attacker and power attacks default to weapons only).
+    /// decides Prone's advantage or disadvantage and GWF), <see cref="Spell"/> (a spell attack, which is not a weapon:
+    /// Savage Attacker and power attacks default to weapons only), and the materials a qualified monster resistance asks
+    /// about (<see cref="Magical"/>, <see cref="Silvered"/>, <see cref="Adamantine"/>).
+    ///
+    /// <para>
+    /// <b>Archery and Dueling read the weapon's category, not how it is thrown.</b> A <see cref="Ranged"/> attack with
+    /// <see cref="Thrown"/> is a thrown MELEE weapon (javelin, dagger, handaxe: SRD "Simple Melee Weapons"), so Archery
+    /// ("ranged weapons") skips it and Dueling ("a melee weapon") takes it; the dart and the net are the only thrown
+    /// ranged weapons, and a build gives them without <see cref="Thrown"/>. Prone, GWF and the other rules that ask how
+    /// the attack is MADE still read <see cref="Ranged"/>.
+    /// </para>
     /// </summary>
     public static class Properties
     {
@@ -104,14 +113,33 @@ public static class DslValues
         public const string Reach = "reach";
         public const string Thrown = "thrown";
 
+        /// <summary>
+        /// A magical weapon (or any attack the table rules magical): overcomes a monster's resistance to "nonmagical"
+        /// damage. Spell attacks are magical without it (<see cref="ResolvedAttack.IsMagical"/>). Only a stat block target
+        /// (<c>target.monster</c>) has qualified resistances, so against a target given by numbers it changes nothing;
+        /// the simulator reads it too.
+        /// </summary>
+        public const string Magical = "magical";
+
+        /// <summary>A silvered weapon: overcomes "nonmagical attacks that aren't silvered" (lycanthropes).</summary>
+        public const string Silvered = "silvered";
+
+        /// <summary>An adamantine weapon: overcomes "nonmagical attacks that aren't adamantine" (golems).</summary>
+        public const string Adamantine = "adamantine";
+
         public static readonly DslValueSet Set = new(
-            "attack property", [Melee, Ranged, Spell, Heavy, Light, Finesse, TwoHanded, Versatile, Reach, Thrown]);
+            "attack property",
+            [Melee, Ranged, Spell, Heavy, Light, Finesse, TwoHanded, Versatile, Reach, Thrown, Magical, Silvered, Adamantine]);
     }
 
     /// <summary>How an attack is used each turn.</summary>
     public static class AttackActions
     {
-        /// <summary>Part of the Attack action (counts for "as part of the Attack action" bonuses).</summary>
+        /// <summary>
+        /// Made with the Action: the Attack action for a weapon (it counts for "as part of the Attack action" bonuses and
+        /// enables the Light weapon's offhand attack), the spell's casting action for a spell attack (which neither does:
+        /// 2024 "Attack [Action]: an attack roll with a weapon or an Unarmed Strike").
+        /// </summary>
         public const string Action = "action";
 
         /// <summary>Made every turn with the Bonus Action (2014 two-weapon fighting's offhand attack).</summary>
@@ -180,11 +208,19 @@ public static class DslValues
         public const string Resistance = "resistance";
         public const string TempHp = "temp_hp";
 
+        /// <summary>
+        /// Healing (Healing Word, Cure Wounds, Second Wind): simulator only. The DPR engine lists it in "the build as read"
+        /// and otherwise ignores it: it deals no damage, and it is NOT a Bonus Action consumer for a comparison's
+        /// collision report, since in the closed form it never competes with damage for the Bonus Action. The simulator
+        /// weighs it against its other uses of the action each turn.
+        /// </summary>
+        public const string Heal = "heal";
+
         public static readonly DslValueSet Set = new(
             "modifier kind",
             [
                 ToHit, ExtraDamage, BonusDamage, CritRange, Advantage, Lucky, ElvenAccuracy, DamageDieRemap, RerollDamageTakeBest,
-                ExtraAttack, PowerAttack, SaveEffect, ConditionOnHit, IgnoreCover, Ac, Resistance, TempHp,
+                ExtraAttack, PowerAttack, SaveEffect, ConditionOnHit, IgnoreCover, Ac, Resistance, TempHp, Heal,
             ]);
 
         /// <summary>
@@ -275,7 +311,13 @@ public static class DslValues
         /// <summary>A crit with a melee weapon this turn (2014 GWM's bonus attack, 2024 Hew).</summary>
         public const string Crit = "crit";
 
-        public static readonly DslValueSet Set = new("trigger", [Always, Hit, Crit]);
+        /// <summary>
+        /// A crit OR reducing a creature to 0 HP with the attack (2014 Great Weapon Master, 2024 Hew). The closed form has no
+        /// hit points to reduce, so it reads this as <see cref="Crit"/> with a note; the simulator fires on both.
+        /// </summary>
+        public const string CritOrKill = "crit_or_kill";
+
+        public static readonly DslValueSet Set = new("trigger", [Always, Hit, Crit, CritOrKill]);
     }
 
     /// <summary>power_attack's policy: decided per turn by expected damage, or fixed.</summary>
@@ -343,7 +385,11 @@ public static class DslValues
         public const string Paralyzed = "paralyzed";
         public const string Unconscious = "unconscious";
 
-        /// <summary>The target took the Dodge action: attacks against it have Disadvantage, Dex saves Advantage.</summary>
+        /// <summary>
+        /// The target took the Dodge action: attacks against it have Disadvantage, Dex saves Advantage. Both are lost once it
+        /// is Incapacitated (stunned, paralyzed, unconscious) or its Speed is 0 (restrained), in both editions; the attack
+        /// Disadvantage also needs it to see the attacker, so a blinded dodger loses that part only.
+        /// </summary>
         public const string Dodging = "dodging";
 
         public static readonly IReadOnlyList<string> Mechanical = [Prone, Restrained, Blinded, Stunned, Paralyzed, Unconscious];
@@ -362,6 +408,29 @@ public static class DslValues
         public static readonly DslValueSet TargetSet = new("condition", [.. Mechanical, Dodging]);
 
         public static bool IsMechanical(string condition) => Mechanical.Contains(condition);
+    }
+
+    /// <summary>
+    /// How long a condition imposed by condition_on_hit or save_effect lasts, for the simulator (the DPR engine resets
+    /// imposed conditions each turn and notes it). Null on the resolved record means the default: condition_on_hit
+    /// 2024 → <see cref="StartOfNextTurn"/>, 2014 → <see cref="EndOfNextTurn"/>; save_effect → <see cref="SaveEnds"/>.
+    /// Prone always lasts until the creature stands, whatever is given.
+    /// </summary>
+    public static class Durations
+    {
+        /// <summary>Until the start of the imposing creature's next turn (2024 Stunning Strike).</summary>
+        public const string StartOfNextTurn = "start_of_next_turn";
+
+        /// <summary>Until the end of the imposing creature's next turn (2014 Stunning Strike).</summary>
+        public const string EndOfNextTurn = "end_of_next_turn";
+
+        /// <summary>The target repeats the save at the end of each of its turns (Hold Person).</summary>
+        public const string SaveEnds = "save_ends";
+
+        /// <summary>For the rest of the fight.</summary>
+        public const string Fight = "fight";
+
+        public static readonly DslValueSet Set = new("duration", [StartOfNextTurn, EndOfNextTurn, SaveEnds, Fight]);
     }
 
     /// <summary>A modifier's first-round cost (casting Hex, Bless).</summary>
@@ -384,6 +453,9 @@ public static class DslValues
         public static readonly DslValueSet RiderSet = new("action_cost", [BonusAction]);
 
         public static readonly DslValueSet SaveEffectSet = new("action_cost", [Action, BonusAction, None]);
+
+        /// <summary>heal: a spell cast with the Action (Cure Wounds) or the Bonus Action (Healing Word, Second Wind).</summary>
+        public static readonly DslValueSet HealSet = new("action_cost", [Action, BonusAction]);
     }
 
     /// <summary>When a resource comes back.</summary>
@@ -454,5 +526,29 @@ public static class DslValues
         public const string Disadvantage = "disadvantage";
 
         public static readonly DslValueSet Set = new("mode", [Advantage, Disadvantage]);
+    }
+
+    /// <summary>
+    /// Target profiles (<c>target.profile</c>): the table a target WITHOUT a stat block takes its AC and save bonus from, by
+    /// CR (<c>cr</c>, else CR = the level evaluated). <see cref="TargetProfiles"/> looks a row up. A monster target has its
+    /// own numbers and takes no profile.
+    /// </summary>
+    public static class Profiles
+    {
+        /// <summary>
+        /// The DMG 2014 "Monster Statistics by Challenge Rating" row (its AC) with The Finished Book's typical save bonus:
+        /// the default, and Phase 4's only target.
+        /// </summary>
+        public const string Dmg2014 = "dmg2014";
+
+        /// <summary>The medians of the 2014 SRD's monsters of that CR (AC, mean save bonus), computed from the vendored data.</summary>
+        public const string Mm2014 = "mm2014";
+
+        /// <summary>The medians of the 2024 SRD's monsters of that CR (AC, mean save bonus), computed from the vendored data.</summary>
+        public const string Mm2024 = "mm2024";
+
+        public const string Default = Dmg2014;
+
+        public static readonly DslValueSet Set = new("profile", [Dmg2014, Mm2014, Mm2024]);
     }
 }

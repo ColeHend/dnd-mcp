@@ -128,6 +128,12 @@ internal sealed class CompiledAttack
 
     public required string Ability { get; init; }
 
+    /// <summary>
+    /// Whether to_hit.ability was given. The default is Str even for a ranged, finesse or spell attack (contract §3.3), so
+    /// the resolver notes an attack that would do better with the ability the rules give it.
+    /// </summary>
+    public required bool AbilityGiven { get; init; }
+
     public required bool Proficient { get; init; }
 
     public required int ToHitBonus { get; init; }
@@ -166,6 +172,14 @@ internal sealed class CompiledAttack
 
     public bool IsWeapon => !IsSpell;
 
+    /// <summary>
+    /// A thrown weapon made at range, read as a MELEE weapon thrown (javelin, dagger, handaxe, spear: the SRD's thrown
+    /// weapons are melee weapons, except the dart and the net). For the fighting styles only: Archery ("ranged weapons")
+    /// skips it and Dueling ("a melee weapon") takes it. How the attack is MADE (Prone, GWF, Cleave) still reads
+    /// <see cref="IsRanged"/>.
+    /// </summary>
+    public bool IsThrownMeleeWeapon => IsRanged && IsWeapon && Properties.Contains(V.Properties.Thrown);
+
     /// <summary>Great Weapon Fighting's reach: a melee weapon with the Two-Handed or Versatile property.</summary>
     public bool TakesGreatWeaponFighting =>
         IsMelee && IsWeapon && (Properties.Contains(V.Properties.TwoHanded) || Properties.Contains(V.Properties.Versatile));
@@ -192,11 +206,12 @@ internal sealed class CompiledAttack
             Count = LevelValue.ParseInt(spec.Count, "count", 1, DslLimits.MaxAttackCount) ?? LevelValue<int>.Of(1),
             Action = CompiledBuild.Match(V.AttackActions.Set, spec.Action) ?? V.AttackActions.Action,
             Ability = CompiledBuild.Match(V.Abilities.ToHitSet, toHit?.Ability) ?? V.Abilities.Str,
+            AbilityGiven = toHit?.Ability is not null,
             Proficient = toHit?.Proficient ?? true,
             ToHitBonus = toHit?.Bonus ?? 0,
             ToHitTotal = toHit?.Total,
             PartsBesideTotal = toHit is { Total: not null } && (toHit.Proficient is not null || toHit.Bonus is not null),
-            Damage = LevelValue.ParseDamage(spec.Damage, "damage")!,
+            Damage = LevelValue.ParseDamage(spec.Damage, "damage", hint: DamageFormula.AttackHint)!,
             DamageType = CompiledBuild.Match(V.DamageTypes.Set, spec.DamageType),
             AbilityToDamage = spec.AbilityToDamage,
             Properties = properties,
@@ -303,6 +318,11 @@ internal sealed class CompiledModifier
 
     public bool Cantrip { get; init; }
 
+    /// <summary><see cref="V.Durations"/> value as given, or null for the default the simulator applies.</summary>
+    public string? Duration { get; init; }
+
+    public bool SelfOnly { get; init; }
+
     public ModifierRef Ref => new(Number, Kind, Name);
 
     /// <summary>The name, or "kind #N" when none was given: how results label it.</summary>
@@ -348,7 +368,12 @@ internal sealed class CompiledModifier
         var policySet = kind == V.Kinds.PowerAttack ? V.PowerAttackPolicies.Set : V.Policies.Set;
         var whenSet = kind == V.Kinds.ConditionOnHit ? V.When.ConditionOnHitSet : V.When.ExtraDamageSet;
         var conditionSet = kind == V.Kinds.SaveEffect ? V.Conditions.SaveEffectSet : V.Conditions.OnHitSet;
-        var actionCostSet = kind == V.Kinds.SaveEffect ? V.ActionCosts.SaveEffectSet : V.ActionCosts.RiderSet;
+        var actionCostSet = kind switch
+        {
+            V.Kinds.SaveEffect => V.ActionCosts.SaveEffectSet,
+            V.Kinds.Heal => V.ActionCosts.HealSet,
+            _ => V.ActionCosts.RiderSet,
+        };
         var shape = CompiledBuild.Match(V.Shapes.Set, spec.Shape);
 
         return new CompiledModifier
@@ -377,7 +402,7 @@ internal sealed class CompiledModifier
             UseValue = spec.UseValue ?? 0,
             CritDoubles = spec.CritDoubles ?? true,
             AttackActionOnly = spec.AttackActionOnly ?? false,
-            ActionCost = CompiledBuild.Match(actionCostSet, spec.ActionCost) ?? (kind == V.Kinds.SaveEffect ? V.ActionCosts.Action : null),
+            ActionCost = CompiledBuild.Match(actionCostSet, spec.ActionCost) ?? (kind is V.Kinds.SaveEffect or V.Kinds.Heal ? V.ActionCosts.Action : null),
             Min = LevelValue.ParseInt(spec.Min, "min", 2, 20),
             Mode = CompiledBuild.Match(V.AdvantageModes.Set, spec.Mode) ?? V.AdvantageModes.Advantage,
             Rate = spec.Rate ?? 1,
@@ -400,6 +425,8 @@ internal sealed class CompiledModifier
             Magical = spec.Magical ?? kind == V.Kinds.SaveEffect,
             Condition = CompiledBuild.Match(conditionSet, spec.Condition),
             Cantrip = spec.Cantrip ?? false,
+            Duration = CompiledBuild.Match(V.Durations.Set, spec.Duration),
+            SelfOnly = spec.SelfOnly ?? false,
         };
     }
 }

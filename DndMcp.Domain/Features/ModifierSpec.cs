@@ -22,7 +22,7 @@ public sealed class ModifierSpec
     [Description(
         "Required: to_hit, extra_damage, bonus_damage, crit_range, advantage, lucky, elven_accuracy, damage_die_remap, " +
         "reroll_damage_take_best, extra_attack, power_attack, save_effect, condition_on_hit, ignore_cover, ac, resistance, " +
-        "temp_hp.")]
+        "temp_hp, heal (balance_simulate only).")]
     public string? Kind { get; init; }
 
     [Description("A label for results, at most 60 characters, e.g. \"Hex\".")]
@@ -37,9 +37,7 @@ public sealed class ModifierSpec
     [Description("The last level it is active at, 1-20.")]
     public int? UntilLevel { get; init; }
 
-    [Description(
-        "Limited uses, e.g. {\"uses\": 3, \"per\": \"long_rest\"}. Taken by extra_damage, extra_attack, save_effect, " +
-        "condition_on_hit and the defensive kinds.")]
+    [Description("Limited uses, e.g. {\"uses\": 3, \"per\": \"long_rest\"}; without it the modifier is used every round of every fight.")]
     public ResourceSpec? Resource { get; init; }
 
     [Description("Needs Concentration: only one concentration modifier may be active at a level. Default false.")]
@@ -50,15 +48,17 @@ public sealed class ModifierSpec
 
     [Description(
         "A whole number -100 to 100, \"pb\" (proficiency bonus), an ability (\"cha\" = its modifier) or a step map of " +
-        "numbers by level. to_hit: attack bonus; extra_damage, bonus_damage, save_effect: flat damage.")]
+        "numbers by level. to_hit: attack bonus; extra_damage, bonus_damage, save_effect: flat damage; heal: flat healing.")]
     public object? Amount { get; init; }
 
     [Description(
         "Dice. to_hit: added to attack rolls, \"1d4\" (Bless) or \"-1d4\" (Bane). extra_damage, save_effect: damage dice " +
-        "such as \"2d8\", or a step map by level.")]
+        "such as \"2d8\"; heal: healing dice. Or a step map by level.")]
     public object? Dice { get; init; }
 
-    [Description("A damage type, e.g. \"fire\" (extra_damage, save_effect, resistance; elemental_adept's type).")]
+    [Description(
+        "A damage type, e.g. \"fire\" (extra_damage: default the attack's type; save_effect: default typeless; resistance; " +
+        "elemental_adept's type).")]
     public string? Type { get; init; }
 
     [Description(
@@ -81,8 +81,9 @@ public sealed class ModifierSpec
     public bool? AttackActionOnly { get; init; }
 
     [Description(
-        "extra_damage: \"bonus_action\" when spending it uses the Bonus Action (2024 Divine Smite). save_effect: " +
-        "\"action\" (default), \"bonus_action\" or \"none\".")]
+        "extra_damage: \"bonus_action\" when spending it uses the Bonus Action (2024 Divine Smite). save_effect: \"action\" " +
+        "(default), \"bonus_action\" or \"none\" (takes no action, e.g. an aura: used every turn beside the Action). heal: " +
+        "\"action\" (default) or \"bonus_action\".")]
     public string? ActionCost { get; init; }
 
     [Description("crit_range: crit on this d20 roll or higher, 2-20 (e.g. 19), or a step map by level.")]
@@ -111,8 +112,8 @@ public sealed class ModifierSpec
     public string? Action { get; init; }
 
     [Description(
-        "extra_attack with bonus_action: always (default), hit (after any hit this turn) or crit (after a melee crit this " +
-        "turn: Great Weapon Master).")]
+        "extra_attack with bonus_action: always (default), hit (after any hit this turn), crit (after a melee crit this " +
+        "turn) or crit_or_kill (Great Weapon Master, Hew: a crit or a kill; balance_dpr counts crits only).")]
     public string? Trigger { get; init; }
 
     [Description("extra_attack with reaction, and only then: the chance per round the reaction attack happens, 0-1.")]
@@ -141,7 +142,7 @@ public sealed class ModifierSpec
     [Description("save_effect: \"half\" (default) or \"none\": damage on a successful save.")]
     public string? OnSuccess { get; init; }
 
-    [Description("save_effect: creatures affected, 1-20. Default 1; or give shape and size instead.")]
+    [Description("save_effect: creatures affected, 1-20. Default 1; or give shape and size instead. heal: creatures healed, 1-6.")]
     public int? Targets { get; init; }
 
     [Description("save_effect area: cone, cube, cylinder, line or sphere, with size (creatures per the DMG's area table).")]
@@ -155,11 +156,19 @@ public sealed class ModifierSpec
 
     [Description(
         "condition_on_hit (required) and save_effect: prone, restrained, blinded, stunned, paralyzed or unconscious; " +
-        "save_effect also takes other conditions (frightened, …) as labels.")]
+        "save_effect also takes other conditions (frightened, …) as labels. balance_dpr counts it for the rest of the turn only.")]
     public string? Condition { get; init; }
 
     [Description("save_effect: the damage dice scale like a cantrip's, x1/x2/x3/x4 at level 1/5/11/17. Default false.")]
     public bool? Cantrip { get; init; }
+
+    [Description(
+        "condition_on_hit, save_effect with condition (balance_simulate): start_of_next_turn, end_of_next_turn, save_ends or " +
+        "fight. Default: 2024 start_of_next_turn, 2014 end_of_next_turn; save_effect save_ends.")]
+    public string? Duration { get; init; }
+
+    [Description("heal: heals only the creature itself (Second Wind). Default false.")]
+    public bool? SelfOnly { get; init; }
 }
 
 /// <summary>Limited uses of a modifier, recovered on a short or long rest.</summary>
