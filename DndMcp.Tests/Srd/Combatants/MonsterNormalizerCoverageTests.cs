@@ -1,8 +1,10 @@
+using System.Text.Json.Nodes;
 using DndMcp.Domain.Features;
 using DndMcp.Domain.Simulation;
 using DndMcp.Repository.Srd;
 using DndMcp.Repository.Srd.Combatants;
 using DndMcp.Repository.Srd.Index;
+using DndMcp.Repository.Srd.Models;
 using DndMcp.Tests.Srd.Index;
 using Xunit;
 
@@ -40,13 +42,13 @@ public sealed partial class MonsterNormalizerCoverageTests
     /// warnings file the normalizer produces (every warning names its monster, where and why) before updating a number.
     /// </summary>
     [Theory]
-    [InlineData("2014", StatBlockValues.WarningCodes.NotModelled, 212)]
-    [InlineData("2014", StatBlockValues.WarningCodes.Approximated, 95)]
+    [InlineData("2014", StatBlockValues.WarningCodes.NotModelled, 215)]
+    [InlineData("2014", StatBlockValues.WarningCodes.Approximated, 96)]
     [InlineData("2014", StatBlockValues.WarningCodes.UnresolvedReference, 3)]
     [InlineData("2014", StatBlockValues.WarningCodes.DataConflict, 0)]
     [InlineData("2014", StatBlockValues.WarningCodes.Unparsed, 0)]
-    [InlineData("2024", StatBlockValues.WarningCodes.NotModelled, 186)]
-    [InlineData("2024", StatBlockValues.WarningCodes.Approximated, 113)]
+    [InlineData("2024", StatBlockValues.WarningCodes.NotModelled, 191)]
+    [InlineData("2024", StatBlockValues.WarningCodes.Approximated, 116)]
     [InlineData("2024", StatBlockValues.WarningCodes.UnresolvedReference, 2)]
     [InlineData("2024", StatBlockValues.WarningCodes.DataConflict, 0)]
     [InlineData("2024", StatBlockValues.WarningCodes.Unparsed, 0)]
@@ -234,6 +236,181 @@ public sealed partial class MonsterNormalizerCoverageTests
 
         Assert.Equal(32, Blocks(SrdEdition.Edition2014).Count(b => b.Legendary is not null));
         Assert.Equal(32, Blocks(SrdEdition.Edition2024).Count(b => b.Legendary is not null));
+    }
+
+    /// <summary>
+    /// Legendary Resistance's in-lair uses are kept only when they differ from the daily uses, as
+    /// <see cref="StatBlock.LegendaryResistanceInLair"/> promises ("null when the same"). No vendored record repeats its
+    /// daily count as the lair count, so the 2024 unicorn's record (3/Day, no lair count) is given one.
+    /// </summary>
+    [Theory]
+    [InlineData(3, null)]
+    [InlineData(4, 4)]
+    public void LegendaryResistance_InLairUses_AreKeptOnlyWhenTheyDiffer(int inLair, int? expected)
+    {
+        var unicorn = CorrectedSrd.Shipped.Monster(SrdEdition.Edition2024, "unicorn");
+        var record = JsonNode.Parse(unicorn.Json)!;
+        var trait = record["special_abilities"]!.AsArray().Single(t => (string?)t!["name"] == "Legendary Resistance")!;
+        trait["usage"]!["times_in_lair"] = inLair;
+        var document = new SrdDocument { Edition = unicorn.Edition, Kind = unicorn.Kind, Slug = unicorn.Slug, Name = unicorn.Name, Json = record.ToJsonString() };
+
+        var block = CorrectedSrd.Shipped.Normalizer.Normalize(document, CorrectedSrd.Shipped);
+
+        Assert.Equal((3, expected), (block.LegendaryResistance, block.LegendaryResistanceInLair));
+    }
+
+    /// <summary>A shipped monster's record with one edit, normalized: for rules no vendored record exercises.</summary>
+    private static StatBlock NormalizeEdited(string edition, string slug, Action<JsonNode> edit)
+    {
+        var monster = CorrectedSrd.Shipped.Monster(edition, slug);
+        var record = JsonNode.Parse(monster.Json)!;
+        edit(record);
+        var document = new SrdDocument { Edition = monster.Edition, Kind = monster.Kind, Slug = monster.Slug, Name = monster.Name, Json = record.ToJsonString() };
+        return CorrectedSrd.Shipped.Normalizer.Normalize(document, CorrectedSrd.Shipped);
+    }
+
+    private static JsonNode Hellfire(JsonNode pitFiend) => pitFiend["actions"]!.AsArray().Single(a => (string?)a!["name"] == "Hellfire Spellcasting")!;
+
+    /// <summary>
+    /// A spellcasting ability the normalizer cannot read is never silently Intelligence: the fallback is named in an
+    /// unparsed warning. (No vendored block has one: the pit fiend's is given "luck".)
+    /// </summary>
+    [Fact]
+    public void Spellcasting_UnknownAbility_FallsBackToIntelligenceWithAWarning()
+    {
+        var block = NormalizeEdited(SrdEdition.Edition2024, "pit-fiend", r => Hellfire(r)["spellcasting"]!["ability"]!["index"] = "luck");
+
+        Assert.Contains(block.Warnings, w => w.Code == StatBlockValues.WarningCodes.Unparsed && w.Where == "Hellfire Spellcasting" && w.Message.Contains("\"luck\"", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Uses per day on a spellcasting action cannot be one shared count (the engine counts per action): a block whose
+    /// several combat spells, or whose cast-twice routine, would share them says so. (No vendored block does: the pit
+    /// fiend's Hellfire Spellcasting is given "1/Day" for its recharge.)
+    /// </summary>
+    [Fact]
+    public void Spellcasting_PerDayUsesOverSeveralSpells_AreWarnedAsCountedPerSpell()
+    {
+        var block = NormalizeEdited(SrdEdition.Edition2024, "pit-fiend", r => Hellfire(r)["usage"] = new JsonObject { ["type"] = "per day", ["times"] = 1 });
+
+        Assert.Contains(block.Warnings, w => w.Code == StatBlockValues.WarningCodes.Approximated && w.Where == "Hellfire Spellcasting" && w.Message.Contains("one count for all its spells", StringComparison.Ordinal));
+        Assert.Null(block.FindAction("Fireball")!.Usage.Pool);
+    }
+
+    /// <summary>
+    /// The immunity clause on an attack's save rider sets <see cref="ActionEffect.ImmuneAfterSuccess"/>, as on a save
+    /// action. (No vendored attack has one the simulator builds: the 2014 goblin's Scimitar is given a frightening rider.)
+    /// </summary>
+    [Fact]
+    public void ImmuneAfterSuccess_OnASaveRider_IsSetFromTheText()
+    {
+        var block = NormalizeEdited(SrdEdition.Edition2014, "goblin", r =>
+        {
+            var scimitar = r["actions"]!.AsArray().Single(a => (string?)a!["name"] == "Scimitar")!;
+            scimitar["desc"] = "Melee Weapon Attack: +4 to hit, reach 5 ft., one target. Hit: 5 (1d6 + 2) slashing damage, and the target must " +
+                               "succeed on a DC 11 Wisdom saving throw or be frightened for 1 minute. A creature can repeat the saving throw at the " +
+                               "end of each of its turns, ending the effect on itself on a success. If a creature's saving throw is successful or the " +
+                               "effect ends for it, the creature is immune to this goblin's Scimitar for the next 24 hours.";
+        });
+
+        var rider = Assert.Single(block.FindAction("Scimitar")!.OnHit);
+        Assert.Equal((StatBlockValues.EffectKinds.Save, StatBlockValues.Conditions.Frightened, true), (rider.Kind, rider.Condition!.Condition, rider.ImmuneAfterSuccess));
+    }
+
+    /// <summary>
+    /// The immunity must name a word of the action's name: "immune to this goblin's curse" after a Scimitar's rider is
+    /// immunity to something else, so the rider is saved against every time. No vendored block pins this: the 2024
+    /// lycanthrope bites that say "immune to this werewolf's curse" never build their rider (the curse is not
+    /// simulated), so the goblin's Scimitar is given one that the simulator does build.
+    /// </summary>
+    [Fact]
+    public void ImmuneAfterSuccess_ToSomethingTheActionIsNotNamedFor_IsNotSet()
+    {
+        var block = NormalizeEdited(SrdEdition.Edition2014, "goblin", r =>
+        {
+            var scimitar = r["actions"]!.AsArray().Single(a => (string?)a!["name"] == "Scimitar")!;
+            scimitar["desc"] = "Melee Weapon Attack: +4 to hit, reach 5 ft., one target. Hit: 5 (1d6 + 2) slashing damage, and the target must " +
+                               "succeed on a DC 11 Wisdom saving throw or be frightened for 1 minute. A creature can repeat the saving throw at the " +
+                               "end of each of its turns, ending the effect on itself on a success. If a creature's saving throw is successful or the " +
+                               "effect ends for it, the creature is immune to this goblin's curse for the next 24 hours.";
+        });
+
+        var rider = Assert.Single(block.FindAction("Scimitar")!.OnHit);
+        Assert.Equal((StatBlockValues.EffectKinds.Save, StatBlockValues.Conditions.Frightened, false), (rider.Kind, rider.Condition!.Condition, rider.ImmuneAfterSuccess));
+    }
+
+    /// <summary>
+    /// A save rider that deals damage now and more every turn, with no condition for the per-turn damage to ride on,
+    /// keeps the damage it can simulate and names the per-turn damage it drops in a not_modelled warning (never a
+    /// silent loss). No vendored attack has one: the goblin's Scimitar is given it.
+    /// </summary>
+    [Fact]
+    public void OngoingDamage_OnASaveRiderWithNoCondition_IsWarnedAsNotModelled()
+    {
+        var block = NormalizeEdited(SrdEdition.Edition2014, "goblin", r =>
+        {
+            var scimitar = r["actions"]!.AsArray().Single(a => (string?)a!["name"] == "Scimitar")!;
+            scimitar["desc"] = "Melee Weapon Attack: +4 to hit, reach 5 ft., one target. Hit: 5 (1d6 + 2) slashing damage, and the target must " +
+                               "succeed on a DC 11 Constitution saving throw or take 7 (2d6) necrotic damage. The target also takes 3 (1d6) necrotic " +
+                               "damage at the start of each of its turns for 1 minute.";
+        });
+
+        var rider = Assert.Single(block.FindAction("Scimitar")!.OnHit);
+        Assert.Equal((StatBlockValues.EffectKinds.Save, "2d6 necrotic", (ConditionEffect?)null), (rider.Kind, string.Join(" + ", rider.Damage.Select(d => $"{d.Dice} {d.DamageType}")), rider.Condition));
+        Assert.Contains(block.Warnings, w => w.Code == StatBlockValues.WarningCodes.NotModelled && w.Where == "Scimitar" && w.Message.Contains("1d6 necrotic", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A conditional sentence too long to quote whole keeps its start (the test) and its end (what it does), cut
+    /// between them, never after its first characters: the effect a warning exists to report comes last. No vendored
+    /// conditional sentence is over the 240 characters quoted whole, so the goblin's Scimitar is given one.
+    /// </summary>
+    [Fact]
+    public void ConditionalRun_ASentenceTooLongToQuoteWhole_KeepsItsTestAndTheEffectAtItsEnd()
+    {
+        var block = NormalizeEdited(SrdEdition.Edition2014, "goblin", r =>
+        {
+            var scimitar = r["actions"]!.AsArray().Single(a => (string?)a!["name"] == "Scimitar")!;
+            scimitar["desc"] = "Melee Weapon Attack: +4 to hit, reach 5 ft., one target. Hit: 5 (1d6 + 2) slashing damage. If the goblin moved at " +
+                               "least 20 feet straight toward the target immediately before the hit, the target stands on mud, loose scree, shallow " +
+                               "water, thick undergrowth or any other ground the goblin knows well from its warren, and the target cannot see the " +
+                               "goblin, the target takes an extra 7 (2d6) slashing damage and is knocked prone.";
+        });
+
+        var warning = Assert.Single(block.Warnings, w => w.Code == StatBlockValues.WarningCodes.NotModelled && w.Where == "Scimitar");
+        Assert.StartsWith("Not simulated: \"If the goblin moved at least 20 feet", warning.Message, StringComparison.Ordinal);
+        Assert.Contains(" … ", warning.Message, StringComparison.Ordinal);
+        Assert.EndsWith("the target takes an extra 7 (2d6) slashing damage and is knocked prone.\"", warning.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>Every multiattack option type in both editions' data is one of <see cref="MultiattackOptionTypes"/>: a new one would be read as a single action.</summary>
+    [Theory]
+    [MemberData(nameof(Editions))]
+    public void MultiattackOptions_EveryOptionType_IsAKnownValue(string edition)
+    {
+        var types = new List<string>();
+        void Collect(JsonNode? option)
+        {
+            types.Add((string?)option!["option_type"] ?? "(none)");
+            foreach (var item in option["items"]?.AsArray() ?? [])
+            {
+                Collect(item);
+            }
+        }
+
+        foreach (var monster in CorrectedSrd.Shipped.Monsters(edition))
+        {
+            foreach (var action in JsonNode.Parse(monster.Json)!["actions"]?.AsArray() ?? [])
+            {
+                foreach (var option in action!["action_options"]?["from"]?["options"]?.AsArray() ?? [])
+                {
+                    Collect(option);
+                }
+            }
+        }
+
+        Assert.NotEmpty(types);
+        Assert.All(types, t => Assert.Contains(t, new[] { MultiattackOptionTypes.Action, MultiattackOptionTypes.Multiple }));
     }
 
     [Fact]

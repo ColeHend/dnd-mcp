@@ -129,8 +129,200 @@ public sealed class SimulatorValidationTests
     {
         var spec = SimKit.Spec([SimKit.Pc(SimKit.Fighter2024, hp: 44, ac: 18, count: 20)], [SimKit.Monster(TestStatBlocks.Goblin, count: 20)], iterations: 100_000, roundCap: 100);
         var message = Refusal(spec);
-        Assert.StartsWith("this simulation is too large: 100,000 fights × 40 combatants × round cap 100 = 400,000,000, over the limit of 60,000,000.", message);
+        Assert.StartsWith("this simulation is too large: 100,000 fights × 40 combatants × round cap 100 = 400,000,000, over the limit of 20,000,000.", message);
         Assert.Contains("Lower iterations", message);
+    }
+
+    [Fact]
+    public void ArchetypeEntry_NameAsTyped_TheSourceAndLabelUseTheCataloguesName()
+    {
+        // " WIZARD " is matched as "wizard": the report names what was simulated, not the caller's spelling of it.
+        var wizard = new SimulationCombatant(new CombatantSpec { Archetype = " WIZARD ", Level = 3 });
+        var entry = SimulationPreparation.Prepare(SimKit.Spec([wizard], [Ogre])).Entries[0];
+        Assert.Equal(("Wizard", "archetype wizard (level 3, 2024)"), (entry.Label, entry.Source));
+    }
+
+    [Theory]
+    [InlineData("action", false)]      // the 2024 rogue archetype's way: Nick already modelled
+    [InlineData("bonus_action", true)] // the Light weapon's extra attack still costs the Bonus Action
+    public void Assumptions_Nick_IsNotedOnlyOnABonusActionAttack(string action, bool noted)
+    {
+        var build = $$"""
+            { "name": "Dual Wielder", "edition": "2024", "level": 5, "abilities": {"dex": 16},
+              "attacks": [
+                { "name": "Shortsword", "to_hit": {"ability": "dex"}, "damage": "1d6", "damage_type": "piercing", "properties": ["melee", "finesse", "light"], "mastery": "vex" },
+                { "name": "Scimitar", "action": "{{action}}", "offhand": true, "to_hit": {"ability": "dex"}, "damage": "1d6", "damage_type": "slashing", "properties": ["melee", "finesse", "light"], "mastery": "nick" }] }
+            """;
+        var assumptions = SimulationPreparation.Prepare(SimKit.Spec([SimKit.Pc(build, hp: 38, ac: 15)], [Ogre])).Assumptions;
+        var nick = assumptions.Where(a => a.Contains("Nick", StringComparison.Ordinal)).ToList();
+        Assert.Equal(noted ? 1 : 0, nick.Count);
+        if (noted)
+        {
+            Assert.Equal(
+                "Dual Wielder: Scimitar: Nick changes only the action economy; model it by making the Light weapon's extra attack an " +
+                "action attack (count) instead of a bonus_action one.", nick[0]);
+        }
+    }
+
+    [Fact]
+    public void Assumptions_NickWeaponInTheActionBesideABonusActionOffhand_IsNotedNamingBoth()
+    {
+        // The Nick text does not say which Light weapon must carry it: a Nick dagger in the Attack action beside an offhand
+        // shortsword that still costs the Bonus Action has not modelled Nick (balance_dpr's rule and words).
+        const string build = """
+            { "name": "Dual Wielder", "edition": "2024", "level": 5, "abilities": {"dex": 16},
+              "attacks": [
+                { "name": "Dagger", "count": 2, "to_hit": {"ability": "dex"}, "damage": "1d4", "damage_type": "piercing", "properties": ["melee", "finesse", "light"], "mastery": "nick" },
+                { "name": "Shortsword", "action": "bonus_action", "offhand": true, "to_hit": {"ability": "dex"}, "damage": "1d6", "damage_type": "piercing", "properties": ["melee", "finesse", "light"], "mastery": "vex" }] }
+            """;
+        var assumptions = SimulationPreparation.Prepare(SimKit.Spec([SimKit.Pc(build, hp: 38, ac: 15)], [Ogre])).Assumptions;
+
+        Assert.Equal(
+            "Dual Wielder: Shortsword: Nick (on Dagger) changes only the action economy; model it by making the Light weapon's extra " +
+            "attack an action attack (count) instead of a bonus_action one.", Assert.Single(assumptions, a => a.Contains("Nick", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void Assumptions_NickExtraAttackAlreadyInTheActionBesideADualWielderAttack_IsNotNoted()
+    {
+        // The common 2024 Nick build: the scimitar (Nick) and the offhand shortsword both attack in the Attack action, and
+        // the Dual Wielder feat adds a bonus_action Light attack that is not the one Nick moves (balance_dpr's rule).
+        const string build = """
+            { "name": "Dual Wielder", "edition": "2024", "level": 5, "abilities": {"dex": 16},
+              "attacks": [
+                { "name": "Scimitar", "count": 2, "to_hit": {"ability": "dex"}, "damage": "1d6", "damage_type": "slashing", "properties": ["melee", "finesse", "light"], "mastery": "nick" },
+                { "name": "Shortsword", "offhand": true, "to_hit": {"ability": "dex"}, "damage": "1d6", "damage_type": "piercing", "properties": ["melee", "finesse", "light"], "mastery": "vex" },
+                { "name": "Dual Wielder Shortsword", "action": "bonus_action", "offhand": true, "to_hit": {"ability": "dex"}, "damage": "1d6", "damage_type": "piercing", "properties": ["melee", "finesse", "light"] }] }
+            """;
+        var assumptions = SimulationPreparation.Prepare(SimKit.Spec([SimKit.Pc(build, hp: 38, ac: 15)], [Ogre])).Assumptions;
+
+        Assert.DoesNotContain(assumptions, a => a.Contains("Nick", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Assumptions_SayHowAreasReactionsAndConditionsAreChosen()
+    {
+        // The engine's rules the report must state: areas take the standing first and then those at 0 HP, Shield lasts
+        // until the caster's next turn, and a condition an action imposes is worth something to the monster choosing it.
+        var assumptions = SimulationPreparation.Prepare(SimKit.Spec([Fighter], [Ogre])).Assumptions;
+        Assert.Contains(assumptions, a => a.StartsWith("Areas catch the DMG's typical number of creatures", StringComparison.Ordinal) &&
+                                          a.Contains("the standing ones first", StringComparison.Ordinal) &&
+                                          a.Contains("those lying at 0 HP", StringComparison.Ordinal));
+        Assert.Contains(assumptions, a => a.Contains("Shield (+5 AC) lasts until the start of the caster's next turn", StringComparison.Ordinal));
+        Assert.Contains(assumptions, a => a.Contains("a Parry whose text says melee attack covers only a melee attack", StringComparison.Ordinal));
+        Assert.Contains(assumptions, a => a.Contains("A condition an action imposes adds its worth times the chance it lands (an attack's hit, and a failed save where there is one)", StringComparison.Ordinal) &&
+                                          a.Contains("a tenth for exhaustion, nothing for deafened", StringComparison.Ordinal));
+        Assert.DoesNotContain(assumptions, a => a.Contains("reactions other than Parry are not used", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("2014", "lich", true)]    // Power Word Kill, an auto_hit spell action
+    [InlineData("2024", "solar", true)]   // Slaying Bow, a save that is only a Multiattack option
+    [InlineData("2014", "solar", false)]  // Slaying Longbow: a save rider on a hit, aimed like any attack
+    [InlineData("2014", "ogre", false)]
+    public void Assumptions_ASingleTargetKill_SaysItIsAimedAtACreatureItKills(string edition, string monster, bool stated)
+    {
+        // The monsters line says they act against "the targets their side's policy picks"; a save or auto-hit kill is aimed
+        // at a standing creature it kills instead (Fight.KillableAmong), and the report must say so where one is fought.
+        var block = DndMcp.Tests.Srd.Combatants.CorrectedSrd.Shipped.StatBlock(edition, monster);
+        var assumptions = SimulationPreparation.Prepare(SimKit.Spec([Fighter], [SimKit.Monster(block)])).Assumptions;
+
+        Assert.Equal(stated, assumptions.Any(a => a.StartsWith(
+            "An outright kill by hit points (Power Word Kill, the 2024 solar's Slaying Bow) is aimed at a standing creature it kills, the side's policy choosing among those",
+            StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void OverTheWorkBudget_PrecisionCountsItsFirstBatchWhateverIterationsSays()
+    {
+        // Precision runs at least its first 10,000 fights, whatever iterations says: 10,000 × 40 × 60 = 24 million is over
+        // the budget, though 1,000 iterations alone (2.4 million) would pass.
+        var spec = SimKit.Spec([SimKit.Pc(SimKit.Fighter2024, hp: 44, ac: 18, count: 20)], [SimKit.Monster(TestStatBlocks.Commoner, count: 20)],
+            iterations: 1_000, roundCap: 60, precision: 0.01);
+        var message = Refusal(spec);
+        Assert.StartsWith("this simulation is too large: 10,000 fights × 40 combatants × round cap 60 = 24,000,000, over the limit of 20,000,000. ", message);
+        Assert.EndsWith(
+            "Lower the round cap (most fights end well before 20 rounds) or the number of combatants, or give fewer iterations instead of " +
+            "precision (it runs at least one batch of 10,000 fights).", message);
+    }
+
+    [Theory]
+    [InlineData(4, 2, true)]   // charged 100,000 fights: 100,000 × 6 × 20 × 2 = 24 million
+    [InlineData(5, 6, false)]  // 100,000 × 11 × 20 = 22 million
+    public void Precision_AnOrdinaryFightPastTheBudgetAt100000Fights_IsAcceptedAndReachedInItsFirstBatch(int fighters, int ogres, bool compare)
+    {
+        // Precision is charged its first batch, not the 100,000 fights it may run: these were refused, and reach ±1% in
+        // that first batch. Its later batches stop at the budget instead (SimulatorRunTests).
+        var feature = SimKit.Feature("""{ "name": "Plus one", "modifiers": [{ "kind": "to_hit", "amount": 1 }] }""");
+        var spec = SimKit.Spec([SimKit.Pc(SimKit.Fighter2024, hp: 44, ac: 18, count: fighters)], [SimKit.Monster(TestStatBlocks.Ogre, count: ogres)],
+            precision: 0.01, compare: compare ? new CompareSpec { Member = 1, Feature = feature } : null);
+
+        var report = Simulator.Run(spec, 1);
+
+        Assert.True(report.PrecisionReached);
+        Assert.Equal(SimulationLimits.PrecisionBatch, report.Iterations);
+    }
+
+    [Fact]
+    public void OverTheWorkBudget_CompareCountsEveryFightTwice()
+    {
+        // 15,000 × 40 × 20 = 12 million alone, but a comparison fights every one twice: 24 million, over the budget.
+        var feature = SimKit.Feature("""{ "name": "Plus one", "modifiers": [{ "kind": "to_hit", "amount": 1 }] }""");
+        var spec = SimKit.Spec([SimKit.Pc(SimKit.Fighter2024, hp: 44, ac: 18, count: 20)], [SimKit.Monster(TestStatBlocks.Commoner, count: 20)], iterations: 15_000,
+            compare: new CompareSpec { Member = 1, Feature = feature });
+        Assert.StartsWith("this simulation is too large: 15,000 fights × 40 combatants × round cap 20 × 2 (compare) = 24,000,000", Refusal(spec));
+    }
+
+    [Theory]
+    [InlineData("cone", 15, 2)]      // 15 ÷ 10, rounded up
+    [InlineData("sphere", 20, 4)]
+    [InlineData("emanation", 15, 3)] // a 2024 Emanation counts as a sphere of its size
+    [InlineData("line", 100, 4)]
+    [InlineData("cube", 10, 2)]
+    [InlineData("cube", 5, 1)]
+    public void AreaCount_IsTheDmgTableRoundedUp(string shape, int size, int expected) =>
+        Assert.Equal(expected, CombatantCompiler.AreaCount(new AreaSpec(shape, size)));
+
+    [Fact]
+    public void MonsterEntry_GivenSavesAndHp_OverrideTheStatBlock_AndHpIsNeverRolled()
+    {
+        var ogre = new SimulationCombatant(new CombatantSpec { Monster = "Ogre", Hp = 100, Saves = new Domain.Features.SavesSpec { Wis = 9 } }, TestStatBlocks.Ogre);
+        var template = SimulationPreparation.Prepare(SimKit.Spec([Fighter], [ogre], enemyHp: "roll")).Setup.Templates[1];
+        Assert.Equal(9, template.Saves[4]);
+        Assert.Equal(-3, template.Saves[3]); // Int 5: the stat block's own
+        Assert.Equal(100, template.AverageHp);
+        Assert.Null(template.RolledHp);
+    }
+
+    [Fact]
+    public void Build_AnAcModifier_RaisesTheCombatantsArmorClass()
+    {
+        var shielded = SimKit.Pc("""{ "name": "Shielded", "edition": "2024", "level": 5, "abilities": {"str": 16}, "attacks": [{ "name": "Mace", "damage": "1d6", "damage_type": "bludgeoning", "properties": ["melee"] }], "modifiers": [{ "kind": "ac", "name": "Shield of Faith", "amount": 2 }] }""", hp: 40, ac: 18);
+        Assert.Equal(20, SimulationPreparation.Prepare(SimKit.Spec([shielded], [Ogre])).Setup.Templates[0].ArmorClass);
+    }
+
+    [Fact]
+    public void MonsterEntry_LegendaryUses_AreTheNonLairCount()
+    {
+        // The fight is never in a lair: a 3 (4 in lair) legendary monster gets 3 a round.
+        var lairBoss = TestStatBlocks.Sandbag(legendary: new LegendaryActions(3, 4, [TestStatBlocks.Attack("Tail", 5, "1d8", "bludgeoning", slot: StatBlockValues.ActionSlots.Legendary)]));
+        Assert.Equal(3, SimulationPreparation.Prepare(SimKit.Spec([Fighter], [SimKit.Monster(lairBoss)])).Setup.Templates[1].LegendaryUses);
+    }
+
+    [Fact]
+    public void EnemyHpRoll_RollsOnlyTheEnemies()
+    {
+        // "roll" is enemy hit points: an SRD monster fighting on the party's side keeps its average.
+        var setup = SimulationPreparation.Prepare(SimKit.Spec([SimKit.Monster(TestStatBlocks.Ogre, name: "Ally")], [Ogre], enemyHp: "roll")).Setup;
+        Assert.Null(setup.Templates[0].RolledHp);
+        Assert.NotNull(setup.Templates[1].RolledHp);
+    }
+
+    [Fact]
+    public void Precision_ReplacesIterations_WhichIsThenNotChecked()
+    {
+        var report = Simulator.Run(SimKit.Spec([Fighter], [Ogre], iterations: 0, precision: 0.02), 1);
+        Assert.True(report.PrecisionReached);
     }
 
     [Fact]

@@ -63,6 +63,13 @@ internal sealed class Creature
 
     public bool ReactionAvailable;
 
+    /// <summary>
+    /// A spell parry's AC bonus (Shield: "+5 bonus to AC, including against the triggering attack, until the start of your
+    /// next turn"), 0 when none: every attack roll against it meets it until its next turn starts. A true Parry covers only
+    /// the one attack and never sets it.
+    /// </summary>
+    public int ShieldAc;
+
     /// <summary>2014 surprise: skips its first turn and has no reactions until that turn ends.</summary>
     public bool Surprised;
 
@@ -94,6 +101,30 @@ internal sealed class Creature
 
     public PcState? Pc { get; }
 
+    /// <summary>
+    /// The effects it can no longer be affected by this fight, as <see cref="EffectKey"/>s: a stat block action or rider
+    /// with <see cref="StatBlockAction.ImmuneAfterSuccess"/> ("the creature is immune to the dragon's Frightful Presence
+    /// for the next 24 hours") after it succeeded on that effect's save or the effect's condition on it ended. Per source
+    /// creature: a second dragon's Frightful Presence still works on it. A short list, cleared per fight (a few entries in
+    /// the fights that have any), so the hot loop allocates nothing once it has grown.
+    /// </summary>
+    private readonly List<int> _immunities = [];
+
+    /// <summary>The key of <paramref name="source"/>'s effect number <paramref name="effect"/> (<see cref="MonsterAction.ImmunityIndex"/>).</summary>
+    private static int EffectKey(int source, int effect) => (source << 16) | effect;
+
+    /// <summary>Whether <paramref name="source"/>'s effect number <paramref name="effect"/> can no longer affect it (−1: an effect that grants no immunity).</summary>
+    public bool IsImmuneToEffect(int source, int effect) => effect >= 0 && source >= 0 && _immunities.Contains(EffectKey(source, effect));
+
+    /// <summary>It succeeded against (or shook off) <paramref name="source"/>'s effect number <paramref name="effect"/>: immune for the rest of the fight.</summary>
+    public void BecomeImmuneToEffect(int source, int effect)
+    {
+        if (effect >= 0 && source >= 0 && !IsImmuneToEffect(source, effect))
+        {
+            _immunities.Add(EffectKey(source, effect));
+        }
+    }
+
     // Per-fight statistics.
     public bool Dropped;
     public long DealtRaw;
@@ -107,13 +138,11 @@ internal sealed class Creature
     public readonly int[] PoolUsed;
 
     /// <summary>
-    /// Above 0 HP: what keeps its side in the fight (contract §5.4: the fight ends when a side has no creature above 0 HP).
-    /// A troll at 0 HP is not standing even though it may regenerate: while its allies fight on it gets up at the start of
-    /// its turn, but a side with nobody above 0 HP is beaten — otherwise a party without fire or acid could only ever lose
-    /// to one troll, which no table plays (they finish it after the fight).
+    /// Above 0 HP: it acts, it is a target, and it keeps its side in the fight (contract §5.4: the fight ends when a side
+    /// has no creature above 0 HP). A troll at 0 HP is not up even though it may regenerate: while its allies fight on it
+    /// gets up at the start of its turn, but a side with nobody above 0 HP is beaten — otherwise a party without fire or
+    /// acid could only ever lose to one troll, which no table plays (they finish it after the fight).
     /// </summary>
-    public bool Standing => !Dead && Hp > 0;
-
     public bool Up => !Dead && Hp > 0;
 
     public bool Has(int condition) => CondCount[condition] > 0 || (T.PermanentConditions & (1 << condition)) != 0;
@@ -137,7 +166,7 @@ internal sealed class Creature
     {
         Hp = T.StartsDown ? 0 : hp;
         MaxHp = hp;
-        TempHp = T.TempHpAtStart;
+        TempHp = 0; // a build's temp_hp is granted at the start of the fight (Fight.StartOfFight), by the no-stacking rule
         Dead = false;
         Down = T.StartsDown;
         Stable = false;
@@ -151,6 +180,7 @@ internal sealed class Creature
         VexTarget = -1;
         VexTurn = 0;
         ReactionAvailable = true;
+        ShieldAc = 0;
         Surprised = false;
         TurnsTaken = 0;
         Initiative = 0;
@@ -183,6 +213,7 @@ internal sealed class Creature
         LegendaryActionsUsed = 0;
         Array.Clear(LimitedUsed);
         Array.Clear(PoolUsed);
+        _immunities.Clear();
         Pc?.Reset();
     }
 }
@@ -207,7 +238,11 @@ internal sealed class PcState
     /// <summary>Uses spent this fight, per resource (for "resources used").</summary>
     public readonly int[] Used;
 
-    /// <summary>Per modifier number: a gated modifier (one with a setup) is up.</summary>
+    /// <summary>
+    /// Per modifier number: the modifier is up. The start of the fight raises every modifier without a setup and leaves the
+    /// gated ones (with a setup) down until the setup is paid; losing the concentration a modifier depends on lowers it —
+    /// for good when it has no setup to pay again (the warlock_baseline preset's Hex), until re-established when it has.
+    /// </summary>
     public readonly bool[] Active;
 
     /// <summary>The reaction attack will happen this round (drawn at the start of the creature's turn).</summary>
@@ -236,8 +271,12 @@ internal sealed class PcState
         Acted = false;
     }
 
-    /// <summary>Whether a modifier applies now: always, unless it waits for a setup that has not been paid (or was lost with concentration).</summary>
-    public bool IsActive(int number) => number >= Active.Length || !Build.Gated[number] || Active[number];
+    /// <summary>
+    /// Whether a modifier applies now (<see cref="Active"/>): not while it waits for a setup that has not been paid, nor
+    /// once the concentration it depends on is lost. A number past the array is a modifier kind the turn never gates
+    /// (temp_hp, ac): always on.
+    /// </summary>
+    public bool IsActive(int number) => number >= Active.Length || Active[number];
 
     public bool CanSpend(int slot) => slot < 0 || UsesLeft[slot] > 0;
 

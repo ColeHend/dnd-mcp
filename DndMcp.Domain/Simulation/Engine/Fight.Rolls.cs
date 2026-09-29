@@ -143,6 +143,15 @@ internal sealed partial class Fight
         return total >= dc;
     }
 
+    /// <summary>
+    /// The AC an attack roll meets: the creature's own, plus a Shield it cast (until its next turn starts,
+    /// <see cref="Creature.ShieldAc"/>), plus cover unless the attack ignores it (the harness target's cover; a build's
+    /// ignore_cover). Both sides' attacks, and the policies' odds, read it here, so a shielded creature is harder to hit
+    /// for every attacker and every estimate alike.
+    /// </summary>
+    private static int ArmorClass(Creature target, bool ignoresCover = false) =>
+        target.T.ArmorClass + target.ShieldAc + (ignoresCover ? 0 : target.T.CoverBonus);
+
     /// <summary>An escape from a grapple or restraint: d20 + the better of Str and Dex (Athletics or Acrobatics) against the DC.</summary>
     private bool EscapeCheck(Creature c, int dc, out string text)
     {

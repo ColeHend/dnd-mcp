@@ -39,6 +39,12 @@ public static class PartyArchetypes
         ToCombatant(ArchetypeCatalog.Build(archetype, level, edition));
 
     /// <summary>
+    /// The catalogue's name for an archetype as given (" WIZARD " → "wizard"), as <see cref="Expand"/> matches it, or null
+    /// when it is not one: what a report names, rather than the caller's spelling.
+    /// </summary>
+    public static string? Canonical(string archetype) => ArchetypeCatalog.TryMatch(archetype, out var name) ? name : null;
+
+    /// <summary>
     /// The lines a simulation report adds to its assumptions for the archetypes in the fight: the rules they share, once,
     /// then each distinct (archetype, level, edition)'s <see cref="ArchetypeMember.Summary"/>. Empty when there are none.
     /// </summary>

@@ -56,6 +56,11 @@
     "targets": 3, "upcast_targets": 1,
     "note": "Each dart hits a creature automatically; the darts are spread over the targets the policy picks."
   },
+  "power-word-kill": {
+    "kind": "auto_hit",
+    "kill_at_or_below_hp": 100,
+    "note": "A target with 100 hit points or fewer dies outright; the spell has no effect on one with more."
+  },
   "scorching-ray": {
     "kind": "attack", "attack": "ranged",
     "damage": [{"dice": "2d6", "type": "fire"}],
@@ -64,7 +69,7 @@
   },
   "shield": {
     "kind": "parry", "ac_bonus": 5,
-    "note": "Its +5 AC lasts until the start of the caster's next turn; the simulator applies it to the triggering attack only."
+    "note": "Its +5 AC lasts until the start of the caster's next turn, including against the triggering attack; the simulator keeps it up for every attack until then."
   },
   "spirit-guardians": {
     "kind": "save", "save": "wis", "on_success": "half",

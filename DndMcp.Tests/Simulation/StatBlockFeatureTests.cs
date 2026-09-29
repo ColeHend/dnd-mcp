@@ -68,6 +68,71 @@ public sealed class StatBlockFeatureTests
     }
 
     [Fact]
+    public void UntilEndOfTargetTurn_ImposedAsItsOwnTurnStarts_LastsThroughItsNextTurn()
+    {
+        // Imposed during the target's own turn (an aura as the turn starts), "until the end of its next turn" must not end
+        // with this turn: it covers the next one and ends there.
+        var ghast = Monster("Ghast", [TestStatBlocks.Attack("Claws", 5, "2d6+3", "slashing")], traits:
+        [
+            new StatBlockTrait
+            {
+                Name = "Stench",
+                Kind = K.TraitKinds.AuraDamage,
+                Save = new SaveSpec("con", 30, K.OnSuccess.None),
+                Condition = Effect("poisoned", K.Durations.UntilEndOfTargetTurn),
+                Area = new AreaSpec(K.Shapes.Emanation, 5),
+                Text = "Any creature that starts its turn within 5 feet of the ghast must succeed on a DC 30 Constitution saving throw or be poisoned until the end of its next turn.",
+            },
+        ]);
+        var fight = Scripted.Begin([Fighter], [SimKit.Monster(ghast)]);
+        var pc = fight.Named("Fighter");
+        fight.TakeTurn(pc);
+        Assert.True(pc.Has(Cond.Poisoned)); // this turn's end is not its next turn's
+
+        fight.ApplyDamage(null, fight.Named("Ghast"), Scripted.Damage(1000), false, false, false, false, false);
+        fight.TakeTurn(pc);
+        Assert.False(pc.Has(Cond.Poisoned)); // ended with the next turn, and nothing renews it
+    }
+
+    [Fact]
+    public void ConditionOnlyAura_ABackLinerIsOutOfReach()
+    {
+        var ghast = Monster("Ghast", [TestStatBlocks.Attack("Claws", 5, "2d6+3", "slashing")], traits:
+        [
+            new StatBlockTrait
+            {
+                Name = "Stench",
+                Kind = K.TraitKinds.AuraDamage,
+                Save = new SaveSpec("con", 30, K.OnSuccess.None),
+                Condition = Effect("poisoned", K.Durations.UntilStartOfTargetTurn),
+                Area = new AreaSpec(K.Shapes.Emanation, 5),
+                Text = "Any creature that starts its turn within 5 feet of the ghast must succeed on a DC 30 Constitution saving throw or be poisoned until the start of its next turn.",
+            },
+        ]);
+        var back = SimKit.Pc(SimKit.Fighter2024, hp: 44, ac: 18, name: "Back", position: "back");
+        var fight = Scripted.Begin([Fighter, back], [SimKit.Monster(ghast)]);
+        fight.StartOfTurn(fight.Named("Back"));
+        Assert.False(fight.Named("Back").Has(Cond.Poisoned));
+        fight.StartOfTurn(fight.Named("Fighter"));
+        Assert.True(fight.Named("Fighter").Has(Cond.Poisoned));
+    }
+
+    [Fact]
+    public void OnHitCondition_SizeLimit_IncludesThatSize()
+    {
+        // "Medium or smaller" grapples a Medium creature.
+        var grabber = Monster("Grabber", [TestStatBlocks.Attack("Grab", 30, "1", "bludgeoning", onHit:
+            [new ActionEffect { Kind = K.EffectKinds.Condition, Condition = Effect("restrained", K.Durations.UntilEscape, 30), MaxSize = "Medium" }])]);
+        for (ulong seed = 1; seed <= 5; seed++)
+        {
+            var fight = Scripted.Begin([Fighter], [SimKit.Monster(grabber)], seed);
+            var pc = fight.Named("Fighter");
+            fight.TakeTurn(fight.Named("Grabber"));
+            Assert.Equal(pc.TakenRaw > 0, pc.Has(Cond.Restrained));
+        }
+    }
+
+    [Fact]
     public void ExtraConditions_OnASaveAction_AllLand()
     {
         var kraken = Monster("Inker", [TestStatBlocks.SaveAction("Toxic Ink", "con", 30, "", "poison", condition: Effect("blinded", K.Durations.Fight)) with
@@ -169,6 +234,29 @@ public sealed class StatBlockFeatureTests
     }
 
     [Fact]
+    public void SharedRecharge_ARoutineOverItsOwnSpells_SpendsItOnceAndCastsThemAll()
+    {
+        // 2024 pit fiend "Hellfire Spellcasting (Recharge 4-6). The pit fiend casts Fireball ... twice": the routine and the
+        // spell share one recharge, which the routine spends once; both Fireballs land (DC 30: the fighter always fails).
+        var recharge = new UsageSpec(K.UsageKinds.Recharge, RechargeMin: 4, Pool: "recharge:Hellfire Spellcasting");
+        var fireball = TestStatBlocks.SaveAction("Fireball", "dex", 30, "1", "fire", new AreaSpec(K.Shapes.Sphere, 20), usage: recharge, spell: true);
+        var hellfire = new StatBlockAction
+        {
+            Name = "Hellfire Spellcasting",
+            Kind = K.ActionKinds.UseActions,
+            Slot = K.ActionSlots.Action,
+            Uses = [new ActionUse("Fireball", 2)],
+            Usage = recharge,
+            Text = "The pit fiend casts Fireball twice.",
+        };
+        var fight = Scripted.Begin([Fighter], [SimKit.Monster(Monster("Fiend", [hellfire, fireball]))]);
+        var fiend = fight.Named("Fiend");
+        fight.TakeTurn(fiend);
+
+        Assert.Equal((2, false), (fight.Named("Fighter").TakenRaw, fiend.RechargeReady[0]));
+    }
+
+    [Fact]
     public void AreaAutoHit_DamagesEveryoneInTheAreaWithoutARollOrASave()
     {
         var teleport = new StatBlockAction
@@ -209,6 +297,424 @@ public sealed class StatBlockFeatureTests
         var loop = Monster("Loop", [a, b, TestStatBlocks.Attack("Claw", 3, "1d4", "slashing")]);
         var report = Simulator.Run(SimKit.Spec([Fighter], [SimKit.Monster(loop)], iterations: 50), 1);
         Assert.Equal(50, report.Iterations);
+    }
+
+    [Fact]
+    public void PowerWordKill_2024_ACreatureWith100HitPointsOrFewerDies()
+    {
+        // 2024 "If the target has 100 Hit Points or fewer, it dies. Otherwise, it takes 12d12 Psychic damage": a 90-HP
+        // fighter is dead, not dying (a dying PC is usually healed back up, so the kill moves "a party member dies").
+        var lich = DndMcp.Tests.Srd.Combatants.CorrectedSrd.Shipped.StatBlock("2024", "lich");
+        var powerWordKill = lich.Spells.Single(s => s.Name == "Power Word Kill");
+        Assert.Equal(100, powerWordKill.KillAtOrBelowHp);
+        var caster = lich with
+        {
+            Actions = [],
+            Multiattacks = [],
+            BonusActions = [],
+            Reactions = [],
+            Legendary = null,
+            Spells = [powerWordKill],
+        };
+        for (ulong seed = 1; seed <= 5; seed++)
+        {
+            var fight = Scripted.Begin([SimKit.Pc(SimKit.Fighter2024, hp: 90, ac: 18, name: "Fighter")], [SimKit.Monster(caster)], seed);
+            fight.TakeTurn(fight.Named("Lich"));
+            Assert.True(fight.Named("Fighter").Dead, $"seed {seed}: a 90-HP creature survived Power Word Kill");
+        }
+    }
+
+    [Theory]
+    [InlineData(100, true)]
+    [InlineData(101, false)]
+    public void KillAtOrBelowHp_AtOrBelowTheThresholdDies_AboveItTakesTheDamage(int hp, bool dies)
+    {
+        // The engine half of Power Word Kill on a hand-built block ("100 Hit Points or fewer, it dies. Otherwise, it takes
+        // 12d12"): dead outright, no death saves; one hit point more and the damage applies as usual.
+        var word = new StatBlockAction
+        {
+            Name = "Word",
+            Kind = K.ActionKinds.AutoHit,
+            Slot = K.ActionSlots.Action,
+            Damage = [TestStatBlocks.Roll("1", "psychic")],
+            KillAtOrBelowHp = 100,
+            Text = "If the target has 100 Hit Points or fewer, it dies. Otherwise, it takes 1 Psychic damage.",
+        };
+        var fight = Scripted.Begin([SimKit.Pc(SimKit.Fighter2024, hp: hp, ac: 18, name: "Fighter")], [SimKit.Monster(Monster("Speaker", [word]))]);
+        fight.TakeTurn(fight.Named("Speaker"));
+
+        var fighter = fight.Named("Fighter");
+        Assert.Equal((dies, dies ? 0 : hp - 1), (fighter.Dead, fighter.Dead ? 0 : fighter.Hp));
+    }
+
+    [Fact]
+    public void ImmuneAfterSuccess_ACreatureThatSaved_IsNotMadeToSaveAgainstThatActionAgain()
+    {
+        // "If a creature's saving throw is successful ... the creature is immune to the dragon's Frightful Presence for the
+        // next 24 hours": once the fighter saves, the same creature's Presence never rolls against it again this fight.
+        var presence = TestStatBlocks.SaveAction("Presence", "wis", 12, "1d6", "psychic", onSuccess: K.OnSuccess.None,
+            condition: Effect("frightened", K.Durations.Rounds) with { Rounds = 10 }) with { ImmuneAfterSuccess = true };
+        var checkedSeeds = 0;
+        for (ulong seed = 1; seed <= 20; seed++)
+        {
+            var fight = new Fight(SimulationPreparation.Prepare(SimKit.Spec([Fighter], [SimKit.Monster(Monster("Dragon", [presence]))])).Setup);
+            var log = new CombatLog(1_000_000);
+            fight.Begin(seed, log);
+            for (var turn = 0; turn < 4; turn++)
+            {
+                fight.TakeTurn(fight.Named("Dragon"));
+            }
+
+            var saves = log.Finish(string.Empty).Split('\n').Where(l => l.Contains("Fighter vs Presence:", StringComparison.Ordinal)).ToList();
+            var first = saves.FindIndex(l => l.EndsWith("success", StringComparison.Ordinal));
+            if (first < 0)
+            {
+                continue;
+            }
+
+            checkedSeeds++;
+            Assert.Empty(saves.Skip(first + 1).Select(l => $"seed {seed}, after the success: {l.Trim()}"));
+        }
+
+        Assert.True(checkedSeeds > 0);
+    }
+
+    [Fact]
+    public void ImmuneAfterSuccess_ARider_ACreatureThatSaved_IsNotMadeToSaveAgainstItAgain()
+    {
+        // The rider flag (ActionEffect.ImmuneAfterSuccess): a fear that rides every hit of a sure Claw. Once the fighter
+        // saves (Wis +0 against DC 12), later hits still deal their damage but roll no save against it.
+        var gaze = new ActionEffect
+        {
+            Kind = K.EffectKinds.Save,
+            Save = new SaveSpec("wis", 12, K.OnSuccess.None),
+            Condition = Effect("frightened", K.Durations.Rounds) with { Rounds = 10 },
+            ImmuneAfterSuccess = true,
+        };
+        var claw = TestStatBlocks.Attack("Claw", 30, "1", "slashing", onHit: [gaze]);
+        var checkedSeeds = 0;
+        for (ulong seed = 1; seed <= 20; seed++)
+        {
+            var fight = new Fight(SimulationPreparation.Prepare(SimKit.Spec([Fighter], [SimKit.Monster(Monster("Gazer", [claw]))])).Setup);
+            var log = new CombatLog(1_000_000);
+            fight.Begin(seed, log);
+            for (var turn = 0; turn < 4; turn++)
+            {
+                fight.TakeTurn(fight.Named("Gazer"));
+            }
+
+            var lines = log.Finish(string.Empty).Split('\n');
+            var first = Array.FindIndex(lines, l => l.Contains("Fighter vs Claw:", StringComparison.Ordinal) && l.EndsWith("success", StringComparison.Ordinal));
+            if (first < 0 || !lines.Skip(first + 1).Any(l => l.Contains("Claw vs Fighter", StringComparison.Ordinal) && l.EndsWith("hit", StringComparison.Ordinal)))
+            {
+                continue; // no success, or no hit after it
+            }
+
+            checkedSeeds++;
+            Assert.Empty(lines.Skip(first + 1).Where(l => l.Contains("Fighter vs Claw:", StringComparison.Ordinal)).Select(l => $"seed {seed}, after the success: {l.Trim()}"));
+        }
+
+        Assert.True(checkedSeeds > 0);
+    }
+
+    [Fact]
+    public void ImmuneAfterSuccess_TheConditionEnds_TheActionNoLongerAffectsIt()
+    {
+        // "If a creature's saving throw is successful or the effect ends for it, the creature is immune": a DC 30 Presence
+        // always lands, frightened until the end of the fighter's next turn; once that turn has ended the fear, the
+        // Presence never frightens it again.
+        var presence = TestStatBlocks.SaveAction("Presence", "wis", 30, "", "psychic", onSuccess: K.OnSuccess.None,
+            condition: Effect("frightened", K.Durations.UntilEndOfTargetTurn)) with { ImmuneAfterSuccess = true };
+        var fight = Scripted.Begin([Fighter], [SimKit.Monster(Monster("Dragon", [presence]))]);
+        var dragon = fight.Named("Dragon");
+        var pc = fight.Named("Fighter");
+        fight.TakeTurn(dragon);
+        Assert.True(pc.Has(Cond.Frightened));
+
+        fight.TakeTurn(pc);
+        Assert.False(pc.Has(Cond.Frightened)); // its turn ended the fear
+
+        fight.TakeTurn(dragon);
+        Assert.False(pc.Has(Cond.Frightened));
+        Assert.True(pc.IsImmuneToEffect(dragon.Id, dragon.T.Actions.Single().ImmunityIndex));
+    }
+
+    [Fact]
+    public void ImmuneAfterSuccess_AgainstAnImmuneTarget_TheMonsterUsesAnotherAction()
+    {
+        // The AI values the action at nothing against a creature immune to it: once the fighter has shaken the Presence
+        // off, the dragon pokes rather than spend its turn on an effect that cannot work (before, the Presence's fear —
+        // a quarter of the fighter's threat — outranked the 1-damage Poke).
+        var presence = TestStatBlocks.SaveAction("Presence", "wis", 30, "", "psychic", onSuccess: K.OnSuccess.None,
+            condition: Effect("frightened", K.Durations.UntilEndOfTargetTurn)) with { ImmuneAfterSuccess = true };
+        var dragon = Monster("Dragon", [TestStatBlocks.Attack("Poke", 30, "1", "piercing"), presence]);
+        var fight = new Fight(SimulationPreparation.Prepare(SimKit.Spec([Fighter], [SimKit.Monster(dragon)])).Setup);
+        var log = new CombatLog(1_000_000);
+        fight.Begin(1, log);
+        fight.TakeTurn(fight.Named("Dragon"));
+        Assert.True(fight.Named("Fighter").Has(Cond.Frightened)); // the Presence first
+        fight.TakeTurn(fight.Named("Fighter"));
+
+        var before = log.Finish(string.Empty).Length;
+        fight.TakeTurn(fight.Named("Dragon"));
+        var after = log.Finish(string.Empty)[before..];
+        Assert.Contains("Poke vs Fighter", after);
+        Assert.DoesNotContain("Presence", after);
+    }
+
+    [Fact]
+    public void ImmuneAfterSuccess_ARiderAgainstAnImmuneTarget_TheMonsterUsesAnotherAttack()
+    {
+        // The rider half of the AI's immunity: the Gaze's fear (DC 30: it always lands, until the end of the fighter's next
+        // turn) outranks the Poke's extra point of damage until it has ended once; from then on the fighter is immune to
+        // it, the Gaze is worth its 1 damage alone, and the dragon pokes.
+        var fear = new ActionEffect
+        {
+            Kind = K.EffectKinds.Save,
+            Save = new SaveSpec("wis", 30, K.OnSuccess.None),
+            Condition = Effect("frightened", K.Durations.UntilEndOfTargetTurn),
+            ImmuneAfterSuccess = true,
+        };
+        var dragon = Monster("Dragon", [TestStatBlocks.Attack("Gaze", 30, "1", "psychic", onHit: [fear]), TestStatBlocks.Attack("Poke", 30, "2", "piercing")]);
+        var checkedSeeds = 0;
+        for (ulong seed = 1; seed <= 5; seed++)
+        {
+            var fight = new Fight(SimulationPreparation.Prepare(SimKit.Spec([Fighter], [SimKit.Monster(dragon)])).Setup);
+            var log = new CombatLog(1_000_000);
+            fight.Begin(seed, log);
+            fight.TakeTurn(fight.Named("Dragon"));
+            Assert.Contains("Gaze vs Fighter", log.Finish(string.Empty)); // the Gaze first
+            if (!fight.Named("Fighter").Has(Cond.Frightened))
+            {
+                continue; // a natural 1
+            }
+
+            checkedSeeds++;
+            fight.TakeTurn(fight.Named("Fighter")); // the fear ends: immune from now on
+            var before = log.Finish(string.Empty).Length;
+            fight.TakeTurn(fight.Named("Dragon"));
+            var after = log.Finish(string.Empty)[before..];
+            Assert.Contains("Poke vs Fighter", after);
+            Assert.DoesNotContain("Gaze", after);
+        }
+
+        Assert.True(checkedSeeds > 0);
+    }
+
+    [Fact]
+    public void ImmuneAfterSuccess_ASingleTargetEffect_IsAimedAtACreatureNotImmuneToIt()
+    {
+        // The caster chooses its target: of two fighters, one already immune to the Glare, the Glare goes at the other every
+        // time (under the spread policy a coin flip would otherwise waste it on the immune one).
+        var glare = TestStatBlocks.SaveAction("Glare", "wis", 30, "1", "psychic", onSuccess: K.OnSuccess.None) with { ImmuneAfterSuccess = true };
+        var party = new[] { SimKit.Pc(SimKit.Fighter2024, hp: 44, ac: 18, name: "A"), SimKit.Pc(SimKit.Fighter2024, hp: 44, ac: 18, name: "B") };
+        for (ulong seed = 1; seed <= 20; seed++)
+        {
+            var fight = new Fight(SimulationPreparation.Prepare(SimKit.Spec(party, [SimKit.Monster(Monster("Gazer", [glare]))])).Setup);
+            var log = new CombatLog(1_000_000);
+            fight.Begin(seed, log);
+            var gazer = fight.Named("Gazer");
+            fight.Named("A").BecomeImmuneToEffect(gazer.Id, gazer.T.Actions.Single().ImmunityIndex);
+            fight.TakeTurn(gazer);
+
+            Assert.DoesNotContain("immune", log.Finish(string.Empty));
+            Assert.Equal((0, 1), (fight.Named("A").TakenRaw, fight.Named("B").TakenRaw));
+        }
+    }
+
+    [Theory]
+    [InlineData(2, false)]
+    [InlineData(1, true)]
+    public void ImmuneAfterSuccess_AnAreaThatCouldReachOnlyImmuneCreatures_IsNotUsed(int immune, bool used)
+    {
+        // "The dragon can use its Frightful Presence", a step of its Multiattack: once every creature it could reach is
+        // immune, the step is skipped (no area drawn, no line for each immune creature) and the Claw still comes. With one
+        // fighter still open to it, the Presence goes on as before.
+        var presence = TestStatBlocks.SaveAction("Presence", "wis", 12, "", "psychic", new AreaSpec(K.Shapes.Sphere, 60), onSuccess: K.OnSuccess.None,
+            condition: Effect("frightened", K.Durations.Rounds) with { Rounds = 10 }) with { ImmuneAfterSuccess = true };
+        var dragon = TestStatBlocks.Create("Dragon", 12, 500, "10d10", (14, 12, 14, 10, 10, 10), [presence, TestStatBlocks.Attack("Claw", 30, "1", "slashing")],
+            multiattacks: [TestStatBlocks.Multiattack(("Presence", 1), ("Claw", 1))], initiative: -5);
+        var party = new[] { SimKit.Pc(SimKit.Fighter2024, hp: 44, ac: 18, name: "A"), SimKit.Pc(SimKit.Fighter2024, hp: 44, ac: 18, name: "B") };
+        var fight = new Fight(SimulationPreparation.Prepare(SimKit.Spec(party, [SimKit.Monster(dragon)])).Setup);
+        var log = new CombatLog(1_000_000);
+        fight.Begin(1, log);
+        var source = fight.Named("Dragon");
+        foreach (var name in new[] { "A", "B" }.Take(immune))
+        {
+            fight.Named(name).BecomeImmuneToEffect(source.Id, source.T.Actions.Single(a => a.Name == "Presence").ImmunityIndex);
+        }
+
+        fight.TakeTurn(source);
+        var text = log.Finish(string.Empty);
+        Assert.Equal(used, text.Contains("Presence (DC 12 wis) on", StringComparison.Ordinal));
+        Assert.Equal(used ? 1 : 0, text.Split('\n').Count(l => l.Contains("is immune to Dragon's Presence", StringComparison.Ordinal)));
+        Assert.Contains("Claw vs", text);
+    }
+
+    [Theory]
+    [InlineData(90, true)]
+    [InlineData(200, false)]
+    public void KillAtOrBelowHp_ASaveRider_AFailedSaveKillsAtOrBelowTheThreshold(int hp, bool dies)
+    {
+        // The rider half (ActionEffect.KillAtOrBelowHp), as the 2014 solar's Slaying Longbow: "If the target is a creature
+        // that has 100 hit points or fewer, it must succeed on a DC 15 Constitution saving throw or die." At DC 30 the
+        // fighter (Con +3) always fails: at 90 HP it dies outright; at 200 the rider does nothing past the arrow's 1.
+        var slaying = new ActionEffect { Kind = K.EffectKinds.Save, Save = new SaveSpec("con", 30, K.OnSuccess.None), KillAtOrBelowHp = 100 };
+        var bow = TestStatBlocks.Attack("Slaying Longbow", 30, "1", "piercing", K.AttackRanges.Ranged, onHit: [slaying]);
+        var hits = 0;
+        for (ulong seed = 1; seed <= 5; seed++)
+        {
+            var fight = Scripted.Begin([SimKit.Pc(SimKit.Fighter2024, hp: hp, ac: 18, name: "Fighter")], [SimKit.Monster(Monster("Solar", [bow]))], seed);
+            var solar = fight.Named("Solar");
+            fight.TakeTurn(solar);
+            var pc = fight.Named("Fighter");
+            if (pc.TakenRaw == 0 && !pc.Dead)
+            {
+                continue; // a natural 1
+            }
+
+            hits++;
+            Assert.Equal((dies, dies ? 0 : hp - 1), (pc.Dead, pc.Hp));
+            Assert.Equal(dies ? 1 : 0, solar.Kills);
+        }
+
+        Assert.True(hits > 0);
+    }
+
+    [Theory]
+    [InlineData(100, true)]
+    [InlineData(101, false)]
+    public void KillAtOrBelowHp_ASaveAction_AFailedSaveKillsInsteadOfDealingItsDamage(int hp, bool dies)
+    {
+        // The 2024 solar's Slaying Bow: "Failure: If the creature has 100 Hit Points or fewer, it dies. It otherwise takes
+        // 24 (4d8 + 6) Piercing damage plus 36 (8d8) Radiant damage." At DC 30 the fighter (Dex +1) always fails: at 100 HP
+        // it dies and none of the 10 is dealt or taken; at 101 it takes the 10 and lives.
+        var bow = TestStatBlocks.SaveAction("Slaying Bow", "dex", 30, "10", "piercing", onSuccess: K.OnSuccess.None) with { KillAtOrBelowHp = 100 };
+        var fight = Scripted.Begin([SimKit.Pc(SimKit.Fighter2024, hp: hp, ac: 18, name: "Fighter")], [SimKit.Monster(Monster("Solar", [bow]))]);
+        var solar = fight.Named("Solar");
+        fight.TakeTurn(solar);
+
+        var pc = fight.Named("Fighter");
+        Assert.Equal((dies, dies ? 0 : 10, dies ? 0 : 10, dies ? 1 : 0), (pc.Dead, pc.TakenRaw, solar.DealtRaw, solar.Kills));
+    }
+
+    [Theory]
+    [InlineData(K.ActionKinds.AutoHit)]
+    [InlineData(K.ActionKinds.Save)]
+    [InlineData(K.ActionKinds.Attack)]
+    public void KillAtOrBelowHp_TheKillIsRankedAtTheHitPointsItTakes(string kind)
+    {
+        // What lets an outright kill be chosen at all: the 2014 Power Word Kill does nothing above 100 hit points, so its own
+        // damage (none for the auto-hit, 1 for the others) is worth less than a 5-damage option of the same kind. Ranked at
+        // the 90 hit points it takes from the fighter, the kill is used, and (when it lands: an attack can miss) kills.
+        var (kill, other) = kind switch
+        {
+            K.ActionKinds.AutoHit => (
+                new StatBlockAction { Name = "Word", Kind = kind, Slot = K.ActionSlots.Action, Damage = [], KillAtOrBelowHp = 100, Text = "Word" },
+                new StatBlockAction { Name = "Bolt", Kind = kind, Slot = K.ActionSlots.Action, Damage = [TestStatBlocks.Roll("5", "force")], Text = "Bolt" }),
+            K.ActionKinds.Save => (
+                TestStatBlocks.SaveAction("Word", "con", 30, "1", "necrotic", onSuccess: K.OnSuccess.None) with { KillAtOrBelowHp = 100 },
+                TestStatBlocks.SaveAction("Bolt", "con", 30, "5", "fire", onSuccess: K.OnSuccess.None)),
+            _ => (TestStatBlocks.Attack("Word", 30, "1", "piercing") with { KillAtOrBelowHp = 100 }, TestStatBlocks.Attack("Bolt", 30, "5", "piercing")),
+        };
+        for (ulong seed = 1; seed <= 5; seed++)
+        {
+            var fight = new Fight(SimulationPreparation.Prepare(SimKit.Spec([SimKit.Pc(SimKit.Fighter2024, hp: 90, ac: 18, name: "Fighter")], [SimKit.Monster(Monster("Speaker", [other, kill]))])).Setup);
+            var log = new CombatLog(1_000_000);
+            fight.Begin(seed, log);
+            fight.TakeTurn(fight.Named("Speaker"));
+
+            var text = log.Finish(string.Empty);
+            Assert.Contains("Word", text);
+            Assert.DoesNotContain("Bolt", text);
+            var fighter = fight.Named("Fighter");
+            Assert.True(fighter.Dead || (kind == K.ActionKinds.Attack && text.Contains("→ miss", StringComparison.Ordinal)), $"seed {seed}: {text}");
+        }
+    }
+
+    [Theory]
+    [InlineData(SimulationValues.Targeting.Threat)]
+    [InlineData(SimulationValues.Targeting.Spread)]
+    [InlineData(SimulationValues.Targeting.FocusFire)]
+    public void PowerWordKill_2014_IsAimedAtACreatureItKills(string policy)
+    {
+        // 2014 "If the creature you choose has 100 hit points or fewer, it dies. Otherwise, the spell has no effect": the
+        // lich chooses the 80-HP wizard, not the 200-HP tank that its side's policy would pick (threat: the first of two
+        // equal threats; spread: either, at random), on whom the spell does nothing.
+        var lich = DndMcp.Tests.Srd.Combatants.CorrectedSrd.Shipped.StatBlock("2014", "lich");
+        var powerWordKill = lich.Spells.Single(s => s.Name == "Power Word Kill");
+        var caster = lich with { Actions = [], Multiattacks = [], BonusActions = [], Reactions = [], Legendary = null, Spells = [powerWordKill] };
+        var party = new[] { SimKit.Pc(SimKit.Fighter2024, hp: 200, ac: 18, name: "Tank"), SimKit.Pc(SimKit.Fighter2024, hp: 80, ac: 14, name: "Wizard") };
+        for (ulong seed = 1; seed <= 20; seed++)
+        {
+            var fight = Scripted.Begin(party, [SimKit.Monster(caster)], seed, policies: new PolicySpec { Enemies = policy });
+            fight.TakeTurn(fight.Named("Lich"));
+            Assert.True(fight.Named("Wizard").Dead, $"seed {seed}: the wizard lives");
+            Assert.Equal(200, fight.Named("Tank").Hp);
+        }
+    }
+
+    [Theory]
+    [InlineData(K.ActionKinds.AutoHit, SimulationValues.Targeting.Threat)]
+    [InlineData(K.ActionKinds.AutoHit, SimulationValues.Targeting.Spread)]
+    [InlineData(K.ActionKinds.AutoHit, SimulationValues.Targeting.FocusFire)]
+    [InlineData(K.ActionKinds.Save, SimulationValues.Targeting.Threat)]
+    [InlineData(K.ActionKinds.Save, SimulationValues.Targeting.Spread)]
+    [InlineData(K.ActionKinds.Save, SimulationValues.Targeting.FocusFire)]
+    public void KillAtOrBelowHp_ASingleTargetKill_IsAimedAndValuedAtACreatureItKills(string kind, string policy)
+    {
+        // The kill goes to the 80-HP wizard (it does nothing to the 200-HP tank), so it is worth the wizard's 80 hit points
+        // and outranks a 60-damage Blast; averaged over both fighters it looked worth 40 and lost to the Blast. A save
+        // (DC 30: both always fail) is aimed the same way as an auto-hit.
+        var (word, blast) = kind == K.ActionKinds.AutoHit
+            ? (new StatBlockAction { Name = "Word", Kind = kind, Slot = K.ActionSlots.Action, Damage = [], KillAtOrBelowHp = 100, Text = "Word" },
+               new StatBlockAction { Name = "Blast", Kind = kind, Slot = K.ActionSlots.Action, Damage = [TestStatBlocks.Roll("60", "force")], Text = "Blast" })
+            : (TestStatBlocks.SaveAction("Word", "con", 30, "", "necrotic", onSuccess: K.OnSuccess.None) with { KillAtOrBelowHp = 100 },
+               TestStatBlocks.SaveAction("Blast", "con", 30, "60", "force", onSuccess: K.OnSuccess.None));
+        var party = new[] { SimKit.Pc(SimKit.Fighter2024, hp: 200, ac: 18, name: "Tank"), SimKit.Pc(SimKit.Fighter2024, hp: 80, ac: 14, name: "Wizard") };
+        for (ulong seed = 1; seed <= 5; seed++)
+        {
+            var fight = Scripted.Begin(party, [SimKit.Monster(Monster("Speaker", [blast, word]))], seed, policies: new PolicySpec { Enemies = policy });
+            fight.TakeTurn(fight.Named("Speaker"));
+            Assert.True(fight.Named("Wizard").Dead, $"seed {seed}: the wizard lives");
+            Assert.Equal(0, fight.Named("Tank").TakenRaw + fight.Named("Wizard").TakenRaw);
+        }
+    }
+
+    [Fact]
+    public void KillAtOrBelowHp_UnderFinishDowned_IsAimedAtAStandingCreatureNotADyingOne()
+    {
+        // A dying fighter is a candidate under finish_downed, and focus fire's first (0 HP), but it is out of the fight
+        // already and the kill would take nothing: the word goes to the standing 80-HP wizard, not the Poke to the dying.
+        var word = new StatBlockAction { Name = "Word", Kind = K.ActionKinds.AutoHit, Slot = K.ActionSlots.Action, Damage = [], KillAtOrBelowHp = 100, Text = "Word" };
+        var party = new[]
+        {
+            SimKit.Pc(SimKit.Fighter2024, hp: 200, ac: 18, name: "Tank"),
+            SimKit.Pc(SimKit.Fighter2024, hp: 80, ac: 14, name: "Wizard"),
+            SimKit.Pc(SimKit.Fighter2024, hp: 44, ac: 18, name: "Dying"),
+        };
+        var speaker = Monster("Speaker", [TestStatBlocks.Attack("Poke", 30, "1", "piercing"), word]);
+        var fight = Scripted.Begin(party, [SimKit.Monster(speaker)], policies: new PolicySpec { Enemies = SimulationValues.Targeting.FocusFire, FinishDowned = true });
+        var dying = fight.Named("Dying");
+        fight.ApplyDamage(null, dying, Scripted.Damage(44), false, false, false, false, false);
+        Assert.True(dying.Down);
+
+        fight.TakeTurn(fight.Named("Speaker"));
+        Assert.True(fight.Named("Wizard").Dead);
+        Assert.False(dying.Dead);
+    }
+
+    [Fact]
+    public void KillAtOrBelowHp_LegendaryResistance_IsSpentOnAFailedSaveThatWouldKill()
+    {
+        // A failure that kills matters as much as a condition that does (the "conditions" policy): a 90-HP legendary
+        // creature spends its one use against a DC 30 kill that carries neither damage nor a condition, and lives.
+        var doom = TestStatBlocks.SaveAction("Doom", "con", 30, "", "necrotic", onSuccess: K.OnSuccess.None) with { KillAtOrBelowHp = 100 };
+        var fight = Scripted.Begin([SimKit.Monster(TestStatBlocks.Sandbag("Legend", hp: 90, legendaryResistance: 1))], [SimKit.Monster(Monster("Slayer", [doom]))]);
+        fight.TakeTurn(fight.Named("Slayer"));
+
+        var legend = fight.Named("Legend");
+        Assert.Equal((false, 1), (legend.Dead, legend.LegendaryResistanceSpent));
     }
 
     [Fact]

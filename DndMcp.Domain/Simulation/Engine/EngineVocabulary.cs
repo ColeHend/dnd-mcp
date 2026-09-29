@@ -62,16 +62,16 @@ internal static class Cond
 /// <summary>How long an imposed condition lasts, compiled from <see cref="StatBlockValues.Durations"/> and <see cref="DslValues.Durations"/>.</summary>
 internal enum DurationKind
 {
-    /// <summary>Ends when the source starts its next turn.</summary>
+    /// <summary>Ends when the source starts its next turn (a dead source: where that turn would start, <c>Fight.DeadCreaturesPlace</c>).</summary>
     UntilStartOfSourceTurn,
 
-    /// <summary>Ends when the source's next turn ends (the turn it was imposed on, if any, does not count).</summary>
+    /// <summary>Ends when the source's next turn ends (the turn it was imposed on, if any, does not count; a dead source: where that turn would end).</summary>
     UntilEndOfSourceTurn,
 
     /// <summary>The target repeats the save at the end of each of its turns.</summary>
     SaveEnds,
 
-    /// <summary>A number of rounds, counted at the end of the source's turns.</summary>
+    /// <summary>A number of rounds, counted at the end of the source's turns (a dead source's too: where they would end).</summary>
     Rounds,
 
     /// <summary>Until the target escapes (its action, a check against the escape DC) or the source is incapacitated or dies.</summary>
@@ -260,6 +260,14 @@ internal struct ActiveCondition
 
     /// <summary>The source's concentration that holds it (0: none): when it ends, so does this.</summary>
     public int ConcentrationToken;
+
+    /// <summary>
+    /// The imposing effect's <see cref="MonsterAction.ImmunityIndex"/>, −1 for none (set only through
+    /// <c>Fight.AddCondition</c>, which is the only place a condition is made): when this condition ends, its creature
+    /// becomes immune to that effect of <see cref="Source"/> — "if a creature's saving throw is successful or the effect
+    /// ends for it, the creature is immune".
+    /// </summary>
+    public int Immunity;
 }
 
 /// <summary>How an attack is made this turn, the simulator's twin of the closed form's attack kinds (same rules per kind).</summary>

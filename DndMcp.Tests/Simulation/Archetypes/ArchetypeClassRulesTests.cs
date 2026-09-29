@@ -224,6 +224,35 @@ public sealed class ArchetypeClassRulesTests
     }
 
     [Theory]
+    // The 2024 SRD paladin's primary abilities are Strength and Charisma, and Aura of Protection (the Cha modifier on its
+    // own saves from 6) is the defence a fight against save effects measures: Cha takes the second score, Con the third.
+    // edition, level, Str, Cha, Con
+    [InlineData("2024", 1, 17, 15, 13)]
+    [InlineData("2024", 4, 18, 16, 13)]
+    [InlineData("2024", 12, 20, 18, 13)]
+    [InlineData("2024", 20, 20, 20, 13)]
+    [InlineData("2014", 18, 20, 20, 13)]
+    [InlineData("2014", 19, 20, 20, 15)] // the 2014 ASI at 19 goes to the third ability
+    public void Paladin_AbilitiesAreStrThenChaThenCon(string edition, int level, int str, int cha, int con)
+    {
+        var member = ArchetypeCatalog.Build("paladin", level, edition);
+
+        Assert.Equal((str, cha, con, 12, 10, 8), (member.Abilities.Str, member.Abilities.Cha, member.Abilities.Con, member.Abilities.Wis, member.Abilities.Dex, member.Abilities.Int));
+        Assert.StartsWith($"Abilities Str {str}, Cha {cha}, Con {con}, Wis 12, Dex 10, Int 8: standard array as Str 15, Cha 14, Con 13", member.Assumptions[1], StringComparison.Ordinal);
+    }
+
+    [Theory]
+    // The half-caster table from level 2 (a paladin's level 1 slots differ by edition, and no archetype spends them).
+    [InlineData(2, 2)]
+    [InlineData(5, 6)]
+    [InlineData(20, 15)]
+    public void SpellSlots_HalfTotal_IsTheHalfCasterTableFromLevelTwo(int level, int slots)
+    {
+        Assert.Equal(slots, SpellSlots.HalfTotal(level));
+        Assert.Throws<ArgumentOutOfRangeException>(() => SpellSlots.HalfTotal(1));
+    }
+
+    [Theory]
     // Second Wind 1d10 + fighter level, Bonus Action, self; 2014 once per short rest, 2024 2/3/4 uses at 1/4/10.
     [InlineData("2014", 1, "1d10+1", 1)]
     [InlineData("2014", 20, "1d10+20", 1)]

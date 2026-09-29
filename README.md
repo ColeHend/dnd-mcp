@@ -157,7 +157,7 @@ SRD content is taken from the [5e-bits 5e-database](https://github.com/5e-bits/5
 dataset (MIT licensed; see `content/LICENSES/`), and the 2024 rules from the SRD 5.2.1 Rules Glossary as structured JSON
 from the [serving-solid-characters](https://github.com/ColeHend/serving-solid-characters) project.
 
-Curated corrections: 307 of the served records (257 from 2024, 50 from 2014) had damaged upstream text or data (text
+Curated corrections: 308 of the served records (257 from 2024, 51 from 2014) had damaged upstream text or data (text
 spliced from another entry, words run together, rows missing, text cut short or back-translated, XP that contradicts
 the stat block's challenge rating). Their text is replaced with the SRD's own words, copied from the SRD 5.2 markdown for 2024 and the SRD 5.1 markdown for 2014, as listed
 in `content/srd-corrections.json` and explained in `content/srd-corrections.md`. Every corrected entry says so under

@@ -77,6 +77,36 @@ public sealed class StatBlockServiceTests : IClassFixture<McpServerHarness>
     }
 
     [Fact]
+    public async Task ResolveAsync_FormsThatDifferInCr_AreRefusedWithTheFormsListed()
+    {
+        // Every name the SRD splits into forms shares one CR today. Should a re-vendor split one whose forms differ, one
+        // form's numbers must not silently stand for the others: the name is refused and the forms are offered instead.
+        // A private content copy whose srd-corrections.json makes the werewolf's hybrid form CR 5 in both editions.
+        var root = Directory.CreateTempSubdirectory("dnd-mcp-forms-").FullName;
+        try
+        {
+            var content = Path.Combine(root, "content");
+            CopyDirectory(new DndMcpServerOptions().ContentRoot, content);
+            File.WriteAllText(Path.Combine(content, "srd-corrections.json"), $$"""{"corrections": [{{HybridAtCr5("2014")}}, {{HybridAtCr5("2024")}}]}""");
+            var options = new DndMcpServerOptions { ContentRoot = content, CacheDirectory = Path.Combine(root, "cache") };
+            using var index = new SrdIndexService(options, NullLogger<SrdIndexService>.Instance);
+            var service = new StatBlockService(index, options);
+
+            var ex = await Assert.ThrowsAsync<DndInputException>(() => service.ResolveAsync("Werewolf", "2024", null, CancellationToken.None));
+
+            Assert.StartsWith("monster: no monster in the 2014 or 2024 SRD is named \"Werewolf\". Close SRD names: ", ex.Message, StringComparison.Ordinal);
+            Assert.Contains("Werewolf, Hybrid Form (`2024/monster/werewolf-hybrid`)", ex.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+
+        static string HybridAtCr5(string edition) =>
+            $$"""{"ref": "{{edition}}/monster/werewolf-hybrid", "set": {"challenge_rating": 5, "xp": 1800}, "reason": "Test: forms that differ in CR.", "source": "test"}""";
+    }
+
+    [Fact]
     public async Task ResolveAsync_SameMonsterTwice_NormalizesOnce()
     {
         // Cached by ref: every simulation of three ogres, and every later call, shares one stat block.
@@ -152,6 +182,16 @@ public sealed class StatBlockServiceTests : IClassFixture<McpServerHarness>
         finally
         {
             Directory.Delete(empty, recursive: true);
+        }
+    }
+
+    private static void CopyDirectory(string source, string target)
+    {
+        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            var destination = Path.Combine(target, Path.GetRelativePath(source, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            File.Copy(file, destination);
         }
     }
 }

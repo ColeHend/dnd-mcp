@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using DndMcp.Domain.Simulation;
@@ -100,10 +101,12 @@ public sealed class MonsterOverrides
     public MonsterOverride? For(string edition, string index) => _byKey.GetValueOrDefault($"{edition}/{index}");
 
     /// <summary>
-    /// These overrides without one entry, or without one action of it (<paramref name="action"/>): what the tests use to
-    /// prove each override still changes the stat block. With <paramref name="field"/>, only that top-level fact is dropped.
+    /// These overrides without one entry, or without one action of it (<paramref name="action"/>): a test seam, what
+    /// <c>MonsterOverridesTests</c> uses to prove each override still changes the stat block. With
+    /// <paramref name="field"/> (a top-level field's wire name, as the file writes it), only that fact is dropped.
+    /// Nothing in the server calls it.
     /// </summary>
-    public MonsterOverrides Without(string key, string? action = null, string? field = null)
+    internal MonsterOverrides Without(string key, string? action = null, string? field = null)
     {
         var copy = new Dictionary<string, MonsterOverride>(_byKey, StringComparer.Ordinal);
         if (!copy.TryGetValue(key, out var entry))
@@ -154,9 +157,16 @@ public sealed class MonsterOverrides
             throw new InvalidDataException($"{FileName(edition)}: \"{key}\" needs a \"note\" saying why.");
         }
 
-        if (entry.Initiative is < -10 or > 20 || entry.LegendaryUses is < 1 or > 5 || entry.LegendaryUsesInLair is < 1 or > 6)
+        foreach (var (field, value, min, max) in new (string, int?, int, int)[]
+                 {
+                     ("initiative", entry.Initiative, -10, 20), ("legendary_uses", entry.LegendaryUses, 1, 5),
+                     ("legendary_uses_in_lair", entry.LegendaryUsesInLair, 1, 6),
+                 })
         {
-            throw new InvalidDataException($"{FileName(edition)}: \"{key}\" has a number out of range.");
+            if (value is { } n && (n < min || n > max))
+            {
+                throw new InvalidDataException(string.Create(CultureInfo.InvariantCulture, $"{FileName(edition)}: \"{key}\" {field} must be {min}-{max}; it is {n}."));
+            }
         }
 
         foreach (var (name, action) in entry.Actions ?? new Dictionary<string, ActionOverride>())
@@ -174,12 +184,12 @@ public sealed class MonsterOverrides
 
             if (action.Area is { } area && (!StatBlockValues.Shapes.All.Contains(area.Shape) || area.Size is < 1 or > 1000))
             {
-                throw new InvalidDataException($"{where}: area needs a shape ({string.Join(", ", StatBlockValues.Shapes.All)}) and a size 1-1000.");
+                throw new InvalidDataException(string.Create(CultureInfo.InvariantCulture, $"{where}: area needs a shape ({string.Join(", ", StatBlockValues.Shapes.All)}) and a size 1-1000; it has {area.Shape} {area.Size}."));
             }
 
             if (action.Targets is < 1 or > 20)
             {
-                throw new InvalidDataException($"{where}: targets must be 1-20.");
+                throw new InvalidDataException(string.Create(CultureInfo.InvariantCulture, $"{where}: targets must be 1-20; it is {action.Targets}."));
             }
 
             if (action.OnSuccess is null && action.Area is null && action.Targets is null)

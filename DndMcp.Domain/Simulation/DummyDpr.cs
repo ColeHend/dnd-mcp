@@ -16,23 +16,11 @@ public sealed record DummyDprResult(
     double Round1StandardError,
     IReadOnlyDictionary<long, long> Round1Histogram)
 {
-    /// <summary>The smallest round-1 total whose cumulative share reaches <paramref name="fraction"/> (as the closed form's percentiles).</summary>
-    public long Round1Percentile(double fraction)
-    {
-        var total = Round1Histogram.Values.Sum();
-        var needed = Math.Ceiling((fraction * total) - 1e-9);
-        long cumulative = 0;
-        foreach (var (damage, count) in Round1Histogram.OrderBy(p => p.Key))
-        {
-            cumulative += count;
-            if (cumulative >= needed)
-            {
-                return damage;
-            }
-        }
-
-        return Round1Histogram.Keys.DefaultIfEmpty(0).Max();
-    }
+    /// <summary>
+    /// The smallest round-1 total whose cumulative share reaches <paramref name="fraction"/> (as the closed form's
+    /// percentiles), by the report's own rule (<see cref="SimulationStatistics.Percentile(IReadOnlyDictionary{long, long}, double)"/>).
+    /// </summary>
+    public long Round1Percentile(double fraction) => SimulationStatistics.Percentile(Round1Histogram, fraction);
 }
 
 /// <summary>
@@ -122,7 +110,7 @@ public static class DummyDpr
     {
         var templates = new List<CombatantTemplate>
         {
-            CombatantCompiler.FromBuild(build, new CombatantSpec { Hp = 1_000_000, Ac = 40, Position = SimulationValues.Positions.Front }, 0, 0, 0, build.Name, pcLike: true),
+            CombatantCompiler.FromBuild(build, new CombatantSpec { Hp = 1_000_000, Ac = 40, Position = SimulationValues.Positions.Front }, 0, 0, build.Name, pcLike: true),
         };
         var main = Math.Max(1, build.SaveEffects.Select(s => s.Targets).DefaultIfEmpty(1).Max());
         for (var i = 0; i < main; i++)
@@ -195,7 +183,6 @@ public static class DummyDpr
         return new CombatantTemplate
         {
             Id = id,
-            Entry = id,
             Side = 1,
             Label = label,
             Edition = edition,

@@ -7,18 +7,30 @@ namespace DndMcp.Domain.Dpr;
 /// <summary>A damage distribution with the two numbers the expected-value pass reads from it.</summary>
 internal sealed class DamageSummary
 {
+    /// <summary>
+    /// How close to 0 or 1 <see cref="ZeroChance"/> may come before it IS 0 or 1. A double PMF's weights sum to 1 only up
+    /// to rounding: a hit whose every type the target is immune to reads P(0) = 0.9999999999999999, and that opened a
+    /// "the hit dealt damage" Vex branch of probability 1e-16 with no damage in it to condition on, so balance_dpr failed
+    /// with the SDK's bare error instead of answering 0. A real chance this close to certain moves no reported digit.
+    /// </summary>
+    internal const double CertaintyTolerance = 1e-12;
+
     public DamageSummary(Pmf<double> pmf)
     {
         Pmf = pmf;
         Mean = DamageDice.Mean(pmf);
-        ZeroChance = DamageDice.ProbabilityOf(pmf, 0);
+        var zero = DamageDice.ProbabilityOf(pmf, 0);
+        ZeroChance = zero < CertaintyTolerance ? 0 : zero > 1 - CertaintyTolerance ? 1 : zero;
     }
 
     public Pmf<double> Pmf { get; }
 
     public double Mean { get; }
 
-    /// <summary>P(no damage): a Vex hit that deals none grants no Advantage.</summary>
+    /// <summary>
+    /// P(no damage): a Vex hit that deals none grants no Advantage. Exactly 0 or 1 within <see cref="CertaintyTolerance"/>,
+    /// so the Vex split (which compares it with 0 and 1) opens two branches only when both outcomes can happen.
+    /// </summary>
     public double ZeroChance { get; }
 
     public static DamageSummary None { get; } = new(Pmf<double>.Point(0));

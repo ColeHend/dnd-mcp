@@ -34,14 +34,16 @@ public static class StatBlockValues
         public const string Heal = "heal";
 
         /// <summary>
-        /// A reaction that adds <see cref="StatBlockAction.AcBonus"/> to AC against one attack that would hit (Parry, the
-        /// Shield spell). Only meaningful in <see cref="StatBlock.Reactions"/>.
+        /// A reaction that adds <see cref="StatBlockAction.AcBonus"/> to AC when an attack would hit: a Parry against that
+        /// one attack, the Shield spell (<see cref="StatBlockAction.IsSpell"/>) until the start of the caster's next turn,
+        /// the triggering attack included. Only meaningful in <see cref="StatBlock.Reactions"/>.
         /// </summary>
         public const string Parry = "parry";
 
         /// <summary>
         /// Uses other actions by name (<see cref="StatBlockAction.Uses"/>): a legendary action that "makes one Rend attack"
-        /// or "uses Spellcasting to cast Scorching Ray". Multiattack is NOT this kind; it is <see cref="StatBlock.Multiattacks"/>.
+        /// or "uses Spellcasting to cast Scorching Ray", or a spellcasting action that casts several spells in one use
+        /// (2024 pit fiend Hellfire Spellcasting: Fireball twice). Multiattack is NOT this kind; it is <see cref="StatBlock.Multiattacks"/>.
         /// </summary>
         public const string UseActions = "use_actions";
 

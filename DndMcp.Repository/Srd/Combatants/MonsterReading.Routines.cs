@@ -77,7 +77,7 @@ internal sealed partial class MonsterReading
     }
 
     private List<(string Name, int Count)> Uses(MultiattackOption option, string where) =>
-        option.OptionType == "multiple"
+        option.OptionType == MultiattackOptionTypes.Multiple
             ? (option.Items ?? []).SelectMany(i => Uses(i, where)).ToList()
             : [(option.ActionName ?? string.Empty, option.Count is { } c ? Count(c, option.ActionName ?? "?", where) : 1)];
 
@@ -247,7 +247,7 @@ internal sealed partial class MonsterReading
         return [];
     }
 
-    private static string Key(string name) => Spaces().Replace(ProseText.StripParentheticals(name).ToLowerInvariant(), " ").Trim();
+    private static string Key(string name) => ProseText.StripParentheticals(name).ToLowerInvariant();
 
     private static string Singular(string key) => key.EndsWith('s') ? key[..^1] : key;
 
@@ -364,9 +364,6 @@ internal sealed partial class MonsterReading
 
         return ReadAction(leg, name, StatBlockValues.ActionSlots.Legendary);
     }
-
-    [GeneratedRegex(@"\s+")]
-    private static partial Regex Spaces();
 
     [GeneratedRegex(@"\bcasts a cantrip\b", RegexOptions.IgnoreCase)]
     private static partial Regex CastsCantrip();

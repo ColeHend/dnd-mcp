@@ -167,6 +167,46 @@ public sealed class ClosedFormAgreementTests(ITestOutputHelper output)
             """, """{ "ac": 15, "cover": "half" }"""),
         new("Paralyzed target (melee auto-crits)", Longswords(""), """{ "ac": 15, "condition": "paralyzed" }"""),
         new("Dodging target", Fighter2014(), """{ "ac": 15, "condition": "dodging" }"""),
+        new("Lucky vs a dodging target (the second die's 1 is rerolled)", Fighter2014("""{ "kind": "lucky" }"""), """{ "ac": 15, "condition": "dodging" }"""),
+        new("Fireball vs restrained targets (Disadvantage on Dex saves)", Fireball, """{ "ac": 12, "saves": {"dex": 2}, "condition": "restrained" }"""),
+        new("Non-magical save effect vs Magic Resistance (no Advantage)", """
+            { "name": "Alchemist", "edition": "2014", "level": 5, "abilities": {"int": 18},
+              "modifiers": [{ "kind": "save_effect", "name": "Alchemist's Fire Flask", "ability": "dex", "dc": 15, "dice": "8d6", "type": "fire", "shape": "sphere", "size": 20, "magical": false }] }
+            """, """{ "ac": 12, "saves": {"dex": 2}, "magic_resistance": true }"""),
+        new("Archer vs a paralyzed target (no auto-crit at range)", """
+            { "name": "Archer", "edition": "2024", "level": 5, "abilities": {"dex": 18}, "fighting_style": "archery",
+              "attacks": [{ "name": "Longbow", "count": 2, "to_hit": {"ability": "dex"}, "damage": "1d8", "damage_type": "piercing", "properties": ["ranged", "heavy", "two-handed"] }] }
+            """, """{ "ac": 15, "condition": "paralyzed" }"""),
+        new("Vex + Sentinel (a reaction attack neither takes nor spends the Vex)", """
+            { "name": "Vex", "edition": "2024", "level": 5, "abilities": {"dex": 18},
+              "attacks": [{ "name": "Shortsword", "count": 2, "to_hit": {"ability": "dex"}, "damage": "1d6", "damage_type": "piercing", "properties": ["melee", "finesse", "light"], "mastery": "vex" }],
+              "modifiers": [{ "kind": "extra_attack", "name": "Sentinel", "attack": "Shortsword", "action": "reaction", "trigger_probability": 0.5 }] }
+            """, """{ "ac": 16 }"""),
+        new("Savage Attacker, crit dice ruling, every hit a crit (paralyzed)", Fighter2024(Gwm2024 + """, { "kind": "reroll_damage_take_best", "name": "Savage Attacker" }"""), """{ "ac": 15, "condition": "paralyzed" }""", """{ "savage_attacker_on_crit_dice": true }"""),
+        new("A rider that does not double on a crit, every hit a crit (paralyzed)", Longswords("""{ "kind": "extra_damage", "name": "Steady rider", "dice": "2d6", "type": "radiant", "crit_doubles": false }"""), """{ "ac": 15, "condition": "paralyzed" }"""),
+        new("Resource rider + Sentinel (never spent on the reaction)", Longswords("""{ "kind": "extra_damage", "name": "Divine Smite", "dice": "2d8", "type": "radiant", "resource": {"uses": 3, "per": "long_rest"} }, { "kind": "extra_attack", "name": "Sentinel", "attack": "Longsword", "action": "reaction", "trigger_probability": 0.5 }"""), """{ "ac": 15 }"""),
+        new("GWF fighter with a rider, gwf_on_riders off", Fighter2014("""{ "kind": "extra_damage", "name": "Smite", "dice": "2d8", "type": "radiant" }"""), """{ "ac": 15 }"""),
+        new("Cleave with a negative Strength modifier (kept on the second attack)", """
+            { "name": "Weak cleaver", "edition": "2024", "level": 5, "abilities": {"str": 8},
+              "attacks": [{ "name": "Greataxe", "count": 2, "to_hit": {"total": 5}, "damage": "1d12", "damage_type": "slashing", "properties": ["melee", "heavy", "two-handed"], "mastery": "cleave" }] }
+            """, """{ "ac": 12, "second_target_rate": 1 }"""),
+        new("Elemental Adept (fire): Fire Bolt and an untyped rider", """
+            { "name": "Adept", "edition": "2014", "level": 5, "abilities": {"dex": 18},
+              "attacks": [{ "name": "Fire Bolt", "to_hit": {"ability": "dex"}, "damage": "2d10", "damage_type": "fire", "ability_to_damage": false, "properties": ["ranged", "spell"] }],
+              "modifiers": [{ "kind": "damage_die_remap", "name": "Elemental Adept", "remap": "elemental_adept", "type": "fire" }, { "kind": "extra_damage", "name": "Hex", "dice": "1d6" }] }
+            """, """{ "ac": 15 }"""),
+        new("Innate Sorcery: Advantage set up with the Bonus Action (applies to round 1's Fire Bolt)", """
+            { "name": "Sorcerer", "edition": "2024", "level": 5, "abilities": {"cha": 18},
+              "attacks": [{ "name": "Fire Bolt", "to_hit": {"ability": "cha"}, "damage": "2d10", "damage_type": "fire", "ability_to_damage": false, "properties": ["ranged", "spell"] }],
+              "modifiers": [{ "kind": "advantage", "name": "Innate Sorcery", "attacks": ["Fire Bolt"], "setup": "bonus_action" }] }
+            """, """{ "ac": 15 }"""),
+        // The cleric archetype's Spirit Guardians: the Action pays the setup once, then every turn's Action attacks.
+        new("Spirit Guardians set up with the Action, then the Attack action", """
+            { "name": "Guardian", "edition": "2024", "level": 5, "abilities": {"wis": 18, "str": 16},
+              "attacks": [{ "name": "Mace", "damage": "1d6", "damage_type": "bludgeoning", "properties": ["melee"] }],
+              "modifiers": [{ "kind": "save_effect", "name": "Spirit Guardians", "ability": "wis", "dc_ability": "wis", "dice": "3d8", "type": "radiant",
+                              "on_success": "half", "shape": "sphere", "size": 15, "action_cost": "none", "concentration": true, "setup": "action" }] }
+            """, """{ "ac": 15 }"""),
     ];
 
     public static IEnumerable<object[]> CaseData => Cases.Select((c, i) => new object[] { c.Name, i });

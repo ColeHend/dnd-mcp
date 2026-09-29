@@ -177,8 +177,8 @@ public sealed class ArchetypeCatalogTests
     [InlineData("barbarian", "2014", 16, 197, 16, "Unarmored Defense")] // Con 20: 10 + 1 + 5 ties half plate 15 + 1: the free formula wins
     [InlineData("barbarian", "2014", 20, 285, 19, "Unarmored Defense")] // Primal Champion: Con 24 (+7): 12 + 19×7 + 20×7; 10 + Dex 2 + 7
     [InlineData("barbarian", "2024", 20, 285, 18, "Unarmored Defense")] // Dex stays 13 (no ASI at 19 in 2024): 10 + 1 + 7
-    [InlineData("paladin", "2024", 1, 12, 18, "chain mail + shield")]
-    [InlineData("paladin", "2014", 11, 103, 20, "plate + shield")]    // Con 16 until 12: 10 + 10×6 + 11×3
+    [InlineData("paladin", "2024", 1, 11, 18, "chain mail + shield")] // Con 13 (Cha comes second): 10 + 1
+    [InlineData("paladin", "2014", 11, 81, 20, "plate + shield")]     // Con 13 until 19: 10 + 10×6 + 11×1
     [InlineData("ranger", "2014", 1, 12, 16, "scale mail")]           // 14 + Dex (max 2)
     [InlineData("ranger", "2024", 1, 12, 15, "studded leather")]      // 12 + Dex 3
     [InlineData("rogue", "2024", 8, 67, 17, "studded leather")]       // Dex 20: 12 + 5; Con 16: 8 + 7×5 + 8×3
@@ -223,11 +223,14 @@ public sealed class ArchetypeCatalogTests
 
     [Theory]
     // Aura of Protection from 6: the Cha modifier, minimum +1, on all six of the paladin's OWN saves.
-    // Scores: Str 17/18 at 4/20 at 8, Con 15/16 at 4/18 at 12/20 at 16, Cha 13 (15 at 19 in 2014), Wis 12, Dex 10, Int 8.
+    // Scores (Cha is the second ability): Str 17/18 at 4/20 at 8, Cha 15/16 at 4/18 at 12/20 at 16, Con 13 (15 at 19 in
+    // 2014), Wis 12, Dex 10, Int 8.
     // edition, level, saves str,dex,con,int,wis,cha
-    [InlineData("2024", 5, "4,0,3,-1,4,4")]     // PB 3, no aura yet
-    [InlineData("2024", 6, "5,1,4,0,5,5")]      // aura +1 (Cha 13 → +1)
-    [InlineData("2014", 19, "7,2,7,1,9,10")]    // PB 6, Cha 15 → aura +2
+    [InlineData("2024", 5, "4,0,1,-1,4,6")]     // PB 3, no aura yet
+    [InlineData("2024", 6, "7,3,4,2,7,9")]      // aura +3 (Cha 16)
+    [InlineData("2024", 12, "9,4,5,3,9,12")]    // PB 4, aura +4 (Cha 18)
+    [InlineData("2024", 16, "10,5,6,4,11,15")]  // PB 5, aura +5 (Cha 20)
+    [InlineData("2014", 19, "10,5,7,4,12,16")]  // PB 6, aura +5 (Cha 20), Con 15 from the 2014 ASI at 19
     public void Saves_PaladinAuraOfProtection_AddsToItsOwnSaves(string edition, int level, string saves)
     {
         var member = ArchetypeCatalog.Build("paladin", level, edition);

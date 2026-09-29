@@ -46,7 +46,7 @@ internal static class MartialArchetypes
             Title = "Fighter",
             Edition = edition,
             HitDie = 10,
-            Position = ArchetypeCatalog.Front,
+            Position = SimulationValues.Positions.Front,
             Abilities = AbilityTrack.Standard(
                 [V.Abilities.Str, V.Abilities.Con, V.Abilities.Dex, V.Abilities.Wis, V.Abilities.Cha, V.Abilities.Int],
                 e2024 ? [4, 6, 8, 12, 14, 16] : [4, 6, 8, 12, 14, 16, 19]),
@@ -134,7 +134,7 @@ internal static class MartialArchetypes
             Title = "Barbarian",
             Edition = edition,
             HitDie = 12,
-            Position = ArchetypeCatalog.Front,
+            Position = SimulationValues.Positions.Front,
             Abilities = AbilityTrack.Standard(
                 [V.Abilities.Str, V.Abilities.Con, V.Abilities.Dex, V.Abilities.Wis, V.Abilities.Cha, V.Abilities.Int],
                 AbilityTrack.StandardAsiLevels(edition), [V.Abilities.Str, V.Abilities.Con], e2024 ? 25 : 24),
@@ -165,7 +165,11 @@ internal static class MartialArchetypes
     /// archetype casts nothing else). Improved Divine Smite / Radiant Strikes (+1d8 radiant per melee hit) at 11. Lay on
     /// Hands: the whole pool (5 × level) on one creature, 2014 an Action, 2024 a Bonus Action, once a day. 2024: Sap
     /// mastery. Heavy armour and shield: 18, 19 at 5, 20 at 11. Aura of Protection (from 6) adds the Cha modifier (min 1)
-    /// to the paladin's OWN saves; the allies' share is not modelled. Str 17, Con 15, Cha 13.
+    /// to the paladin's OWN saves; the allies' share is not modelled. Str 17, Cha 15, Con 13 → Str 20 by 8, Cha 20 by 16
+    /// (2014: Con 15 at 19). Cha before Con because the 2024 paladin's primary abilities are Strength and Charisma and
+    /// the aura is the defence a fight against save effects measures: +3 at 6, +4 at 12, +5 at 16 (Con first would leave
+    /// Cha 13 and the aura +1 at every level). The price is hit points: Con +1 per level (2014: +2 from 19), where Con
+    /// second gave +2 rising to +5.
     /// </summary>
     internal static ArchetypeDefinition Paladin(string edition)
     {
@@ -179,7 +183,7 @@ internal static class MartialArchetypes
             Type = "radiant",
             When = e2024 ? V.When.FirstHitPerTurn : V.When.EveryHit,
             ActionCost = e2024 ? V.ActionCosts.BonusAction : null,
-            Resource = Resource(2, l => SpellSlots.HalfTotal(l, edition) + (e2024 ? 1 : 0), V.Rests.LongRest),
+            Resource = Resource(2, l => SpellSlots.HalfTotal(l) + (e2024 ? 1 : 0), V.Rests.LongRest),
             FromLevel = 2,
         };
 
@@ -189,9 +193,9 @@ internal static class MartialArchetypes
             Title = "Paladin",
             Edition = edition,
             HitDie = 10,
-            Position = ArchetypeCatalog.Front,
+            Position = SimulationValues.Positions.Front,
             Abilities = AbilityTrack.Standard(
-                [V.Abilities.Str, V.Abilities.Con, V.Abilities.Cha, V.Abilities.Wis, V.Abilities.Dex, V.Abilities.Int], AbilityTrack.StandardAsiLevels(edition)),
+                [V.Abilities.Str, V.Abilities.Cha, V.Abilities.Con, V.Abilities.Wis, V.Abilities.Dex, V.Abilities.Int], AbilityTrack.StandardAsiLevels(edition)),
             Armor = new ArmorPlan(Armor.ChainMail, ArmorPlan.Any, Shield: true),
             SaveProficiencies = [V.Abilities.Wis, V.Abilities.Cha],
             SaveBonus = (level, a) => level >= 6 ? Math.Max(1, a.Modifier(V.Abilities.Cha, level)) : 0,
@@ -271,7 +275,7 @@ internal static class MartialArchetypes
             Title = "Ranger",
             Edition = edition,
             HitDie = 10,
-            Position = ArchetypeCatalog.Back,
+            Position = SimulationValues.Positions.Back,
             Abilities = AbilityTrack.Standard(
                 [V.Abilities.Dex, V.Abilities.Con, V.Abilities.Wis, V.Abilities.Str, V.Abilities.Int, V.Abilities.Cha], AbilityTrack.StandardAsiLevels(edition)),
             Armor = new ArmorPlan(e2024 ? Armor.StuddedLeather : Armor.ScaleMail, ArmorPlan.LightOrMedium, Shield: false),
@@ -339,7 +343,7 @@ internal static class MartialArchetypes
             Title = "Rogue",
             Edition = edition,
             HitDie = 8,
-            Position = ArchetypeCatalog.Front,
+            Position = SimulationValues.Positions.Front,
             Abilities = AbilityTrack.Standard(
                 [V.Abilities.Dex, V.Abilities.Con, V.Abilities.Wis, V.Abilities.Int, V.Abilities.Cha, V.Abilities.Str],
                 e2024 ? [4, 8, 10, 12, 16] : [4, 8, 10, 12, 16, 19]),
@@ -463,7 +467,7 @@ internal static class MartialArchetypes
             Title = "Monk",
             Edition = edition,
             HitDie = 8,
-            Position = ArchetypeCatalog.Front,
+            Position = SimulationValues.Positions.Front,
             Abilities = AbilityTrack.Standard(
                 [V.Abilities.Dex, V.Abilities.Wis, V.Abilities.Con, V.Abilities.Str, V.Abilities.Int, V.Abilities.Cha],
                 AbilityTrack.StandardAsiLevels(edition), e2024 ? [V.Abilities.Dex, V.Abilities.Wis] : null, 25),

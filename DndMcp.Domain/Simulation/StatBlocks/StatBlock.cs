@@ -89,7 +89,12 @@ public sealed record StatBlock
     /// <summary>Every trait, classified (<see cref="StatBlockValues.TraitKinds"/>), in stat-block order.</summary>
     public required IReadOnlyList<StatBlockTrait> Traits { get; init; }
 
-    /// <summary>Actions other than Multiattack and Spellcasting, in stat-block order.</summary>
+    /// <summary>
+    /// Actions other than Multiattack and Spellcasting, in stat-block order. A spellcasting action that casts several
+    /// spells in one use is here as <see cref="StatBlockValues.ActionKinds.UseActions"/> routines over its entries in
+    /// <see cref="Spells"/>, sharing their usage (2024 pit fiend "Hellfire Spellcasting": Fireball twice, or Fireball
+    /// and Hold Monster, or Fireball and Wall of Fire).
+    /// </summary>
     public required IReadOnlyList<StatBlockAction> Actions { get; init; }
 
     public required IReadOnlyList<StatBlockAction> BonusActions { get; init; }
@@ -99,8 +104,8 @@ public sealed record StatBlock
     /// <summary>
     /// The combat spells its spellcasting offers, each an action (kind attack, save, auto_hit or heal) with
     /// <see cref="StatBlockAction.IsSpell"/> set, its <see cref="StatBlockAction.Slot"/> the list the Spellcasting
-    /// entry sits in, and its usage (at will, per day, or a slot pool). Spells with no combat effect are not listed here;
-    /// a note names them.
+    /// entry sits in, and its usage (at will, per day, a slot pool, or the recharge of the action that casts it, shared
+    /// by that action's spells). Spells with no combat effect are not listed here; a note names them.
     /// </summary>
     public required IReadOnlyList<StatBlockAction> Spells { get; init; }
 
@@ -278,7 +283,7 @@ public sealed record StatBlockAction
     /// </summary>
     public bool SelfOnly { get; init; }
 
-    /// <summary>Parry reactions: the AC added against one attack.</summary>
+    /// <summary>Parry reactions: the AC added (against the one attack for a Parry; until the caster's next turn for Shield).</summary>
     public int? AcBonus { get; init; }
 
     /// <summary>Use-actions kind: what it uses, by resolved name (an entry of the stat block's actions or spells).</summary>
@@ -316,7 +321,10 @@ public sealed record StatBlockAction
     /// <summary>
     /// An outright kill by hit points (2024 Power Word Kill: "If the target has 100 Hit Points or fewer, it dies.
     /// Otherwise, it takes 12d12 Psychic damage"): a target with at most this many hit points dies (it gets no death
-    /// saves); otherwise <see cref="Damage"/> applies as usual. Null for everything else. Added in the Phase 5 fix round.
+    /// saves); otherwise <see cref="Damage"/> applies as usual (2014 Power Word Kill has none: it does nothing to a
+    /// creature with more). On a save action the kill is what a failed save does (2024 solar Slaying Bow: "Failure: If
+    /// the creature has 100 Hit Points or fewer, it dies. It otherwise takes …"). Null for everything else. Added in the
+    /// Phase 5 fix round.
     /// </summary>
     public int? KillAtOrBelowHp { get; init; }
 
@@ -345,8 +353,9 @@ public sealed record ActionUse(string ActionName, int Count);
 /// <param name="Pool">
 /// Pool: the key of a shared pool, e.g. <c>slot:3</c> (<see cref="StatBlock.SpellSlots"/>). Recharge: actions with the
 /// same key share ONE recharge (a 2014 dragon's Breath Weapons choice becomes one save action per breath, keyed
-/// <c>recharge:Breath Weapons</c>): using one spends them all until the recharge roll succeeds. Null for an action
-/// with its own recharge.
+/// <c>recharge:Breath Weapons</c>; a 2024 spellcasting action's spells and routines, keyed
+/// <c>recharge:Hellfire Spellcasting</c>): using one spends them all until the recharge roll succeeds. Null for an
+/// action with its own recharge.
 /// </param>
 public sealed record UsageSpec(string Kind, int? RechargeMin = null, int? Uses = null, string? Pool = null)
 {

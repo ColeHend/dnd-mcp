@@ -47,8 +47,8 @@ internal sealed partial class MonsterReading
 
     public StatBlock Build(string reference)
     {
-        var cr = ChallengeRating.FromNumber(_m.ChallengeRating) ?? ChallengeRating.Zero;
-        if (ChallengeRating.FromNumber(_m.ChallengeRating) is null)
+        var cr = ChallengeRating.FromNumber(_m.ChallengeRating);
+        if (cr is null)
         {
             _log.Unparsed("Challenge Rating", string.Create(CultureInfo.InvariantCulture, $"CR {_m.ChallengeRating} is not a table value; CR 0 is used."));
         }
@@ -71,7 +71,7 @@ internal sealed partial class MonsterReading
             Edition = Edition,
             Size = _m.Size,
             CreatureType = _m.CreatureType,
-            ChallengeRating = cr,
+            ChallengeRating = cr ?? ChallengeRating.Zero,
             Xp = _m.Xp,
             XpInLair = _m.XpInLair,
             ProficiencyBonus = _m.ProficiencyBonus,
@@ -84,8 +84,8 @@ internal sealed partial class MonsterReading
             InitiativeBonus = Initiative(),
             Speeds = Speeds(),
             Hovers = _m.Speed.Hover == true,
-            Resistances = Adjustments(_m.Resistances, "resistance"),
-            Immunities = Adjustments(_m.Immunities, "immunity"),
+            Resistances = Adjustments(_m.Resistances, DamageAdjustmentReader.Resistance),
+            Immunities = Adjustments(_m.Immunities, DamageAdjustmentReader.Immunity),
             Vulnerabilities = Adjustments(_m.Vulnerabilities, DamageAdjustmentReader.Vulnerability),
             ConditionImmunities = ConditionImmunities(),
             Traits = _traits,
@@ -152,13 +152,13 @@ internal sealed partial class MonsterReading
         var dex = _m.Abilities.Modifier(DslValues.Abilities.Dex);
         if (_override?.Initiative is { } initiative)
         {
-            _log.Note(string.Create(CultureInfo.InvariantCulture, $"Initiative {initiative:+0;-0;+0} as the stat block prints it (overrides file; the data has no initiative)."));
+            _log.Note(string.Create(CultureInfo.InvariantCulture, $"Initiative {initiative:+0;−0;+0} as the stat block prints it (overrides file; the data has no initiative)."));
             return initiative;
         }
 
         if (!Is2014)
         {
-            _log.Note(string.Create(CultureInfo.InvariantCulture, $"Initiative {dex:+0;-0;+0}: the Dexterity modifier (the 2024 data has no initiative and no override gives one)."));
+            _log.Note(string.Create(CultureInfo.InvariantCulture, $"Initiative {dex:+0;−0;+0}: the Dexterity modifier (the 2024 data has no initiative and no override gives one)."));
         }
 
         return dex;

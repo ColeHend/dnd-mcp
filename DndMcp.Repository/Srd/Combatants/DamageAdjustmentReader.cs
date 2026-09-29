@@ -16,6 +16,12 @@ namespace DndMcp.Repository.Srd.Combatants;
 /// </summary>
 internal static partial class DamageAdjustmentReader
 {
+    /// <summary>What <see cref="Read"/>'s callers pass for a resistance: the "where" of its warnings.</summary>
+    public const string Resistance = "resistance";
+
+    /// <summary>What <see cref="Read"/>'s callers pass for an immunity: the "where" of its warnings.</summary>
+    public const string Immunity = "immunity";
+
     /// <summary>What <see cref="Read"/>'s callers pass for a vulnerability, the one list an unread qualifier is left out of.</summary>
     public const string Vulnerability = "vulnerability";
 
@@ -35,7 +41,7 @@ internal static partial class DamageAdjustmentReader
         var typesPart = split.Success ? lower[..split.Index] : lower;
         var qualifierText = split.Success ? lower[(split.Index + split.Length)..].Trim() : null;
 
-        var types = TypeList().Split(typesPart)
+        var types = ProseText.ListSeparator().Split(typesPart)
             .Select(t => t.Trim())
             .Where(t => t.Length > 0)
             .Select(ProseText.DamageType)
@@ -72,9 +78,6 @@ internal static partial class DamageAdjustmentReader
     // Where the qualifier starts: "from nonmagical…", "damage from…", "that…".
     [GeneratedRegex(@"\s+(?:damage\s+)?from\s+|\s+that\s+")]
     private static partial Regex QualifierStart();
-
-    [GeneratedRegex(@",\s*and\s+|\s+and\s+|,\s*")]
-    private static partial Regex TypeList();
 
     [GeneratedRegex(@"^nonmagical (?:weapons|attacks) that aren't silvered$")]
     private static partial Regex NotSilvered();

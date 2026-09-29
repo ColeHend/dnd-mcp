@@ -10,8 +10,9 @@ namespace DndMcp.Formatting.Srd;
 /// <summary>
 /// <c>rules_get</c>'s <c>combatant</c> format: a monster's normalized <see cref="StatBlock"/>, shown as the simulator
 /// reads it — every number it uses, what each trait does in a simulated fight (by kind), each action's parsed parts
-/// (to-hit, damage per hit with its average, riders, saves, areas and targets, usage and recharge), the multiattack
-/// routines, the combat spells and slots, legendary actions with their costs, and the normalizer's notes and warnings.
+/// (to-hit, damage per hit with its average, riders, saves, areas and targets, usage and recharge, an outright kill by
+/// hit points, immunity after a successful save), the multiattack routines, the combat spells and slots, legendary
+/// actions with their costs, and the normalizer's notes and warnings.
 ///
 /// <para>
 /// <b>Why a separate view.</b> The concise stat block is the SRD's text; a simulation result is numbers derived from it.
@@ -195,7 +196,7 @@ internal static class CombatantMarkdown
     private static string ActionLine(StatBlockAction action)
     {
         var tags = new List<string>();
-        if (Usage(action.Usage) is { } usage)
+        if (Usage(action.Usage, action.Name) is { } usage)
         {
             tags.Add(usage);
         }
@@ -215,7 +216,7 @@ internal static class CombatantMarkdown
         }
 
         var head = $"**{action.Name}**" + (tags.Count > 0 ? $" ({string.Join(", ", tags)})" : string.Empty);
-        var text = $"{head} — {ActionBody(action)}";
+        var text = $"{head} — {ActionBody(action)}{Outcomes(action)}";
         if (action.Notes.Count > 0)
         {
             text += $" *{string.Join(" ", action.Notes)}*";
@@ -228,16 +229,86 @@ internal static class CombatantMarkdown
     {
         K.ActionKinds.Attack => AttackText(action),
         K.ActionKinds.Save => SaveActionText(action),
-        K.ActionKinds.AutoHit =>
-            $"no attack roll or save: {Plural(action.Targets, "creature", "creatures")}, {Rolls(action.Damage)} each{Magical(action)}.",
+        K.ActionKinds.AutoHit => AutoHitText(action),
         K.ActionKinds.Heal =>
             $"heals {(action.SelfOnly ? "itself" : Plural(action.Targets, "ally", "allies"))} {action.Healing} ({Average(action.Healing)}) each.",
-        K.ActionKinds.Parry => $"+{Number(action.AcBonus ?? 0)} AC against one attack that would hit it (its reaction).",
+        // The simulator keeps a spell parry's AC up until the caster's next turn (Shield: "including against the triggering
+        // attack"); a true Parry turns only the attack that triggered it, and only a melee one when its text says so (both
+        // editions' Parry: "one melee attack that would hit it", "hit by a melee attack roll"), the engine's own test.
+        K.ActionKinds.Parry => action.IsSpell
+            ? $"+{Number(action.AcBonus ?? 0)} AC until the start of its next turn, including against the attack that would hit it (its reaction)."
+            : $"+{Number(action.AcBonus ?? 0)} AC against one {(ParriesMeleeOnly(action) ? "melee " : string.Empty)}attack that would hit it (its reaction).",
         K.ActionKinds.UseActions =>
             "uses " + string.Join(", ", action.Uses.Select(u => u.Count == 1 ? u.ActionName : $"{u.ActionName} ×{Number(u.Count)}")) + ".",
         K.ActionKinds.NotModelled => "not simulated (see the warnings).",
         _ => action.Kind,
     };
+
+    /// <summary>
+    /// Whether a Parry works only against melee attacks: the simulator's own test (<c>CombatantCompiler</c>'s
+    /// <c>ParryMeleeOnly</c>: the text says "melee attack"), so the view cannot claim an erinyes turns an arrow the engine
+    /// lets through. The 2024 mummy lord's Whirlwind of Sand ("hit by an attack roll") turns any attack.
+    /// </summary>
+    private static bool ParriesMeleeOnly(StatBlockAction action) =>
+        action.Text.Contains("melee attack", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// An action with no attack roll and no save: its targets and the damage each takes. An area's targets are its
+    /// creatures by the DMG's count, as the engine counts them (the 2024 lich's Deathly Teleport hits everyone in its
+    /// 10-ft emanation, not "1 creature"). With no damage (2014 Power Word Kill, whose only effect is the kill that
+    /// <see cref="Outcomes"/> states) it names only the targets.
+    /// </summary>
+    private static string AutoHitText(StatBlockAction action)
+    {
+        var who = action.Area is { } area ? AreaText(area, 0).TrimStart(',', ' ') : Plural(action.Targets, "creature", "creatures");
+        return action.Damage.Count > 0
+            ? $"no attack roll or save: {who}, {Rolls(action.Damage)} each{Magical(action)}."
+            : $"no attack roll or save: {who}{Magical(action)}.";
+    }
+
+    /// <summary>
+    /// What the action does beyond its damage and conditions, as the simulator applies it: an outright kill by hit points
+    /// (Power Word Kill) and the immunity a successful save grants for the rest of the fight (Frightful Presence's 24
+    /// hours). Without them a reader of "12d12 psychic" could not tell why a 90-HP fighter simply died, nor why a creature
+    /// that saved once is never frightened by the same dragon again. The kill is said as the engine does it: outright for
+    /// an action with no roll, on a hit for an attack, and only on a FAILED save for a save action (the 2024 solar's
+    /// Slaying Bow: "Failure: If the creature has 100 Hit Points or fewer, it dies"; a target that saves is not killed).
+    /// Empty for nearly every action, and for one that is not simulated.
+    /// </summary>
+    private static string Outcomes(StatBlockAction action)
+    {
+        if (action.Kind == K.ActionKinds.NotModelled)
+        {
+            return string.Empty;
+        }
+
+        var text = new StringBuilder();
+        if (action.KillAtOrBelowHp is { } hp)
+        {
+            text.Append(action.Kind switch
+                {
+                    K.ActionKinds.Save => $" On a failure, a target with {Number(hp)} HP or fewer dies (no death saves); above that, ",
+                    K.ActionKinds.Attack => $" On a hit, a target with {Number(hp)} HP or fewer dies (no death saves); above that, ",
+                    _ => $" A target dies at {Number(hp)} HP or fewer (no death saves); above that, ",
+                })
+                .Append(action.Kind == K.ActionKinds.Save
+                    ? (action.Damage.Count > 0, action.Condition is not null) switch
+                    {
+                        (true, true) => "it takes the damage and the condition applies.",
+                        (true, false) => "it takes the damage.",
+                        (false, true) => "the condition applies.",
+                        _ => "a failure does nothing.",
+                    }
+                    : action.Damage.Count > 0 ? "the damage applies." : "it has no effect.");
+        }
+
+        if (action.ImmuneAfterSuccess)
+        {
+            text.Append(" A creature is immune for the rest of the fight after a successful save (or once its condition ends).");
+        }
+
+        return text.ToString();
+    }
 
     private static string AttackText(StatBlockAction action)
     {
@@ -265,7 +336,9 @@ internal static class CombatantMarkdown
                 {
                     effect.Damage.Count > 0 ? $"{Rolls(effect.Damage)} on a failure{OnSuccess(effect.Save)}" : null,
                     effect.Condition is { } c ? ConditionsText(c, effect.ExtraConditions) + " on a failure" : null,
-                }.OfType<string>()),
+                    effect.KillAtOrBelowHp is { } hp ? $"dies at {Number(hp)} HP or fewer on a failure" : null,
+                }.OfType<string>()) +
+                (effect.ImmuneAfterSuccess ? "; the target is immune for the rest of the fight after a successful save" : string.Empty),
             K.EffectKinds.Condition =>
                 $"on a hit the target is {(effect.Condition is { } condition ? ConditionsText(condition, effect.ExtraConditions) : "affected")}{size}",
             _ => effect.Kind,
@@ -362,12 +435,16 @@ internal static class CombatantMarkdown
         return list.Count == 0 ? null : $"### {title}\n\n" + string.Join("\n", list.Select(i => "- " + i));
     }
 
-    // "Recharge 5–6", "3/day", "a 3rd-level slot"; null at will.
-    private static string? Usage(UsageSpec usage) => usage.Kind switch
+    // "Recharge 5–6", "3/day", "a 3rd-level slot"; null at will. A shared recharge names its pool ("shared with Breath
+    // Weapons", "shared with Hellfire Spellcasting"), except on the pool's namesake (the 2024 pit fiend's Hellfire
+    // Spellcasting routine), which would read as shared with itself.
+    private static string? Usage(UsageSpec usage, string actionName) => usage.Kind switch
     {
         K.UsageKinds.Recharge =>
             (usage.RechargeMin is 6 ? "Recharge 6" : $"Recharge {Number(usage.RechargeMin ?? 6)}–6") +
-            (usage.Pool is { } pool ? $", one recharge shared with {pool.Replace("recharge:", string.Empty)}" : string.Empty),
+            (usage.Pool?.Replace("recharge:", string.Empty) is not { } pool
+                ? string.Empty
+                : pool == actionName ? ", one recharge shared with its spells and options" : $", one recharge shared with {pool}"),
         K.UsageKinds.PerDay => $"{Number(usage.Uses ?? 1)}/day",
         K.UsageKinds.Pool => usage.Pool is { } slot && slot.StartsWith("slot:", StringComparison.Ordinal) &&
                              int.TryParse(slot.AsSpan(5), NumberStyles.None, Invariant, out var level)

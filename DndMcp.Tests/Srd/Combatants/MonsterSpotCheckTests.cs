@@ -170,6 +170,13 @@ public sealed class MonsterSpotCheckTests
     }
 
     [Fact]
+    public void VioletFungus_2014_IsImmuneToBlindedDeafenedAndFrightened()
+    {
+        // SRD 5.1 "Condition Immunities blinded, deafened, frightened"; upstream listed blinded twice (srd-corrections.json).
+        Assert.Equal([V.Conditions.Blinded, V.Conditions.Deafened, V.Conditions.Frightened], Block("2014", "violet-fungus").ConditionImmunities);
+    }
+
+    [Fact]
     public void Werewolf_2014_IsImmuneOnlyToNonmagicalUnsilveredWeapons()
     {
         var werewolf = Block("2014", "werewolf-hybrid");
@@ -355,6 +362,16 @@ public sealed class MonsterSpotCheckTests
     }
 
     [Fact]
+    public void Zombie_2024_NotesANegativeInitiativeWithATrueMinus()
+    {
+        // The combatant view prints "Initiative −2" (a true minus, as the SRD does); its note must not say "-2".
+        var zombie = Block("2024", "zombie");
+
+        Assert.Equal(-2, zombie.InitiativeBonus);
+        Assert.Contains(zombie.Notes, n => n.StartsWith("Initiative \u22122 as the stat block prints it", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void AdultSilverDragon_2014_BreathsShareOneRecharge()
     {
         var dragon = Block("2014", "adult-silver-dragon");
@@ -365,5 +382,290 @@ public sealed class MonsterSpotCheckTests
         Assert.Equal(cold.Usage, paralyzing.Usage);
         Assert.Equal((V.Conditions.Paralyzed, V.Durations.SaveEnds), (paralyzing.Condition!.Condition, paralyzing.Condition.Duration));
         Assert.Equal(("13d8 cold", V.OnSuccess.Half), (Dice(cold.Damage), cold.Save!.OnSuccess));
+    }
+
+    [Fact]
+    public void PitFiend_2024_HellfireSpellcastingIsOneRechargeThatCastsTwoSpells()
+    {
+        // "Hellfire Spellcasting (Recharge 4-6). The pit fiend casts Fireball (level 5 version) twice ... It can replace
+        // one Fireball with Hold Monster (level 7 version) or Wall of Fire": one action, ONE recharge for all three spells.
+        var fiend = Block("2024", "pit-fiend");
+        var fireball = Action(fiend, "Fireball");
+        var hold = Action(fiend, "Hold Monster");
+        var wall = Action(fiend, "Wall of Fire");
+
+        Assert.Equal((V.UsageKinds.Recharge, 4), (fireball.Usage.Kind, fireball.Usage.RechargeMin));
+        Assert.NotNull(fireball.Usage.Pool); // one shared recharge for the Hellfire Spellcasting action
+        Assert.Equal(fireball.Usage, hold.Usage);
+        Assert.Equal(fireball.Usage, wall.Usage);
+        var hellfire = Action(fiend, "Hellfire Spellcasting"); // the action itself casts Fireball twice
+        Assert.Equal((V.ActionKinds.UseActions, 2), (hellfire.Kind, hellfire.Uses.Where(u => u.ActionName == "Fireball").Sum(u => u.Count)));
+    }
+
+    [Theory]
+    [InlineData("adult-red-dragon")]
+    [InlineData("ancient-gold-dragon")]
+    [InlineData("tarrasque")]
+    public void FrightfulPresence_2014_ItsImmunityAfterASuccessIsModelledOrWarned(string slug)
+    {
+        // "If a creature's saving throw is successful or the effect ends for it, the creature is immune to the dragon's
+        // Frightful Presence for the next 24 hours": a Multiattack step must not re-roll it every turn on those who saved.
+        var block = Block("2014", slug);
+        var presence = Action(block, "Frightful Presence");
+
+        Assert.Contains("immune", presence.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.True(presence.ImmuneAfterSuccess, $"{block.Ref} Frightful Presence: its immunity after a success is not modelled.");
+    }
+
+    [Theory]
+    [InlineData("kraken", "Bite")]
+    [InlineData("tarrasque", "Swallow")]
+    [InlineData("behir", "Swallow")]
+    public void Swallow_2014_NotSimulated_IsNotReportedAsSimulated(string slug, string action)
+    {
+        // With no swallow condition built, the "is simulated as its conditions and damage" warning would tell the user
+        // the acid per turn is in the numbers when it is not.
+        var block = Block("2014", slug);
+        var swallow = Action(block, action);
+        var simulated = swallow.Condition is not null || swallow.OnHit.Any(e => e.Condition is not null);
+        if (!simulated)
+        {
+            Assert.DoesNotContain(block.Warnings, w => w.Where == action && w.Message.Contains("is simulated as its conditions", StringComparison.Ordinal));
+        }
+    }
+
+    [Theory]
+    [InlineData("2014", "fire-elemental", "Touch")]
+    [InlineData("2014", "magmin", "Touch")]
+    [InlineData("2024", "fire-elemental", "Burn")]
+    [InlineData("2024", "horned-devil", "Infernal Tail")]
+    [InlineData("2024", "animated-rug-of-smothering", "Smother")]
+    public void PerTurnDamageOnAHit_IsSimulatedOrWarned(string edition, string slug, string name)
+    {
+        // Each hit sets the target burning or wounded for damage every turn ("ignites", "starts burning", "loses 10
+        // (3d6) Hit Points at the start of each of its turns"): every monster normalizes or warns.
+        var block = Block(edition, slug);
+        var action = Action(block, name);
+        var conditions = new[] { action.Condition }.Concat(action.ExtraConditions)
+            .Concat(action.OnHit.SelectMany(e => new[] { e.Condition }.Concat(e.ExtraConditions)));
+        var simulated = conditions.Any(c => c is { OngoingDamage.Count: > 0 });
+
+        Assert.True(simulated || block.Warnings.Any(w => w.Where.Contains(name, StringComparison.Ordinal)),
+            $"{block.Ref} {name}: its per-turn damage is neither simulated nor warned.");
+    }
+
+    [Fact]
+    public void PitFiend_2024_HellfireSpellcastingCanReplaceOneFireball()
+    {
+        // "It can replace one Fireball with Hold Monster (level 7 version) or Wall of Fire": two more routines, each one
+        // Fireball and the replacement, on the same recharge as the spells and the Fireball x2 routine.
+        var fiend = Block("2024", "pit-fiend");
+        var routines = fiend.Actions.Where(a => a.Kind == V.ActionKinds.UseActions).ToList();
+
+        Assert.Equal(
+            ["Hellfire Spellcasting: Fireball x2", "Hellfire Spellcasting (Hold Monster): Fireball x1, Hold Monster x1", "Hellfire Spellcasting (Wall of Fire): Fireball x1, Wall of Fire x1"],
+            routines.Select(r => $"{r.Name}: {string.Join(", ", r.Uses.Select(u => $"{u.ActionName} x{u.Count}"))}"));
+        Assert.All(routines, r => Assert.Equal(Action(fiend, "Fireball").Usage, r.Usage));
+        Assert.Equal(["Bite", "Devilish Claw", "Fiery Mace", "Hellfire Spellcasting"], fiend.Actions.Select(a => a.Name).Take(4));
+    }
+
+    [Theory]
+    [InlineData("2024", "drider", "Web")]
+    [InlineData("2024", "ice-devil", "Wall of Ice")]
+    public void SpellcastingAction_2024_WithOneCombatSpell_KeepsItsOwnRechargeAndNoRoutine(string edition, string slug, string spell)
+    {
+        // One combat spell behind a recharge: nothing to share, so the spell's recharge is its own and no routine is added.
+        var block = Block(edition, slug);
+
+        Assert.Equal((V.UsageKinds.Recharge, (string?)null), (Action(block, spell).Usage.Kind, Action(block, spell).Usage.Pool));
+        Assert.DoesNotContain(block.Actions.Concat(block.BonusActions), a => a.Kind == V.ActionKinds.UseActions);
+    }
+
+    [Theory]
+    [InlineData("2014", "")]
+    [InlineData("2024", "12d12 psychic")]
+    public void Lich_PowerWordKill_KillsAt100HitPointsOrFewer(string edition, string damage)
+    {
+        // 2014: "If the creature you choose has 100 hit points or fewer, it dies. Otherwise, the spell has no effect."
+        var lich = Block(edition, "lich");
+        var word = lich.Spells.Single(s => s.Name == "Power Word Kill");
+
+        Assert.Equal((V.ActionKinds.AutoHit, (int?)100, damage), (word.Kind, word.KillAtOrBelowHp, Dice(word.Damage)));
+        Assert.DoesNotContain(lich.Warnings, w => w.Message.Contains("Power Word Kill", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Solar_2014_SlayingLongbowsSaveOrDieIsAKillRider()
+    {
+        // "If the target is a creature that has 100 hit points or fewer, it must succeed on a DC 15 Constitution saving
+        // throw or die."
+        var solar = Block("2014", "solar");
+        var bow = Action(solar, "Slaying Longbow");
+        var rider = Assert.Single(bow.OnHit);
+
+        Assert.Equal(("2d8+6 piercing + 6d8 radiant", V.EffectKinds.Save, "con", 15, (int?)100, 0),
+            (Dice(bow.Damage), rider.Kind, rider.Save!.Ability, rider.Save.Dc, rider.KillAtOrBelowHp, rider.Damage.Count));
+        Assert.DoesNotContain(solar.Warnings, w => w.Where == "Slaying Longbow");
+    }
+
+    [Fact]
+    public void Solar_2024_SlayingBowKillsOnAFailedSaveAt100HitPointsOrFewer()
+    {
+        // "Failure: If the creature has 100 Hit Points or fewer, it dies. It otherwise takes 24 (4d8 + 6) Piercing damage
+        // plus 36 (8d8) Radiant damage."
+        var solar = Block("2024", "solar");
+        var bow = Action(solar, "Slaying Bow");
+
+        Assert.Equal((V.ActionKinds.Save, "dex", 21, (int?)100, "4d8+6 piercing + 8d8 radiant"), (bow.Kind, bow.Save!.Ability, bow.Save.Dc, bow.KillAtOrBelowHp, Dice(bow.Damage)));
+        Assert.DoesNotContain(solar.Warnings, w => w.Where == "Slaying Bow");
+    }
+
+    [Theory]
+    [InlineData("2014", "ghost", "Possession", false)]
+    [InlineData("2014", "lich", "Frightening Gaze", false)]
+    [InlineData("2014", "harpy", "Luring Song", false)]
+    [InlineData("2024", "ghost", "Possession", false)]
+    [InlineData("2014", "cloaker", "Moan", true)]
+    [InlineData("2024", "mummy", "Dreadful Glare", true)]
+    public void ImmuneAfterSuccess_TheTextsImmunity_IsSetAndWarnedWhereTheSimulatorWidensIt(string edition, string slug, string name, bool warned)
+    {
+        // Exact where the text grants it after a success AND when the effect ends (or the condition only ends on a
+        // success); approximated where only a success does and the condition also ends by itself.
+        var block = Block(edition, slug);
+
+        Assert.True(Action(block, name).ImmuneAfterSuccess);
+        Assert.Equal(warned, block.Warnings.Any(w => w.Where.EndsWith(name, StringComparison.Ordinal) && w.Message.Contains("immune once the condition ends", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void ImmuneAfterSuccess_2014Mummy_WarnsThatEveryMummysGlareIsCoveredInTheText()
+    {
+        // "A target that succeeds on the saving throw is immune to the Dreadful Glare of all mummies (but not mummy lords)
+        // for the next 24 hours": the simulator's immunity is to this mummy's glare only.
+        var mummy = Block("2014", "mummy");
+
+        Assert.True(Action(mummy, "Dreadful Glare").ImmuneAfterSuccess);
+        Assert.Contains(mummy.Warnings, w => w.Where == "Dreadful Glare" && w.Message.Contains("all mummies", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("werewolf-hybrid", "Bite")]
+    [InlineData("pit-fiend", "Bite")]
+    [InlineData("chain-devil", "Chain")]
+    public void ImmuneAfterSuccess_2024_NotSetWhereTheImmunityIsToSomethingElse(string slug, string name)
+    {
+        // A lycanthrope's bite makes a creature immune to its CURSE, not to the bite; the rest have no such clause. The
+        // curse rider is never built, so this guards the result only: the rule that the immunity must name the action
+        // is pinned by MonsterNormalizerCoverageTests.ImmuneAfterSuccess_ToSomethingTheActionIsNotNamedFor_IsNotSet.
+        var action = Action(Block("2024", slug), name);
+
+        Assert.False(action.ImmuneAfterSuccess || action.OnHit.Any(e => e.ImmuneAfterSuccess));
+    }
+
+    [Fact]
+    public void Kraken_2014_FlingIsNotModelled_ItsSaveBelongsToTheCreatureHitByTheThrow()
+    {
+        // "If the target is thrown at another creature, that creature must succeed on a DC 18 Dexterity saving throw or
+        // take the same damage and be knocked prone": not a save the flung creature makes.
+        var kraken = Block("2014", "kraken");
+
+        Assert.Equal(V.ActionKinds.NotModelled, Action(kraken, "Fling").Kind);
+        Assert.Contains(kraken.Warnings, w => w.Where == "Fling" && w.Code == V.WarningCodes.NotModelled && w.Message.Contains("hurled at", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AirElemental_2014_WhirlwindKeepsItsOwnSaveBeforeTheThrow()
+    {
+        // Whirlwind's first save is the target's ("Each creature in the elemental's space must make a DC 13 Strength
+        // saving throw"); only the later "thrown at another creature" save is someone else's.
+        var whirlwind = Action(Block("2014", "air-elemental"), "Whirlwind");
+
+        Assert.Equal((V.ActionKinds.Save, "str", 13), (whirlwind.Kind, whirlwind.Save!.Ability, whirlwind.Save.Dc));
+    }
+
+    [Theory]
+    [InlineData("2014", "fire-elemental", "Touch", "1d10")]
+    [InlineData("2014", "magmin", "Touch", "1d6")]
+    [InlineData("2024", "fire-elemental", "Burn", "Burning: 1d4 Fire damage")]
+    [InlineData("2024", "animated-rug-of-smothering", "Smother", "Grappled condition")]
+    [InlineData("2024", "animated-rug-of-smothering", "Smother", "2d6 + 3")]
+    [InlineData("2014", "kraken", "Bite", "12d6")]
+    public void PerTurnDamageOnAHit_TheWarningQuotesWhatIsLeftOut(string edition, string slug, string name, string quoted)
+    {
+        // A conditional lead that only sets the scene ("it ignites.") must not hide the damage the next sentence deals,
+        // however long the lead is: the rug's lead alone is 131 characters, and the kraken's "42 (12d6)" comes 143
+        // characters into its "While swallowed, …" sentence, both past the 140-character excerpt a quote once was.
+        var block = Block(edition, slug);
+
+        Assert.Contains(block.Warnings, w => w.Where == name && w.Code == V.WarningCodes.NotModelled && w.Message.Contains(quoted, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("2024", "boar", "Gore", "the target takes an extra 3 (1d6) Piercing damage and has the Prone condition.")]
+    [InlineData("2024", "incubus", "Nightmare", "or until a creature within 5 feet of it takes an action to wake it.")]
+    public void ConditionalRun_ALongSentence_TheWarningKeepsTheEffectAtItsEnd(string edition, string slug, string name, string quoted)
+    {
+        // "If the target is a Medium or smaller creature and the boar moved 20+ feet straight toward it immediately
+        // before the hit, the target takes an extra 3 (1d6) Piercing damage and has the Prone condition." A conditional
+        // sentence names what it does last, so a quote cut at its start's length would report the test, not the effect.
+        var block = Block(edition, slug);
+
+        Assert.Contains(block.Warnings, w => w.Where.EndsWith(name, StringComparison.Ordinal) && w.Code == V.WarningCodes.NotModelled && w.Message.Contains(quoted, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("2014", "water-elemental", "Whelm", "2d8+4 bludgeoning")]
+    [InlineData("2024", "horned-devil", "Infernal Tail", "loses 10 (3d6) Hit Points at the start of each of its turns")]
+    public void PerTurnDamage_WithNoConditionToCarryIt_IsWarnedAsNotModelledWithItsDice(string edition, string slug, string name, string quoted)
+    {
+        // 2014 Whelm: "At the start of each of the elemental's turns, each target grappled by it takes 13 (2d8 + 4)
+        // bludgeoning damage", but the grapple is conditional and not built, so the damage has no condition to ride.
+        // 2024 Infernal Tail: "While wounded, the target loses 10 (3d6) Hit Points at the start of each of its turns"
+        // (an infernal wound, no condition). Both drop damage every turn: not_modelled, as the 2014 horned devil's Tail
+        // and the 2024 bearded devil's Infernal Glaive are, never an approximation.
+        var block = Block(edition, slug);
+
+        Assert.Contains(block.Warnings, w => w.Where == name && w.Code == V.WarningCodes.NotModelled && w.Message.Contains(quoted, StringComparison.Ordinal));
+        Assert.DoesNotContain(block.Warnings, w => w.Where == name && w.Code == V.WarningCodes.Approximated && w.Message.Contains("lost every turn", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void SeaHag_2024_DeathGlareDropsATargetWith20HitPointsOrFewerTo0_IsWarned()
+    {
+        // "Failure: If the target has 20 Hit Points or fewer, it drops to 0 Hit Points. Otherwise, the target takes 13
+        // (3d8) Psychic damage." The threshold is not simulated (dropping to 0 is not dying, so it is no kill threshold):
+        // the 3d8 is always dealt, and a not_modelled warning says what is left out.
+        var hag = Block("2024", "sea-hag");
+        var glare = Action(hag, "Death Glare");
+
+        Assert.Equal((V.ActionKinds.Save, "3d8 psychic", (int?)null), (glare.Kind, Dice(glare.Damage), glare.KillAtOrBelowHp));
+        Assert.Contains(hag.Warnings, w => w.Where == "Death Glare" && w.Code == V.WarningCodes.NotModelled && w.Message.Contains("it drops to 0 Hit Points", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("2024", "fire-elemental", V.WarningCodes.NotModelled, "Burning: 1d4 Fire damage at the start of each of its turns")]
+    [InlineData("2014", "balor", V.WarningCodes.Approximated, "alight is not simulated; the aura's damage is.")]
+    public void FireAura_WhatItSetsAlight_IsWarned(string edition, string slug, string code, string quoted)
+    {
+        // 2024: "Creatures and flammable objects in the Emanation start burning": every creature in the aura takes the
+        // Burning hazard's 1d4 Fire damage each turn, which the simulator drops (not_modelled). 2014 balor: "flammable
+        // objects in the aura that aren't being worn or carried ignite": objects only, which change no fight.
+        var block = Block(edition, slug);
+
+        Assert.Equal(V.TraitKinds.AuraDamage, block.Traits.First(t => t.Name == "Fire Aura").Kind);
+        Assert.Contains(block.Warnings, w => w.Where == "trait Fire Aura" && w.Code == code && w.Message.Contains(quoted, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("tarrasque", "Swallow")]
+    [InlineData("behir", "Swallow")]
+    [InlineData("remorhaz", "Swallow")]
+    public void Swallow_2014_NotBuilt_IsWarnedAsNotSimulated(string slug, string name)
+    {
+        // The only save in these texts is the swallower's own (to regurgitate); the warning names the swallow, not it.
+        var block = Block("2014", slug);
+
+        Assert.Equal(V.ActionKinds.NotModelled, Action(block, name).Kind);
+        Assert.Contains(block.Warnings, w => w.Where == name && w.Code == V.WarningCodes.NotModelled && w.Message.StartsWith("Its swallow is not simulated", StringComparison.Ordinal));
     }
 }

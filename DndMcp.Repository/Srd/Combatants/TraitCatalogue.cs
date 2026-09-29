@@ -353,7 +353,9 @@ internal static partial class TraitCatalogue
         return trait with { Damage = [new DamageRoll(mention.Dice, mention.Type)] };
     }
 
-    // Balor/fire elemental "Fire Aura": damage to creatures nearby at a turn boundary, and (2014) to creatures that hit it.
+    // Balor/fire elemental "Fire Aura": damage to creatures nearby at a turn boundary, and (2014) to creatures that hit it;
+    // what it sets alight is warned: not_modelled when creatures start burning (2024 fire elemental; the Burning hazard's
+    // damage is dropped), approximated for the 2014 "ignite" wording (the balor's aura sets only objects alight).
     private static IReadOnlyList<StatBlockTrait> Aura(RecordAction trait, string text, string where, NormalizationLog log)
     {
         var mentions = ProseText.DamageMentions(text).Where(m => m.Type is not null).ToList();
@@ -390,8 +392,16 @@ internal static partial class TraitCatalogue
             });
         }
 
-        if (text.Contains("ignite", StringComparison.OrdinalIgnoreCase) || text.Contains("catches fire", StringComparison.OrdinalIgnoreCase))
+        if (ProseText.StartsBurning().Match(text) is { Success: true } burning)
         {
+            // 2024 fire elemental: every creature in the aura also takes the Burning hazard's damage each turn until
+            // the fire is put out. That is damage the simulator drops, not a simplification of the aura's.
+            var sentence = text[ProseText.SentenceStart(text, burning.Index)..ProseText.SentenceEnd(text, burning.Index)].Trim();
+            log.NotModelled(where, $"Not simulated: \"{sentence}\" ({ProseText.BurningHazard}) The aura's own damage is.");
+        }
+        else if (text.Contains("ignite", StringComparison.OrdinalIgnoreCase) || text.Contains("catches fire", StringComparison.OrdinalIgnoreCase))
+        {
+            // 2014 balor: "flammable objects in the aura that aren't being worn or carried ignite".
             log.Approximated(where, "Setting objects or creatures alight is not simulated; the aura's damage is.");
         }
 

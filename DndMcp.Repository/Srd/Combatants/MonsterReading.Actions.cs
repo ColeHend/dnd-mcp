@@ -49,7 +49,14 @@ internal sealed partial class MonsterReading
     {
         foreach (var action in list)
         {
-            if (action.IsMultiattack || action.Spellcasting is not null)
+            if (action.Spellcasting is not null)
+            {
+                // Its spells are in Spells; an action that casts several of them in one use is here as routines.
+                into.AddRange(_spellRoutines.GetValueOrDefault(action.Name) ?? []);
+                continue;
+            }
+
+            if (action.IsMultiattack)
             {
                 continue;
             }
@@ -92,8 +99,10 @@ internal sealed partial class MonsterReading
         for (var i = 0; i < list.Count; i++)
         {
             var action = list[i];
-            if (action.Kind != StatBlockValues.ActionKinds.UseActions || action.Slot == StatBlockValues.ActionSlots.Legendary)
+            if (action.Kind != StatBlockValues.ActionKinds.UseActions || action.Slot == StatBlockValues.ActionSlots.Legendary ||
+                _spellRoutines.Values.Any(r => r.Contains(action)))
             {
+                // Legendary uses resolve as they are read; a spellcasting routine names its own spells already.
                 continue;
             }
 
@@ -136,6 +145,17 @@ internal sealed partial class MonsterReading
         if (header is not null || (a.AttackBonus is not null && ProseText.HitText(text) is not null))
         {
             return [Attack(a, name, text, header, slot, usage, where)];
+        }
+
+        if (a.Dc is null && ThrownAtAnother().Match(text) is { Success: true } thrown && ProseText.ReadSave(text) is { } first &&
+            ProseText.SentenceStart(text, first.Index) == ProseText.SentenceStart(text, thrown.Index))
+        {
+            // 2014 kraken Fling: the grappled target is thrown and knocked prone with no save; the first save in the text
+            // is made by a creature the target is thrown at. Read as a save of the target's, it would be a DC 18 save
+            // or prone against any creature, which is neither effect. (The air elemental's Whirlwind has a save of its
+            // own before the same clause, and stays a save action.)
+            _log.NotModelled(where, $"Not simulated: {FirstSentence(text)} Its saving throw is made by a creature the thrown target is hurled at, not by the target.");
+            return [new StatBlockAction { Name = name, Kind = StatBlockValues.ActionKinds.NotModelled, Slot = slot, Usage = usage, Text = text }];
         }
 
         if (a.Dc is not null || (ProseText.ReadSave(text) is not null && ProseText.DamageMentions(text).Count + ProseText.ConditionMentions(text).Count > 0))
@@ -242,7 +262,7 @@ internal sealed partial class MonsterReading
         var bonus = a.AttackBonus ?? header!.Bonus;
         if (header is not null && a.AttackBonus is { } dataBonus && dataBonus != header.Bonus)
         {
-            _log.Conflict(where, string.Create(CultureInfo.InvariantCulture, $"The data gives +{dataBonus} to hit and the text {header.Bonus:+0;-0}; the data's is used."));
+            _log.Conflict(where, string.Create(CultureInfo.InvariantCulture, $"The data gives +{dataBonus} to hit and the text {header.Bonus:+0;−0}; the data's is used."));
         }
 
         if (header is null)
@@ -388,7 +408,20 @@ internal sealed partial class MonsterReading
         }
         else if (hitOngoing.Count > 0)
         {
-            _log.NotModelled(where, $"Its ongoing {string.Join(" + ", hitOngoing.Select(d => $"{d.Dice} {d.DamageType}"))} damage is tied to no condition the simulator tracks; it is not simulated.");
+            WarnOngoingDropped(hitOngoing, string.Empty, where);
+        }
+
+        // 2014 solar Slaying Longbow: "If the target is a creature that has 100 hit points or fewer, it must succeed on a
+        // DC 15 Constitution saving throw or die." ConditionalSpans leaves the sentence to be read here.
+        var kill = KillClause().Match(hit);
+        int? killAt = null;
+        if (save is not null && kill.Success && ProseText.SentenceStart(hit, save.Index) == ProseText.SentenceStart(hit, kill.Index))
+        {
+            killAt = int.Parse(kill.Groups["hp"].Value, CultureInfo.InvariantCulture);
+        }
+        else if (kill.Success)
+        {
+            _log.NotModelled(where, $"Not simulated: \"{Excerpt(hit[ProseText.SentenceStart(hit, kill.Index)..ProseText.SentenceEnd(hit, kill.Index)])}\"");
         }
 
         if (save is not null)
@@ -400,17 +433,13 @@ internal sealed partial class MonsterReading
                 _log.Approximated(where, "Only the save's first effect is simulated (the text escalates on a later or worse failure).");
             }
 
-            if (SwallowPattern().IsMatch(region))
-            {
-                _log.Approximated(where, "Being swallowed is simulated as its conditions and damage for the rest of the fight; total cover, regurgitation and escape from the corpse are not.");
-            }
             var spec = new SaveSpec(save.Ability, save.Dc, ProseText.SaysHalf(region) && saveDamage.Count > 0 ? StatBlockValues.OnSuccess.Half : StatBlockValues.OnSuccess.None);
             var saveConditions = Conditions(region, spec, conditional, save.Index, where);
-            if (saveDamage.Count == 0 && saveConditions.Count == 0)
+            if (saveDamage.Count == 0 && saveConditions.Count == 0 && killAt is null)
             {
                 if (saveOngoing.Count > 0)
                 {
-                    _log.NotModelled(where, "Its save's ongoing damage is tied to no condition the simulator tracks; it is not simulated.");
+                    WarnOngoingDropped(saveOngoing, "save's ", where);
                 }
                 else
                 {
@@ -420,14 +449,28 @@ internal sealed partial class MonsterReading
             }
             else
             {
+                if (SwallowPattern().IsMatch(region) && saveConditions.Count > 0)
+                {
+                    _log.Approximated(where, SwallowSimulated);
+                }
+
+                if (saveConditions.Count == 0 && saveOngoing.Count > 0)
+                {
+                    // Damage now and more every turn, but no condition for the per-turn part to ride on.
+                    WarnOngoingDropped(saveOngoing, "save's ", where);
+                }
+
+                var condition = saveConditions.Count > 0 ? WithOngoing(saveConditions[0], saveOngoing) : null;
                 riders.Add(new ActionEffect
                 {
                     Kind = StatBlockValues.EffectKinds.Save,
                     Save = spec,
                     Damage = saveDamage,
-                    Condition = saveConditions.Count > 0 ? WithOngoing(saveConditions[0], saveOngoing) : null,
+                    Condition = condition,
                     ExtraConditions = saveConditions.Skip(1).ToList(),
                     MaxSize = ProseText.ReadMaxSize(hit[ProseText.SentenceStart(hit, save.Index)..save.Index]),
+                    KillAtOrBelowHp = killAt,
+                    ImmuneAfterSuccess = ImmuneAfterSuccess(a.Name, hit[save.Index..], condition, where),
                 });
             }
 
@@ -452,11 +495,18 @@ internal sealed partial class MonsterReading
 
     /// <summary>
     /// Effects in an attack's hit or a save's failure that the simulator does not track (a curse, a Speed change, forced
-    /// movement, a lower hit point maximum, lost reactions). Named in one warning per action, so a simulated action
-    /// never hides the part of its text the numbers leave out.
+    /// movement, a lower hit point maximum, lost reactions). Named in one approximated warning per action, so a simulated
+    /// action never hides the part of its text the numbers leave out. Hit points lost every turn (the 2024 horned devil's
+    /// infernal wound) are damage the simulator drops, not a simplification: each such sentence is quoted in a
+    /// not_modelled warning of its own, as the other infernal wounds are, so a count of not_modelled warnings finds it.
     /// </summary>
     private void WarnUntracked(string text, IReadOnlyList<(int Start, int End)> conditional, string where)
     {
+        foreach (var lost in LostEveryTurn().Matches(text).Where(m => !InSpans(conditional, m.Index)))
+        {
+            _log.NotModelled(where, $"Not simulated: \"{Quote(text[ProseText.SentenceStart(text, lost.Index)..ProseText.SentenceEnd(text, lost.Index)])}\"");
+        }
+
         var found = new List<string>();
         foreach (var (pattern, label) in Untracked)
         {
@@ -497,6 +547,14 @@ internal sealed partial class MonsterReading
 
     private static ConditionEffect WithOngoing(ConditionEffect condition, List<DamageRoll> ongoing) =>
         ongoing.Count == 0 ? condition : condition with { OngoingDamage = ongoing };
+
+    /// <summary>
+    /// Per-turn damage the text deals with no condition to carry it. The simulator runs ongoing damage only on a
+    /// condition (it ends when the condition does), so with none the damage would vanish unsaid: it is named, dice and
+    /// type, in a not_modelled warning. <paramref name="whose"/> is "save's " for a hit's save rider.
+    /// </summary>
+    private void WarnOngoingDropped(IReadOnlyList<DamageRoll> ongoing, string whose, string where) =>
+        _log.NotModelled(where, $"Its {whose}ongoing {string.Join(" + ", ongoing.Select(d => $"{d.Dice} {d.DamageType}"))} damage is tied to no condition the simulator tracks; it is not simulated.");
 
     // A condition clause's first condition position (for its size limit), skipping conditional sentences.
     private static int FirstConditionIndex(string text, IReadOnlyList<(int Start, int End)> spans) =>
@@ -596,31 +654,54 @@ internal sealed partial class MonsterReading
 
     /// <summary>
     /// Sentences whose effect depends on something the simulator does not track ("If the boar moved 20+ feet",
-    /// "if the attack roll had Advantage", "instead of dealing damage"). Their damage and conditions are left out with
-    /// a warning; a size or creature-type test ("If the target is a Large or smaller creature") is not such a sentence.
+    /// "if the attack roll had Advantage", "instead of dealing damage"), with the sentences that continue them ("While
+    /// swallowed, …", "Until a creature takes an action to douse the fire, …"). Their damage and conditions are left out
+    /// with one warning per run: on its first sentence that does something (damage, a condition, a death, a drop to 0
+    /// Hit Points, setting a creature burning), quoting the run's first sentence and that one (<see cref="Quote"/>), so
+    /// a lead that only sets the scene ("If the target is a creature or a flammable object, it ignites.") cannot hide,
+    /// by its length or its own, the per-turn damage the next sentence deals. A size or creature-type test ("If the
+    /// target is a Large or smaller creature") is not such a sentence, and neither is a kill threshold ("If the
+    /// creature has 100 Hit Points or fewer, it dies"), which the caller reads. A drop to 0 Hit Points (2024 sea hag
+    /// Death Glare: "If the target has 20 Hit Points or fewer, it drops to 0 Hit Points") is not a kill: a creature at
+    /// 0 is dying, not dead, so it is warned, not read as a threshold.
     /// </summary>
     private List<(int Start, int End)> ConditionalSpans(string text, string where, bool swallowIsConditional = true)
     {
         var spans = new List<(int, int)>();
         var i = 0;
         var previous = false;
+        var runStart = 0;
+        var runWarned = false;
         while (i < text.Length)
         {
             var end = ProseText.SentenceEnd(text, i);
             var sentence = text[i..end].Trim();
             var continuation = previous && Continuation().IsMatch(sentence);
             previous = false;
-            if (continuation ||
-                (sentence.StartsWith("If ", StringComparison.Ordinal) && !PlainIf().IsMatch(sentence)) ||
-                (swallowIsConditional && StateContinuation().IsMatch(sentence)) ||
-                sentence.Contains("instead of dealing damage", StringComparison.OrdinalIgnoreCase) ||
-                FailsByFive().IsMatch(sentence))
+            if (!KillClause().IsMatch(sentence) &&
+                (continuation ||
+                 (sentence.StartsWith("If ", StringComparison.Ordinal) && !PlainIf().IsMatch(sentence)) ||
+                 (swallowIsConditional && StateContinuation().IsMatch(sentence)) ||
+                 sentence.Contains("instead of dealing damage", StringComparison.OrdinalIgnoreCase) ||
+                 FailsByFive().IsMatch(sentence)))
             {
                 spans.Add((i, end));
                 previous = true;
-                if (!continuation && (ProseText.DamageMentions(sentence).Count > 0 || ProseText.ConditionMentions(sentence).Count > 0 || sentence.Contains(" die", StringComparison.Ordinal)))
+                if (!continuation)
                 {
-                    _log.NotModelled(where, $"Not simulated: \"{Excerpt(sentence)}\"");
+                    (runStart, runWarned) = (i, false);
+                }
+
+                var burning = ProseText.StartsBurning().IsMatch(sentence);
+                if (!runWarned && (burning || ProseText.DamageMentions(sentence).Count > 0 || ProseText.ConditionMentions(sentence).Count > 0 ||
+                                   sentence.Contains(" die", StringComparison.Ordinal) || DropsToZero().IsMatch(sentence)))
+                {
+                    // 2024 "starts burning" is the Burning hazard of the Rules Glossary; the stat block gives no damage.
+                    var hazard = burning ? $" ({ProseText.BurningHazard})" : string.Empty;
+                    var leadEnd = ProseText.SentenceEnd(text, runStart);
+                    var quote = runStart == i ? Quote(sentence) : $"{Quote(text[runStart..leadEnd])}{(leadEnd == i ? " " : " … ")}{Quote(sentence)}";
+                    _log.NotModelled(where, $"Not simulated: \"{quote}\"{hazard}");
+                    runWarned = true;
                 }
             }
 
@@ -687,10 +768,6 @@ internal sealed partial class MonsterReading
 
         var (targeting, failure) = SaveRegions(text, clause);
         var conditional = ConditionalSpans(failure, where, swallowIsConditional: false);
-        if (SwallowPattern().IsMatch(failure))
-        {
-            _log.Approximated(where, "Being swallowed is simulated as its conditions and damage for the rest of the fight; total cover, regurgitation and escape from the corpse are not.");
-        }
         var mentions = ProseText.DamageMentions(failure).Where(m => !InSpans(conditional, m.Index)).ToList();
         var damage = new List<DamageRoll>();
         var ongoing = new List<DamageRoll>();
@@ -733,14 +810,31 @@ internal sealed partial class MonsterReading
             _log.Approximated(where, $"It affects \"{Excerpt(EachCreature().Match(targeting).Value)}\", which names no area; one creature is used.");
         }
 
-        if (damage.Count == 0 && conditions.Count == 0)
+        // 2024 solar Slaying Bow: "Failure: If the creature has 100 Hit Points or fewer, it dies. It otherwise takes …".
+        int? killAt = KillClause().Match(failure) is { Success: true } kill ? int.Parse(kill.Groups["hp"].Value, CultureInfo.InvariantCulture) : null;
+        var swallow = SwallowPattern().IsMatch(failure);
+        if (damage.Count == 0 && conditions.Count == 0 && killAt is null)
         {
-            _log.NotModelled(where, $"Its effect is not simulated: {Excerpt(failure)}");
+            // A 2014 swallow whose only save is the swallower's own (to regurgitate): the swallow itself is not built,
+            // and the failure text describes the regurgitation, so the warning names the action instead.
+            _log.NotModelled(where, swallow ? $"Its swallow is not simulated: {Excerpt(text)}" : $"Its effect is not simulated: {Excerpt(failure)}");
             return new StatBlockAction { Name = name, Kind = StatBlockValues.ActionKinds.NotModelled, Slot = slot, Usage = usage, Text = text };
         }
 
-        WarnUntracked(failure, conditional, where);
+        if (swallow && conditions.Count > 0)
+        {
+            _log.Approximated(where, SwallowSimulated);
+        }
 
+        if (conditions.Count == 0 && ongoing.Count > 0)
+        {
+            // 2014 water elemental Whelm: "each target grappled by it takes 13 (2d8 + 4) bludgeoning damage" at the
+            // start of its turns, but its grapple is conditional ("If it is Large or smaller") and not built.
+            WarnOngoingDropped(ongoing, string.Empty, where);
+        }
+
+        WarnUntracked(failure, conditional, where);
+        var condition = conditions.Count > 0 ? WithOngoing(conditions[0], ongoing) : null;
         return new StatBlockAction
         {
             Name = name,
@@ -750,12 +844,51 @@ internal sealed partial class MonsterReading
             Damage = damage,
             Area = area,
             Targets = targets,
-            Condition = conditions.Count > 0 ? WithOngoing(conditions[0], ongoing) : null,
+            Condition = condition,
             ExtraConditions = conditions.Skip(1).ToList(),
             Magical = MagicalEffect().IsMatch(text),
             Usage = usage,
+            KillAtOrBelowHp = killAt,
+            ImmuneAfterSuccess = ImmuneAfterSuccess(name, text, condition, where),
             Text = text,
         };
+    }
+
+    private const string SwallowSimulated =
+        "Being swallowed is simulated as its conditions and damage for the rest of the fight; total cover, regurgitation and escape from the corpse are not.";
+
+    /// <summary>
+    /// Whether the text makes a creature immune to this action after it succeeds on the save: "If a creature's saving
+    /// throw is successful or the effect ends for it, the creature is immune to the dragon's Frightful Presence for the
+    /// next 24 hours" (2014), "Success: The target is immune to this mummy's Dreadful Glare for 24 hours" (2024). The
+    /// immunity must name a word of the action's name, so a 2024 lycanthrope Bite's "immune to this werewolf's curse"
+    /// (a rider the simulator does not build) is not read as immunity to the bite. The simulator makes a creature
+    /// immune once it succeeds OR once its condition from the action ends (<see cref="StatBlockAction.ImmuneAfterSuccess"/>);
+    /// where the text grants it only on a success and the condition ends by itself (a fear until the end of the
+    /// monster's next turn), or makes it immune to every creature of the kind ("the Dreadful Glare of all mummies"),
+    /// an approximated warning says so.
+    /// </summary>
+    private bool ImmuneAfterSuccess(string actionName, string text, ConditionEffect? condition, string where)
+    {
+        var clause = ImmunityClause().Match(text);
+        var words = ProseText.StripParentheticals(actionName).Split(' ', StringSplitOptions.RemoveEmptyEntries).Where(w => w.Length >= 4);
+        if (!clause.Success || !words.Any(w => clause.Groups["what"].Value.Contains(w, StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        if (!ImmuneWhenItEnds().IsMatch(text) &&
+            condition?.Duration is not (null or StatBlockValues.Durations.SaveEnds or StatBlockValues.Durations.Fight))
+        {
+            _log.Approximated(where, "A creature that succeeds on the save is immune to it for the rest of the fight (24 hours in the text); the simulator also makes a creature immune once the condition ends, which the text does not.");
+        }
+
+        if (clause.Groups["what"].Value.Contains(" of all ", StringComparison.OrdinalIgnoreCase))
+        {
+            _log.Approximated(where, $"The text makes a creature that succeeds immune to {Excerpt(clause.Groups["what"].Value)}; the simulator makes it immune only to this creature's.");
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -882,6 +1015,31 @@ internal sealed partial class MonsterReading
         return trimmed.Length <= 140 ? trimmed : trimmed[..140].TrimEnd() + "…";
     }
 
+    private const int QuoteLength = 240;
+    private const int QuoteHead = 100;
+    private const int QuoteTail = 120;
+
+    /// <summary>
+    /// A sentence quoted in a warning: whole up to 240 characters, else about its first 100 and last 120 around " … ".
+    /// A conditional sentence names its effect last ("…, the target takes an extra 3 (1d6) Piercing damage and has the
+    /// Prone condition"), so cutting its end, as <see cref="Excerpt"/> does at 140, would quote the test and drop the
+    /// effect the warning exists to report.
+    /// </summary>
+    private static string Quote(string sentence)
+    {
+        var trimmed = sentence.Trim().TrimStart('.', ',', ';', ' ');
+        if (trimmed.Length <= QuoteLength)
+        {
+            return trimmed;
+        }
+
+        var head = trimmed[..QuoteHead];
+        var tail = trimmed[^QuoteTail..];
+        var headCut = head.LastIndexOf(' ');
+        var tailCut = tail.IndexOf(' ');
+        return $"{(headCut > 0 ? head[..headCut] : head)} … {(tailCut >= 0 ? tail[(tailCut + 1)..] : tail)}";
+    }
+
     private static string Capitalize(string text) => text.Length == 0 ? text : char.ToUpperInvariant(text[0]) + text[1..];
 
     [GeneratedRegex(@"^The [a-z' -]+ makes one [A-Za-z' ]+ attack against\b", RegexOptions.IgnoreCase)]
@@ -920,8 +1078,25 @@ internal sealed partial class MonsterReading
     [GeneratedRegex(@"^(?:While|Until|A swallowed|The swallowed|This)\b")]
     private static partial Regex Continuation();
 
-    [GeneratedRegex(@"begins to turn to stone|Second Failure|First Failure", RegexOptions.IgnoreCase)]
-    private static partial Regex TwoStage();
+    [GeneratedRegex(@"\b(?<hp>\d+) hit points or fewer, it (?:dies|must succeed on a DC \d+ [A-Za-z]+ saving throw or die)\b", RegexOptions.IgnoreCase)]
+    private static partial Regex KillClause();
+
+    [GeneratedRegex(@"\bimmune to (?<what>[^.]*?) for (?:the next )?24 hours", RegexOptions.IgnoreCase)]
+    private static partial Regex ImmunityClause();
+
+    [GeneratedRegex(@"\bor (?:if )?the effect (?:ends for it|on it ends)\b|\b(?:after|when) the (?:possession|effect) ends\b", RegexOptions.IgnoreCase)]
+    private static partial Regex ImmuneWhenItEnds();
+
+    // "…, it drops to 0 Hit Points" as what a sentence does, not "If the cursed target drops to 0 Hit Points, …" (a
+    // lycanthrope curse's test).
+    [GeneratedRegex(@",\s*(?:it|the (?:target|creature)) drops? to 0 hit points\b", RegexOptions.IgnoreCase)]
+    private static partial Regex DropsToZero();
+
+    [GeneratedRegex(@"\bloses? \d+ \(\d+d\d+(?:\s*[+-]\s*\d+)?\) hit points at the (?:start|end) of each", RegexOptions.IgnoreCase)]
+    private static partial Regex LostEveryTurn();
+
+    [GeneratedRegex(@"\bthrown at another creature\b", RegexOptions.IgnoreCase)]
+    private static partial Regex ThrownAtAnother();
 
     [GeneratedRegex(@"until the web is destroyed|until the rope is destroyed|ends early|(?:if|until) (?:it|the creature|the target) takes damage|takes an action to (?:wake|shake)|uses an action to (?:wake|shake)", RegexOptions.IgnoreCase)]
     private static partial Regex EndsEarly();

@@ -7,7 +7,7 @@ namespace DndMcp.Formatting;
 
 /// <summary>
 /// Renders a <see cref="SimulationReport"/> for <c>balance_simulate</c>: the headline first (P(party wins) with its 95%
-/// interval, defeat, draw, a death, rounds), then the per-combatant table, the comparison when asked, what the stat blocks
+/// interval, defeat, draw, a death, a member left dying, rounds), then the per-combatant table, the comparison when asked, what the stat blocks
 /// leave out, the policies and assumptions, the seed with how to reproduce the result, and the replayed fight last.
 ///
 /// <para>
@@ -20,8 +20,9 @@ namespace DndMcp.Formatting;
 /// </para>
 /// <para>
 /// <b>Probabilities never round onto 0% or 100%</b> unless exact (<see cref="BalanceMarkdownText.Percent"/>): "the party
-/// wins 100%" after 9,996 wins in 10,000 reads as a certainty the dice never gave. Every proportion carries its Wilson
-/// interval, every mean its CLT interval, so a model comparing two runs can tell a difference from noise.
+/// wins 100%" after 9,996 wins in 10,000 reads as a certainty the dice never gave. Every fight-level proportion carries
+/// its Wilson interval, and the rounds and the comparison's differences their CLT intervals, so a model comparing two runs
+/// can tell a difference from noise; the per-combatant figures have none (<see cref="SimulationReport"/> says why).
 /// </para>
 /// </summary>
 internal static partial class SimulationMarkdown
@@ -121,14 +122,24 @@ internal static partial class SimulationMarkdown
         }
     }
 
+    /// <summary>
+    /// The outcome lines. A party member still dying when the fight stopped is its own figure, with what it means: the fight
+    /// ends the moment a side has nobody above 0 HP, so "a party member dies" counts only the deaths the fight dealt, and
+    /// "Party defeated 100% · a party member dies 0.1%" alone reads as a wipe nobody died in.
+    /// </summary>
     private static string Headline(SimulationReport report)
     {
         var fights = Number(report.Iterations);
+        var dying = report.AnyPartyDying.Count == 0
+            ? "."
+            : $" · a party member is left dying {Percent(report.AnyPartyDying.Estimate)} ({Interval(report.AnyPartyDying)}).\n" +
+              "*Left dying: at 0 HP, neither stable nor dead, when the fight stopped (it stops once a side has nobody above 0 HP); " +
+              "their death saves are not rolled, so whether they die is not in the figures.*";
         return
             $"**The party wins {Percent(report.PartyWins.Estimate)}** of {fights} fights ({Every(report.PartyWins)}95% CI {Interval(report.PartyWins)}).\n" +
             $"Party defeated (every member at 0 HP) {Percent(report.PartyDefeated.Estimate)} ({Interval(report.PartyDefeated)}) · " +
             $"draw at round {report.RoundCap.ToString(Invariant)} {Percent(report.Draw.Estimate)} ({Interval(report.Draw)}) · " +
-            $"a party member dies {Percent(report.AnyPartyDeath.Estimate)} ({Interval(report.AnyPartyDeath)}).\n" +
+            $"a party member dies {Percent(report.AnyPartyDeath.Estimate)} ({Interval(report.AnyPartyDeath)}){dying}\n" +
             $"Rounds: mean {Decimal(report.Rounds.Mean.Mean, 2)} (95% CI {Decimal(report.Rounds.Mean.Low, 2)}–{Decimal(report.Rounds.Mean.High, 2)}), " +
             $"median {Number(report.Rounds.P50)}, 90th percentile {Number(report.Rounds.P90)}.";
     }
@@ -160,11 +171,31 @@ internal static partial class SimulationMarkdown
         {
             parts.Add(report.PrecisionReached == true
                 ? $"precision ±{Percent(precision)} reached (±{Percent(report.PartyWins.HalfWidth)})"
-                : $"precision ±{Percent(precision)} not reached in {Number(report.Iterations)} fights (±{Percent(report.PartyWins.HalfWidth)})");
+                : $"precision ±{Percent(precision)} not reached in {Number(report.Iterations)} fights (±{Percent(report.PartyWins.HalfWidth)}){WorkLimit(report)}");
         }
 
         parts.Add($"seed {Seed(report.Seed)}{(seedGiven ? string.Empty : " (random)")}");
         return "*" + string.Join(" · ", parts) + "*";
+    }
+
+    /// <summary>
+    /// Why precision mode stopped short of 100,000 fights, when it did: the next batch would have passed the work limit
+    /// (<see cref="SimulationReport.PrecisionMaxFights"/>). Without it, "not reached in 20,000 fights" reads as a fight
+    /// limit of 20,000, and nothing says that a lower round cap would buy more fights.
+    /// </summary>
+    private static string WorkLimit(SimulationReport report)
+    {
+        if (report.PrecisionMaxFights is not { } most || most >= SimulationLimits.MaxIterations)
+        {
+            return string.Empty;
+        }
+
+        var combatants = Plural(report.Combatants.Sum(c => c.Count), "combatant", "combatants");
+        var cap = report.RoundCap.ToString(Invariant);
+        return report.Compare is null
+            ? $", the most the work limit allows for {combatants} to round cap {cap}; a lower round cap or fewer combatants allow more"
+            : $", the most the work limit allows for {combatants} to round cap {cap} with compare; a lower round cap, fewer combatants " +
+              "or no compare allow more";
     }
 
     private static string Combatants(SimulationReport report)
@@ -178,6 +209,7 @@ internal static partial class SimulationMarkdown
             Decimal(c.MaxHp, 1),
             Percent(c.DroppedToZero.Estimate),
             c.DeathSaves || c.Side == "party" ? Percent(c.DeadAtEnd.Estimate) : "—",
+            c.DeathSaves ? Percent(c.DyingAtEnd.Estimate) : "—",
             $"{Decimal(c.HpLost.Mean, 1)} ({Number(c.HpLostP50)} / {Number(c.HpLostP90)})",
             $"{Decimal(c.DamageDealt.Mean, 1)} ({Decimal(c.DamageDealtEffective.Mean, 1)})",
             $"{Decimal(c.DamageTaken.Mean, 1)} ({Decimal(c.DamageTakenEffective.Mean, 1)})",
@@ -186,9 +218,12 @@ internal static partial class SimulationMarkdown
 
         return "### Per combatant\n\n" +
                "Per creature per fight; copies of an entry are pooled. Damage is after resistances, (effective) counts only the " +
-               "hit points it removed. Dead at end is shown for creatures that make death saves; the others die at 0 HP.\n\n" +
+               "hit points it removed. Dead at end is shown for every party member and whatever makes death saves (the rest die " +
+               "at 0 HP); dying at end, for what makes death saves: at 0 HP, not yet stable or dead, when the fight stopped. " +
+               "Kills count the other side's deaths it caused (by damage, an outright kill such as Power Word Kill, or a sixth " +
+               "level of exhaustion); a death from failed death saves (or from regeneration stopped at 0 HP) is credited to no one.\n\n" +
                SrdMarkdownText.Table(
-                   ["Combatant", "Side", "From", "AC", "HP", "Dropped to 0", "Dead at end", "HP lost mean (p50 / p90)", "Damage dealt (effective)", "Damage taken (effective)", "Kills"],
+                   ["Combatant", "Side", "From", "AC", "HP", "Dropped to 0", "Dead at end", "Dying at end", "HP lost mean (p50 / p90)", "Damage dealt (effective)", "Damage taken (effective)", "Kills"],
                    rows);
     }
 
@@ -287,11 +322,29 @@ internal static partial class SimulationMarkdown
             },
         };
 
+        // Beside the deaths whenever either run left a member dying: a feature that ends fights sooner leaves the fallen
+        // fewer rounds to fail their death saves, so "a party member dies" alone reads as lives saved.
+        var dying = compare.BaselineAnyDying.Count + compare.VariantAnyDying.Count > 0;
+        if (dying)
+        {
+            rows.Insert(2, new[]
+            {
+                "A party member is left dying",
+                $"{Percent(compare.BaselineAnyDying.Estimate)} ({Interval(compare.BaselineAnyDying)})",
+                $"{Percent(compare.VariantAnyDying.Estimate)} ({Interval(compare.VariantAnyDying)})",
+                Points(compare.AnyDyingDifference),
+            });
+        }
+
         return $"### Compare: {compare.MemberName} (party entry {compare.Member.ToString(Invariant)}) with {compare.Feature}\n\n" +
                $"The same {Number(report.Iterations)} fights (the same dice) without and with the feature; the difference is " +
                "paired fight by fight (95% CI), so it resolves far smaller changes than two separate runs could. The headline " +
                "above is the fight without the feature.\n\n" +
-               SrdMarkdownText.Table(["Per fight", "Without", "With", "Difference (95% CI)"], rows);
+               SrdMarkdownText.Table(["Per fight", "Without", "With", "Difference (95% CI)"], rows) +
+               (dying
+                   ? "\n\n*Read the deaths with the dying: the dying's death saves are not rolled, and a feature that ends fights " +
+                     "sooner leaves them fewer rounds to fail, so fewer deaths beside more left dying is not lives saved.*"
+                   : string.Empty);
     }
 
     // "+1.3 points (+0.9 to +1.7)": a paired difference of two proportions, in percentage points.
@@ -413,12 +466,11 @@ internal static partial class SimulationMarkdown
     private static string Percent(double probability) => BalanceMarkdownText.Percent(probability);
 
     // "97.31–97.89%": a Wilson interval with its bounds printed like the estimate (never rounded onto 0% or 100%). At none
-    // or all of the fights the Wilson bound on that side is exactly 0 or 1; floating point can leave it a hair off, which
-    // printed "< 0.01%" as the lower bound of 0 wins in 100.
+    // or all of the fights the bound on that side is exactly 0% or 100% (SimulationStatistics.Wilson makes it so).
     private static string Interval(Proportion proportion)
     {
-        var low = Percent(proportion.Count == 0 ? 0 : proportion.Low);
-        var high = Percent(proportion.Count == proportion.Total ? 1 : proportion.High);
+        var low = Percent(proportion.Low);
+        var high = Percent(proportion.High);
         return low.EndsWith('%') && !low.StartsWith('<') && !low.StartsWith('>') ? $"{low[..^1]}–{high}" : $"{low} to {high}";
     }
 

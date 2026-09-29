@@ -6,6 +6,7 @@ using V = DndMcp.Domain.Features.DslValues;
 namespace DndMcp.Domain.Simulation;
 
 /// <summary>One entry as compiled: its label, side, where it came from, and its creatures' ids.</summary>
+/// <param name="Where">The entry as messages name it ("party item 2 (Fighter)"), for a problem found after compiling (the comparison's variant).</param>
 internal sealed record PreparedEntry(string Label, int Side, string Source, int[] Ids, bool DeathSaves, string Where);
 
 /// <summary>A validated, compiled run: what every fight shares, and what the report echoes.</summary>
@@ -94,7 +95,8 @@ internal static class SimulationPreparation
                 resolved[e] = BuildResolver.Resolve(build, entry.Level ?? build.Level ?? 1, spec.Rulings, where + " build", BuildUse.Simulation);
             }
 
-            var baseLabel = OneLine(entry.Name) ?? (combatant.Monster is { } block ? block.Name : entry.Build?.Name ?? entry.Archetype ?? "combatant");
+            // An archetype's expansion always has a name (the catalogue's, "Wizard"), so it never falls through to its spelling.
+            var baseLabel = OneLine(entry.Name) ?? (combatant.Monster is { } block ? block.Name : entry.Build?.Name ?? "combatant");
             var count = entry.Count ?? 1;
             var ids = new int[count];
             var deathSaves = entry.Build is not null ? side == 0 || entry.DeathSaves == true : entry.DeathSaves == true;
@@ -104,14 +106,14 @@ internal static class SimulationPreparation
                 var id = templates.Count;
                 ids[copy] = id;
                 templates.Add(combatant.Monster is { } monster
-                    ? CombatantCompiler.FromStatBlock(monster, entry, id, e, side, label, enemyHp == SimulationValues.EnemyHp.Roll && side == 1)
-                    : CombatantCompiler.FromBuild(resolved[e]!, entry, id, e, side, label, deathSaves));
+                    ? CombatantCompiler.FromStatBlock(monster, entry, id, side, label, enemyHp == SimulationValues.EnemyHp.Roll && side == 1)
+                    : CombatantCompiler.FromBuild(resolved[e]!, entry, id, side, label, deathSaves));
             }
 
             var source = combatant.Monster is { } m
                 ? $"monster {m.Ref}"
                 : combatant.Spec.Archetype is { } archetype
-                    ? $"archetype {archetype} (level {Number(resolved[e]!.Level)}, {resolved[e]!.Edition})"
+                    ? $"archetype {PartyArchetypes.Canonical(archetype) ?? archetype} (level {Number(resolved[e]!.Level)}, {resolved[e]!.Edition})"
                     : $"build \"{resolved[e]!.Name}\" (level {Number(resolved[e]!.Level)}, {resolved[e]!.Edition})";
             prepared.Add(new PreparedEntry(baseLabel, side, source, ids, deathSaves || (combatant.Monster is not null && entry.DeathSaves == true), where));
         }
@@ -142,12 +144,11 @@ internal static class SimulationPreparation
             var e = member - 1;
             var entry = expanded[e];
             var merged = FeatureMerge.Merge(entry.Build!, compare.Feature!);
-            var where = Where(0, e, entries[e].Combatant.Spec);
-            var variantBuild = BuildResolver.Resolve(merged, entry.Level ?? merged.Level ?? 1, spec.Rulings, where + " variant", BuildUse.Simulation);
+            var variantBuild = BuildResolver.Resolve(merged, entry.Level ?? merged.Level ?? 1, spec.Rulings, prepared[e].Where + " variant", BuildUse.Simulation);
             var variantTemplates = templates.ToArray();
             foreach (var id in prepared[e].Ids)
             {
-                variantTemplates[id] = CombatantCompiler.FromBuild(variantBuild, entry, id, e, 0, templates[id].Label, prepared[e].DeathSaves);
+                variantTemplates[id] = CombatantCompiler.FromBuild(variantBuild, entry, id, 0, templates[id].Label, prepared[e].DeathSaves);
                 variantTemplates[id].Threat = templates[id].Threat;
             }
 
@@ -175,7 +176,7 @@ internal static class SimulationPreparation
             new("enemies", enemyTargeting, SimulationValues.Targeting.Meaning(enemyTargeting)),
             new("legendary_resistance", legendary, SimulationValues.LegendaryResistance.Meaning(legendary)),
             new("healing", healing, SimulationValues.Healing.Meaning(healing)),
-            new("finish_downed", setup.FinishDowned ? "true" : "false", setup.FinishDowned ? "enemies keep attacking party members at 0 HP" : "creatures at 0 HP are left alone"),
+            new("finish_downed", setup.FinishDowned ? "true" : "false", setup.FinishDowned ? "enemies keep attacking party members at 0 HP" : "creatures at 0 HP are not attacked (an area with room to spare still catches them)"),
             new("pcs_win_ties", setup.PcsWinTies ? "true" : "false", setup.PcsWinTies ? "initiative ties go to the party" : "initiative ties: higher modifier, then a roll-off"),
         };
 
@@ -504,12 +505,12 @@ internal static class SimulationPreparation
         {
             "No grid, movement, cover, light, terrain or morale; creatures never flee or surrender.",
             "Engagement: each side has a front line (melee combatants) and a back line; melee attacks reach a standing enemy front-liner (anyone once none stands), flying melee creatures reach the back line, ranged attacks and spells reach anyone.",
-            "No opportunity attacks except a build's reaction extra attacks (at their per-round trigger probability); monster reactions other than Parry are not used.",
+            "No opportunity attacks except a build's reaction extra attacks (at their per-round trigger probability). A monster's only reactions are Parry and Shield, each used when its AC bonus turns a hit (not a critical hit) into a miss: a Parry covers that one attack (a Parry whose text says melee attack covers only a melee attack), Shield (+5 AC) lasts until the start of the caster's next turn.",
             "No lair actions: the fight is not in a lair (legendary action and Legendary Resistance counts are the non-lair ones).",
             "Monster spells are cast at their own level (no upcasting); a monster does not start a concentration spell while concentrating.",
             "Frightened and charmed ignore line of sight; frightened gives Disadvantage while its source lives.",
-            "Monsters choose by expected damage (greedy) against the targets their side's policy picks, heal an ally at 25% HP or less, and Dodge when nothing is usable.",
-            "Areas catch the DMG's typical number of creatures (\"Targets in Areas of Effect\", ±1d3 not modelled), the front line first; the damage is rolled once for all of them.",
+            "Monsters choose by expected damage (greedy) against the targets their side's policy picks, heal an ally at 25% HP or less, and Dodge when nothing is usable. A condition an action imposes adds its worth times the chance it lands (an attack's hit, and a failed save where there is one): the target's own damage per round for one that takes its turns (paralyzed, stunned, incapacitated), a quarter of that for one that hampers it (restrained, frightened, prone …), a tenth for exhaustion, nothing for deafened.",
+            "Areas catch the DMG's typical number of creatures (\"Targets in Areas of Effect\", ±1d3 not modelled), never an ally: the standing ones first, front line before back line, then, while the count has room, those lying at 0 HP, who take it by the rules for damage at 0 HP (a dying creature fails a death save). The damage is rolled once for all of them.",
             "A creature restrained by something with an escape DC spends its Action trying to escape every turn.",
         };
 
@@ -533,11 +534,17 @@ internal static class SimulationPreparation
 
         foreach (var build in builds)
         {
-            foreach (var attack in build.Attacks.Where(a => a.Mastery is V.Masteries.Push or V.Masteries.Slow or V.Masteries.Nick))
+            // Nick only moves the Light weapon's extra attack from the Bonus Action into the Attack action: noted while the
+            // build still makes that attack with the Bonus Action, by balance_dpr's rule and in its words
+            // (ResolvedBuild.UnmodelledNickNote; the 2024 rogue archetype's scimitar has modelled it).
+            if (build.UnmodelledNickNote() is { } nick)
             {
-                list.Add(attack.Mastery == V.Masteries.Nick
-                    ? $"{build.Name}: {attack.Name}'s Nick changes only the action economy; give the Light weapon's extra attack as an action attack (count) to model it."
-                    : $"{build.Name}: {attack.Name}'s {attack.Mastery} does nothing without a grid.");
+                list.Add($"{build.Name}: {nick}");
+            }
+
+            foreach (var attack in build.Attacks.Where(a => a.Mastery is V.Masteries.Push or V.Masteries.Slow))
+            {
+                list.Add($"{build.Name}: {attack.Name}'s {attack.Mastery} does nothing without a grid.");
             }
         }
 
@@ -558,6 +565,13 @@ internal static class SimulationPreparation
         list.Add(enemyHp == SimulationValues.EnemyHp.Roll
             ? "Enemy hit points are rolled from their hit dice each fight."
             : "Enemy hit points are the stat blocks' averages.");
+        // The engine aims a save or auto-hit kill that is not an area at a standing creature it kills (Fight.KillableAmong),
+        // which the monsters line's "the targets their side's policy picks" does not say.
+        if (templates.Any(t => MonsterActions(t).Any(a => a.KillAtOrBelowHp is not null && a.AreaCount == 0 && (a.IsSave || a.IsAutoHit))))
+        {
+            list.Add("An outright kill by hit points (Power Word Kill, the 2024 solar's Slaying Bow) is aimed at a standing creature it kills, the side's policy choosing among those, and counts as the hit points it takes when the monster chooses what to do; with no such creature, the policy picks as usual.");
+        }
+
         if (templates.Any(t => t.RegenerationAmount > 0 && t.RegeneratesFromZero))
         {
             list.Add("A regenerating creature at 0 HP (the troll) gets up at the start of its turn unless acid or fire stopped its regeneration, but the fight ends when a side has nobody above 0 HP, so a troll down with its allies counts as beaten (finish it with fire or acid afterwards).");
@@ -570,6 +584,17 @@ internal static class SimulationPreparation
 
         return list;
     }
+
+    /// <summary>
+    /// Everything a monster template can do: its actions, bonus actions and legendary actions, and the actions its
+    /// Multiattacks name (the 2024 solar's "It can replace one attack with a use of Slaying Bow"), which are resolved by
+    /// name and so are scanned too, in case one is reached only that way. Empty for a party build.
+    /// </summary>
+    private static IEnumerable<MonsterAction> MonsterActions(CombatantTemplate template) =>
+        template.Actions
+            .Concat(template.BonusActions)
+            .Concat(template.LegendaryActions)
+            .Concat(template.Multiattacks.SelectMany(p => p.Steps.Select(s => s.Action).Concat(p.Options)));
 
     private static IReadOnlyList<StatBlockWarnings> Warnings(IReadOnlyList<(int Side, StatBlock? Monster)> entries)
     {

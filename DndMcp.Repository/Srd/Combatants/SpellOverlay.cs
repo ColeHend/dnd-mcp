@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using DndMcp.Domain.Features;
@@ -38,6 +39,10 @@ public sealed class SpellOverlay
     /// <summary>No overlay: what the spell records alone say.</summary>
     public static SpellOverlay Empty { get; } = new(new Dictionary<string, IReadOnlyDictionary<string, SpellOverlayEntry>>());
 
+    /// <summary>
+    /// The file name for an edition: <c>spells.2024.json</c>, in the same <see cref="MonsterOverrides.DirectoryName"/>
+    /// directory as the monster overrides (both are normalization facts the records lack).
+    /// </summary>
     public static string FileName(string edition) => $"spells.{edition}.json";
 
     /// <summary>Every entry of one edition, by spell index.</summary>
@@ -140,7 +145,7 @@ public sealed record SpellOverlayEntry
     /// <summary>The spellcasting ability modifier is added to the damage (Spiritual Weapon).</summary>
     public bool? DamageAddsModifier { get; init; }
 
-    /// <summary>Cantrips: <c>dice</c> (dice ×2/×3/×4 at levels 5/11/17) or <c>beams</c> (Eldritch Blast: that many attacks).</summary>
+    /// <summary>Cantrips: <see cref="CantripScalings"/> (dice ×2/×3/×4 at levels 5/11/17, or that many beams).</summary>
     public string? Cantrip { get; init; }
 
     /// <summary>Rays, darts or creatures at the spell's level (Scorching Ray 3, Magic Missile 3, Chain Lightning 4).</summary>
@@ -169,6 +174,12 @@ public sealed record SpellOverlayEntry
     public int? AcBonus { get; init; }
 
     /// <summary>
+    /// Power Word Kill: "If the target has 100 Hit Points or fewer, it dies" (both editions). A target with at most this
+    /// many hit points dies outright; one with more takes <see cref="Damage"/>, if any.
+    /// </summary>
+    public int? KillAtOrBelowHp { get; init; }
+
+    /// <summary>
     /// How the simulator simplifies an effect that lingers (a zone's damage dealt once, on casting). Becomes an
     /// <c>approximated</c> warning on every monster that casts the spell.
     /// </summary>
@@ -179,13 +190,9 @@ public sealed record SpellOverlayEntry
 
     internal void Validate(string where)
     {
-        if (Kind is not null && !new[]
-            {
-                StatBlockValues.ActionKinds.Attack, StatBlockValues.ActionKinds.Save, StatBlockValues.ActionKinds.AutoHit,
-                StatBlockValues.ActionKinds.Heal, StatBlockValues.ActionKinds.Parry,
-            }.Contains(Kind))
+        if (Kind is not null && !SpellProfileKinds.Combat.Contains(Kind))
         {
-            throw new InvalidDataException($"{where}: kind \"{Kind}\" is not attack, save, auto_hit, heal or parry.");
+            throw new InvalidDataException($"{where}: kind \"{Kind}\" is not {string.Join(", ", SpellProfileKinds.Combat)}.");
         }
 
         if (Attack is not null && !StatBlockValues.AttackRanges.All.Contains(Attack))
@@ -203,9 +210,9 @@ public sealed record SpellOverlayEntry
             throw new InvalidDataException($"{where}: on_success must be half or none.");
         }
 
-        if (Cantrip is not null && Cantrip is not ("dice" or "beams"))
+        if (Cantrip is not null && !CantripScalings.All.Contains(Cantrip))
         {
-            throw new InvalidDataException($"{where}: cantrip must be dice or beams.");
+            throw new InvalidDataException($"{where}: cantrip must be {string.Join(" or ", CantripScalings.All)}.");
         }
 
         foreach (var d in (Damage ?? []).Concat(Upcast ?? []))
@@ -224,9 +231,23 @@ public sealed record SpellOverlayEntry
             }
         }
 
-        if (Area is { } area && (!StatBlockValues.Shapes.All.Contains(area.Shape) || area.Size < 1))
+        if (Area is { } area && (!StatBlockValues.Shapes.All.Contains(area.Shape) || area.Size is < 1 or > 1000))
         {
-            throw new InvalidDataException($"{where}: area needs a shape and a size.");
+            throw new InvalidDataException($"{where}: area needs a shape ({string.Join(", ", StatBlockValues.Shapes.All)}) and a size 1-1000; it has {area.Shape} {area.Size}.");
+        }
+
+        // The same ranges as the monster overrides': a typo ("targets": 30, "ac_bonus": 50) fails at load instead of
+        // turning one spell into a party wipe.
+        foreach (var (field, value, min, max) in new (string, int?, int, int)[]
+                 {
+                     ("targets", Targets, 1, 20), ("upcast_targets", UpcastTargets, 0, 10), ("ac_bonus", AcBonus, 1, 10),
+                     ("kill_at_or_below_hp", KillAtOrBelowHp, 1, 1000),
+                 })
+        {
+            if (value is { } n && (n < min || n > max))
+            {
+                throw new InvalidDataException(string.Create(CultureInfo.InvariantCulture, $"{where}: {field} must be {min}-{max}; it is {n}."));
+            }
         }
 
         if (Condition is { } condition && (StatBlockValues.Conditions.All.Contains(condition.Condition) is false ||

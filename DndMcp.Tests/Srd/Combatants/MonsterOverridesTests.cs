@@ -37,6 +37,18 @@ public sealed partial class MonsterOverridesTests
         }
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(21)]
+    public void Parse_ActionTargetsOutOfRange_IsRefused(int targets)
+    {
+        var json = $$"""{ "2014/ogre": { "actions": { "Greatclub": { "targets": {{targets}}, "note": "test" } } } }""";
+
+        var ex = Assert.Throws<InvalidDataException>(() => MonsterOverrides.Parse([("2014", json)]));
+
+        Assert.Contains("targets must be 1-20", ex.Message);
+    }
+
     /// <summary>Removing any one override (a top-level fact or one action's) changes the normalized stat block.</summary>
     [Fact]
     public void EveryOverride_StillChangesItsStatBlock()
@@ -161,6 +173,9 @@ public sealed partial class MonsterOverridesTests
     [InlineData("""{"2014/goblin": {"actions": {"Scimitar": {"note": "x"}}}}""", "overrides nothing")]
     [InlineData("""{"2014/goblin": {"actions": {"Scimitar": {"area": {"shape": "blob", "size": 5}, "note": "x"}}}}""", "shape")]
     [InlineData("""not json""", "not valid")]
+    [InlineData("""{"2014/goblin": {"initiative": 25, "note": "x"}}""", "initiative must be -10-20; it is 25")]
+    [InlineData("""{"2014/goblin": {"legendary_uses": 0, "note": "x"}}""", "legendary_uses must be 1-5; it is 0")]
+    [InlineData("""{"2014/goblin": {"legendary_uses_in_lair": 7, "note": "x"}}""", "legendary_uses_in_lair must be 1-6; it is 7")]
     public void Parse_BrokenEntry_IsRefusedWithWhatIsWrong(string json, string fragment)
     {
         var ex = Assert.Throws<InvalidDataException>(() => MonsterOverrides.Parse([("2014", json)]));

@@ -25,7 +25,8 @@ namespace DndMcp.Tests.Srd.Combatants;
 /// when proficient. Save DC: <c>dc_override</c>, else 8 + proficiency + the <c>dc_ability</c> modifier. Every value
 /// we have must equal it: there is no excluded mismatch. What cannot be compared is counted and pinned: Cole's attacks
 /// whose action we read as something other than an attack (a 2014 swallow read as its bite), and Cole's saves on actions
-/// whose save we do not simulate (lycanthropy, mummy rot, a pull), so a change in what is compared is visible too.
+/// whose save we do not simulate (lycanthropy, mummy rot, a pull, the 2014 kraken's Fling, whose save is made by a
+/// creature the flung target is thrown at), so a change in what is compared is visible too.
 /// </para>
 /// </summary>
 public sealed partial class SrdOracleTests
@@ -120,8 +121,8 @@ public sealed partial class SrdOracleTests
 
     private static readonly Dictionary<string, int> ExpectedCounts = new()
     {
-        ["2014 monsters"] = 316, ["2014 attack bonuses equal"] = 500, ["2014 save DCs equal"] = 78,
-        ["2014 attacks not compared"] = 1, ["2014 saves not compared"] = 31,
+        ["2014 monsters"] = 316, ["2014 attack bonuses equal"] = 500, ["2014 save DCs equal"] = 77,
+        ["2014 attacks not compared"] = 1, ["2014 saves not compared"] = 32,
         ["2024 monsters"] = 329, ["2024 attack bonuses equal"] = 422, ["2024 save DCs equal"] = 137,
         ["2024 saves not compared"] = 12,
     };

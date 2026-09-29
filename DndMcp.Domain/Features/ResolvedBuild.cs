@@ -111,6 +111,61 @@ public sealed record ResolvedBuild
     /// <summary>Everything that spends the Reaction (reaction extra attacks), labelled for results.</summary>
     public IReadOnlyList<string> ReactionConsumers =>
         ExtraAttacks.Where(e => e.Action == DslValues.ExtraAttackActions.Reaction).Select(e => e.Source.Label).ToList();
+
+    /// <summary>
+    /// The note <c>balance_dpr</c> and <c>balance_simulate</c> both give when the build has Nick but does not model it, or
+    /// null. One rule and one wording for both tools, so they never disagree about the same build.
+    ///
+    /// <para>
+    /// Nick ("When you make the extra attack of the Light property, you can make it as part of the Attack action instead
+    /// of as a Bonus Action") changes only the action economy, and neither engine moves an attack between actions: a build
+    /// models it by making the Light weapon's extra attack an action attack. So the note is due while the build has a
+    /// Nick weapon AND still makes the Light extra attack with the Bonus Action: a bonus_action weapon attack that is
+    /// offhand, Light, or the Nick weapon itself. The rules do not say which of the two Light weapons must carry Nick, so
+    /// a Nick dagger in the Attack action beside a bonus_action offhand shortsword is noted too, naming the Nick weapon.
+    /// </para>
+    /// <para>
+    /// A build whose Attack action already holds the Light extra attack has modelled Nick and gets no note, since one
+    /// would tell it to do what it already did. The build does not say which attack is the extra one, so the action's
+    /// attacks are read for it: two different Light weapon attacks in the action (the 2024 rogue archetype's shortsword
+    /// and scimitar), or an offhand action weapon attack other than the Nick one (the extra attack, even with its light
+    /// property left out, since the Nick weapon earns it: every SRD Nick weapon, the dagger, light hammer, scimitar and
+    /// sickle, is Light). An offhand Nick attack alone does not count: the extra attack is made with a different Light
+    /// weapon from the one that earned it, so while the Nick weapon is the action's only Light attack, the extra attack
+    /// is the bonus_action one. A bonus_action Light attack beside a build that has modelled Nick comes from another
+    /// source (the Dual Wielder feat's) and is not noted. Reading the shape misses a case: two Light weapons that each
+    /// make an ordinary action attack (Extra Attack split between them) beside a bonus_action Light extra attack look
+    /// the same, and are not noted either; the note changes no number.
+    /// </para>
+    /// </summary>
+    public string? UnmodelledNickNote()
+    {
+        var nick = Attacks.Where(a => a.Mastery == DslValues.Masteries.Nick).ToList();
+        var bonusExtra = Attacks
+            .Where(a => a.Action == DslValues.AttackActions.BonusAction && a.IsWeapon &&
+                        (a.Offhand || a.HasProperty(DslValues.Properties.Light) || a.Mastery == DslValues.Masteries.Nick))
+            .ToList();
+        if (nick.Count == 0 || bonusExtra.Count == 0)
+        {
+            return null;
+        }
+
+        var inTheAction = Attacks.Where(a => a.IsPartOfAttackAction).ToList();
+        var extraAttackInTheAction =
+            inTheAction.Any(a => a.Offhand && a.Mastery != DslValues.Masteries.Nick) ||
+            inTheAction.Count(a => a.HasProperty(DslValues.Properties.Light)) >= 2;
+        if (extraAttackInTheAction)
+        {
+            return null;
+        }
+
+        // "Scimitar: Nick …" when the bonus_action attack carries Nick itself; "Shortsword: Nick (on Dagger) …" otherwise.
+        var carriers = bonusExtra.Any(a => a.Mastery == DslValues.Masteries.Nick)
+            ? string.Empty
+            : $" (on {string.Join(", ", nick.Select(a => a.Name))})";
+        return $"{string.Join(", ", bonusExtra.Select(a => a.Name))}: Nick{carriers} changes only the action economy; model it by making the " +
+               "Light weapon's extra attack an action attack (count) instead of a bonus_action one.";
+    }
 }
 
 /// <summary>Ability scores at one level.</summary>

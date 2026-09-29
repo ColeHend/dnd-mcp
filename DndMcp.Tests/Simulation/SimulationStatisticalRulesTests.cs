@@ -63,6 +63,26 @@ public sealed class SimulationStatisticalRulesTests
         Assert.Equal(perFight, report.Combatants[4].LegendaryActions);
     }
 
+    [Fact]
+    public void LegendaryActions_NeverAtTheEndOfItsOwnTurn()
+    {
+        // Legendary actions come at the end of ANOTHER creature's turn: with one wall to act, one a round (20 in a
+        // 20-round fight), though three uses would allow another after the boss's own turn.
+        var action = new StatBlockAction
+        {
+            Name = "Tail Attack",
+            Kind = K.ActionKinds.UseActions,
+            Slot = K.ActionSlots.Legendary,
+            Uses = [new ActionUse("Poke", 1)],
+            LegendaryCost = 1,
+            Text = "Tail Attack",
+        };
+        var boss = Boss(legendary: new LegendaryActions(3, null, [action]));
+        var report = Simulator.Run(SimKit.Spec([Wall()], [SimKit.Monster(boss)], iterations: 100), 3);
+        Assert.Equal(100, report.Draw.Count);
+        Assert.Equal(20, report.Combatants[1].LegendaryActions);
+    }
+
     [Theory]
     [InlineData("conditions", true, 3)]
     [InlineData("never", true, 0)]
@@ -79,6 +99,43 @@ public sealed class SimulationStatisticalRulesTests
         var report = Simulator.Run(SimKit.Spec([caster], [SimKit.Monster(Boss(legendaryResistance: 3))], iterations: 100, roundCap: 10,
             policies: new PolicySpec { LegendaryResistance = policy }), 4);
         Assert.Equal(spent, report.Combatants[1].LegendaryResistanceSpent);
+    }
+
+    [Fact]
+    public void LegendaryResistance_Conditions_SpentOnADamageOnlyKillingBlow()
+    {
+        // A 10 HP boss failing a DC 30 save against exactly 10 damage would drop to 0: "conditions" spends a use on it
+        // (a success halves it to 5), though the effect imposes no condition; at 5 HP the next 10 would drop it too, so a
+        // second use goes, and the second halved 5 ends it: exactly two a fight.
+        var fragile = TestStatBlocks.Create("Boss", 40, 10, "1d4", (10, 10, 10, 10, 10, 10), [TestStatBlocks.Attack("Poke", -10, "1", "bludgeoning")], legendaryResistance: 3, initiative: 20);
+        var caster = SimKit.Pc("""{ "name": "Caster", "edition": "2024", "level": 5, "abilities": {"wis": 16}, "modifiers": [{ "kind": "save_effect", "name": "Bolt", "ability": "dex", "dc": 30, "dice": "10", "type": "lightning" }] }""", hp: 5000, ac: 40);
+        var report = Simulator.Run(SimKit.Spec([caster], [SimKit.Monster(fragile)], iterations: 50), 5);
+        Assert.Equal(2.0, report.Combatants[1].LegendaryResistanceSpent);
+    }
+
+    [Fact]
+    public void LegendaryResistance_Conditions_NotSpentOnAConditionItAlreadyHas()
+    {
+        // A DC 30 Wis save always fails; the boss is already frightened, so failing changes nothing and keeps its uses.
+        var caster = SimKit.Pc("""{ "name": "Caster", "edition": "2024", "level": 5, "abilities": {"wis": 16}, "modifiers": [{ "kind": "save_effect", "name": "Scare", "ability": "wis", "dc": 30, "condition": "frightened" }] }""", hp: 5000, ac: 40, name: "Caster");
+        var scared = Scripted.Begin([caster], [SimKit.Monster(Boss(legendaryResistance: 3))]);
+        var target = scared.Named("Boss");
+        scared.AddCondition(null, target, new ConditionTemplate { Condition = Cond.Frightened, Duration = DurationKind.Fight }, 0);
+        scared.TakeTurn(scared.Named("Caster"));
+        Assert.Equal(0, target.LegendaryResistanceSpent);
+        Assert.Equal(3, target.LegendaryResistanceLeft);
+    }
+
+    [Fact]
+    public void PerDayUses_OncePerDayMeansOnce_AndOneCastOfSeveralRollsIsOneUse()
+    {
+        // A 1/day blast and a 2/day three-ray spell, each better than the poke: used exactly 1 and 2 times in a fight.
+        var blast = TestStatBlocks.SaveAction("Blast", "dex", 30, "20", "fire", area: new AreaSpec(K.Shapes.Sphere, 5), usage: new UsageSpec(K.UsageKinds.PerDay, Uses: 1));
+        var rays = TestStatBlocks.Attack("Rays", 5, "2d6", "fire", range: K.AttackRanges.Ranged) with { AttackRolls = 3, Usage = new UsageSpec(K.UsageKinds.PerDay, Uses: 2), IsSpell = true };
+        var boss = Boss(actions: [TestStatBlocks.Attack("Poke", -10, "1", "bludgeoning"), blast, rays]);
+        var report = Simulator.Run(SimKit.Spec([Wall()], [SimKit.Monster(boss)], iterations: 100), 7);
+        Assert.Equal(1.0, report.Combatants[1].Resources.Single(r => r.Name == "Blast").MeanUsed);
+        Assert.Equal(2.0, report.Combatants[1].Resources.Single(r => r.Name == "Rays").MeanUsed);
     }
 
     [Fact]

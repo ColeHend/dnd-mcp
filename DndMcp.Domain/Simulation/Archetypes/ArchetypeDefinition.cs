@@ -8,24 +8,54 @@ namespace DndMcp.Domain.Simulation.Archetypes;
 /// armour plan, the hit die, the saves and the position. <see cref="ArchetypeCatalog"/> reads it at a level to make an
 /// <see cref="ArchetypeMember"/>. Everything level-dependent is DERIVED here (HP, AC, saves) or resolved from step values
 /// (the build), never written per level, so a class's rules live in one place.
+///
+/// <para>
+/// A class, not a record: its members include delegates and an <see cref="AbilityTrack"/>, so a record's value equality
+/// would compare references anyway. <see cref="AbilitiesSpec"/> is derived when <see cref="Abilities"/> is set (not
+/// cached on first read), so it can never disagree with the plan, and it is complete before the shared catalogue hands
+/// the definition to any thread.
+/// </para>
 /// </summary>
-internal sealed record ArchetypeDefinition
+internal sealed class ArchetypeDefinition
 {
+    private readonly AbilityTrack _abilities = null!;
+
     /// <summary>The wire name, e.g. "fighter".</summary>
     public required string Name { get; init; }
 
     /// <summary>"Fighter": how results name it.</summary>
     public required string Title { get; init; }
 
+    /// <summary>"2014" or "2024": which class table, ASI levels and feature wording the definition follows.</summary>
     public required string Edition { get; init; }
 
+    /// <summary>The class's hit die (6, 8, 10 or 12): HP is its maximum at level 1, then its average plus Con per level.</summary>
     public required int HitDie { get; init; }
 
-    /// <summary><see cref="ArchetypeCatalog.Front"/> or <see cref="ArchetypeCatalog.Back"/>.</summary>
+    /// <summary><see cref="SimulationValues.Positions.Front"/> or <see cref="SimulationValues.Positions.Back"/>.</summary>
     public required string Position { get; init; }
 
-    public required AbilityTrack Abilities { get; init; }
+    /// <summary>
+    /// The ability plan: the standard array in the class's order, the ASIs in a fixed order and any capstone. Setting it
+    /// also derives <see cref="AbilitiesSpec"/>.
+    /// </summary>
+    public required AbilityTrack Abilities
+    {
+        get => _abilities;
+        init
+        {
+            _abilities = value;
+            AbilitiesSpec = value.ToSpec();
+        }
+    }
 
+    /// <summary>The ability plan as the DSL's abilities (step maps by level), derived from <see cref="Abilities"/>.</summary>
+    public AbilitiesSpec AbilitiesSpec { get; private init; } = null!;
+
+    /// <summary>
+    /// The starting armour, the armour the class is trained in (bought by wealth tier), whether a shield is carried and
+    /// any armourless formula (Unarmored Defense, Mage Armor): what <see cref="ArmorPlan.At"/> turns into the AC at a level.
+    /// </summary>
     public required ArmorPlan Armor { get; init; }
 
     /// <summary>The class's two saving throw proficiencies.</summary>
@@ -37,10 +67,13 @@ internal sealed record ArchetypeDefinition
     /// <summary>A bonus to every save of its own at a level (a paladin's Aura of Protection), or null.</summary>
     public Func<int, AbilityTrack, int>? SaveBonus { get; init; }
 
+    /// <summary>A <see cref="V.FightingStyles"/> value the build takes (gwf, archery, dueling, twf), or null.</summary>
     public string? FightingStyle { get; init; }
 
+    /// <summary>The build's attacks with step values and level ranges, the same at every level (the member picks the level).</summary>
     public required IReadOnlyList<AttackSpec> Attacks { get; init; }
 
+    /// <summary>The build's modifiers with step values and level ranges, the same at every level.</summary>
     public required IReadOnlyList<ModifierSpec> Modifiers { get; init; }
 
     /// <summary>The routine in one line: "Greatsword (2d6, GWF, Graze), Extra Attack 5/11/20, Action Surge, Second Wind".</summary>
@@ -48,11 +81,6 @@ internal sealed record ArchetypeDefinition
 
     /// <summary>Class-specific assumptions: what is modelled beyond the routine, and what is left out and why.</summary>
     public required IReadOnlyList<string> Notes { get; init; }
-
-    /// <summary>The ability plan as the DSL's abilities (computed once).</summary>
-    public AbilitiesSpec AbilitiesSpec => _abilitiesSpec ??= Abilities.ToSpec();
-
-    private AbilitiesSpec? _abilitiesSpec;
 
     /// <summary>The save proficiencies at a level, in str … cha order.</summary>
     public IReadOnlyList<string> SavesAt(int level)

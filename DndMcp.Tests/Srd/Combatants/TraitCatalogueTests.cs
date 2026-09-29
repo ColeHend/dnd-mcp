@@ -243,6 +243,33 @@ public sealed class TraitCatalogueTests
         Assert.True(dead.Count == 0, "Catalogue entries no trait uses: " + string.Join(", ", dead));
     }
 
+    /// <summary>
+    /// <see cref="TraitCatalogue.Implemented"/> is kept by hand beside <see cref="TraitCatalogue.Classify"/>'s case labels:
+    /// every name in it must reach a case, and every catalogued or data trait name that reaches a case must be in it,
+    /// so the two cannot drift (a case added without its name would pass <see cref="Catalogue_Lists_DoNotOverlapAndNameOnlyTraitsTheDataHas"/>
+    /// unchecked; a name without its case would be classified as an unknown trait).
+    /// </summary>
+    [Fact]
+    public void Implemented_IsExactlyTheNamesClassifyHasACaseFor()
+    {
+        static bool HasCase(string name)
+        {
+            var log = new NormalizationLog();
+            TraitCatalogue.Classify(new RecordAction { Name = name, Desc = "No text.", Damage = [], DamageChoices = [] }, log);
+            return !log.Warnings.Any(w => w.Message.StartsWith("A trait the normalizer's catalogue does not know", StringComparison.Ordinal));
+        }
+
+        var implemented = TraitCatalogue.Implemented.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var drift = Expected.Keys.Concat(TraitCatalogue.Implemented)
+            .Where(n => !TraitCatalogue.NoCombatEffect.ContainsKey(n) && !TraitCatalogue.NotModelled.ContainsKey(n) && !n.StartsWith("Keen ", StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(n => HasCase(n) != implemented.Contains(n))
+            .Select(n => implemented.Contains(n) ? $"{n}: in Implemented, but Classify has no case for it" : $"{n}: Classify has a case for it, but it is not in Implemented")
+            .ToList();
+
+        Assert.True(drift.Count == 0, string.Join("\n", drift));
+    }
+
     [Fact]
     public void NoCombatEffect_EveryTrait_IsNamedInANoteOfItsMonster()
     {
@@ -252,6 +279,40 @@ public sealed class TraitCatalogueTests
                 block.Traits.Where(t => t.Kind == StatBlockValues.TraitKinds.NoCombatEffect),
                 t => Assert.Contains(block.Notes, n => n.StartsWith($"Trait {ProseText.StripParentheticals(t.Name)}:", StringComparison.Ordinal)));
         }
+    }
+
+    [Fact]
+    public void Classify_FireAuraWithAHalvingSave_KeepsTheHalf()
+    {
+        // No shipped Fire Aura has a save; a homebrew-style one that does must keep "half as much damage on a success".
+        var trait = new RecordAction
+        {
+            Name = "Fire Aura",
+            Desc = "At the start of each of its turns, each creature within 10 feet of it must make a DC 15 Constitution saving throw, taking 10 (3d6) fire damage on a failed save, or half as much damage on a successful one.",
+            Damage = [],
+            DamageChoices = [],
+        };
+
+        var aura = TraitCatalogue.Classify(trait, new NormalizationLog()).Single(t => t.Kind == StatBlockValues.TraitKinds.AuraDamage);
+
+        Assert.Equal(("con", 15, StatBlockValues.OnSuccess.Half), (aura.Save!.Ability, aura.Save.Dc, aura.Save.OnSuccess));
+    }
+
+    [Fact]
+    public void Classify_StenchWithoutADuration_LastsUntilTheStartOfTheTargetsNextTurn()
+    {
+        // A condition aura that names no duration is re-imposed each turn it starts nearby: until its next turn starts.
+        var trait = new RecordAction
+        {
+            Name = "Stench",
+            Desc = "Any creature that starts its turn within 5 feet of the thing must succeed on a DC 10 Constitution saving throw or be poisoned.",
+            Damage = [],
+            DamageChoices = [],
+        };
+
+        var stench = Assert.Single(TraitCatalogue.Classify(trait, new NormalizationLog()));
+
+        Assert.Equal(("poisoned", StatBlockValues.Durations.UntilStartOfTargetTurn), (stench.Condition!.Condition, stench.Condition.Duration));
     }
 
     [Fact]

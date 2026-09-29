@@ -8,13 +8,15 @@ namespace DndMcp.Domain.Simulation;
 /// line. A melee attack reaches a standing enemy front-liner; only when the enemy side has none standing can it reach
 /// anyone, and a flying attacker always can. Ranged attacks, spells and save effects reach anyone. An area takes the
 /// DMG's count of creatures, the front line first and then the back line, in a random order within each line (seeded),
-/// never an ally. A creature at 0 HP is not a target unless the enemies' <c>finish_downed</c> policy says so; a troll at
-/// 0 HP is attacked only when nothing else is left.
+/// never an ally: standing creatures first, then — while the count has room — creatures lying at 0 HP, who are inside
+/// it too. A creature at 0 HP is not otherwise a target unless the enemies' <c>finish_downed</c> policy says so; a troll
+/// at 0 HP is attacked only when nothing else is left.
 /// </para>
 /// </summary>
 internal sealed partial class Fight
 {
     private readonly List<Creature> _candidates = [];
+    private readonly List<Creature> _killable = [];
     private readonly List<Creature> _picked = [];
     private readonly List<Creature> _front = [];
     private readonly List<Creature> _back = [];
@@ -102,8 +104,11 @@ internal sealed partial class Fight
         }
     }
 
-    /// <summary>One target for an attack or a single-target effect, by the side's policy.</summary>
-    internal Creature? PickTarget(Creature attacker, bool melee)
+    /// <summary>
+    /// One target for an attack or a single-target effect, by the side's policy; an outright kill
+    /// (<paramref name="killAtOrBelowHp"/>) at a creature it kills when there is one (<see cref="KillableAmong"/>).
+    /// </summary>
+    internal Creature? PickTarget(Creature attacker, bool melee, int? killAtOrBelowHp = null)
     {
         if (_setup.Dummy)
         {
@@ -111,7 +116,35 @@ internal sealed partial class Fight
         }
 
         FillCandidates(attacker, melee);
-        return _candidates.Count == 0 ? null : Choose(_candidates, _setup.Targeting(attacker.Side));
+        return _candidates.Count == 0 ? null : Choose(KillableAmong(killAtOrBelowHp) ? _killable : _candidates, _setup.Targeting(attacker.Side));
+    }
+
+    /// <summary>
+    /// Fills <see cref="_killable"/> with the standing <see cref="_candidates"/> an outright kill takes
+    /// (<see cref="StatBlockAction.KillAtOrBelowHp"/>: Power Word Kill, the 2024 solar's Slaying Bow) and returns whether
+    /// there are any: the side's policy then chooses among those. The caster aims the word at a creature it kills; aimed by
+    /// the policy alone, a threat-policy lich would spend its 9th-level slot on the 200-HP tank beside an 80-HP wizard, to
+    /// no effect in 2014 and for 12d12 in 2024. A dying party member (a candidate under <c>finish_downed</c>) is out of
+    /// the fight already and is no reason to aim the kill; with no standing creature it kills, the policy picks as usual.
+    /// With no threshold (every other action) it is false and draws nothing, so the targeting of other actions is unchanged.
+    /// </summary>
+    private bool KillableAmong(int? killAtOrBelowHp)
+    {
+        _killable.Clear();
+        if (killAtOrBelowHp is null)
+        {
+            return false;
+        }
+
+        foreach (var c in _candidates)
+        {
+            if (c.Up && KilledOutright(killAtOrBelowHp, c))
+            {
+                _killable.Add(c);
+            }
+        }
+
+        return _killable.Count > 0;
     }
 
     private Creature Choose(List<Creature> candidates, string policy)
@@ -184,8 +217,13 @@ internal sealed partial class Fight
         return candidates[0];
     }
 
-    /// <summary>Up to <paramref name="count"/> different targets by the side's policy (a save against "up to three creatures").</summary>
-    private void PickDistinct(Creature attacker, int count, List<Creature> into)
+    /// <summary>
+    /// Up to <paramref name="count"/> different targets by the side's policy (a save against "up to three creatures"),
+    /// never one already immune to the effect (<paramref name="immunity"/>, <see cref="MonsterAction.ImmunityIndex"/>):
+    /// the caster chooses its targets, and one that shook the effect off is a wasted choice. For the same reason an
+    /// outright kill (<paramref name="killAtOrBelowHp"/>) takes the creatures it kills first (<see cref="KillableAmong"/>).
+    /// </summary>
+    private void PickDistinct(Creature attacker, int count, List<Creature> into, int immunity = -1, int? killAtOrBelowHp = null)
     {
         into.Clear();
         if (_setup.Dummy)
@@ -199,15 +237,40 @@ internal sealed partial class Fight
         }
 
         FillCandidates(attacker, false);
+        DropImmune(attacker, immunity);
         while (into.Count < count && _candidates.Count > 0)
         {
-            var pick = Choose(_candidates, _setup.Targeting(attacker.Side));
+            var pick = Choose(KillableAmong(killAtOrBelowHp) ? _killable : _candidates, _setup.Targeting(attacker.Side));
             into.Add(pick);
             _candidates.Remove(pick);
         }
     }
 
-    /// <summary>The creatures an area catches: the DMG count, capped by the standing enemies, front line first.</summary>
+    /// <summary>Leaves out of <see cref="_candidates"/> the creatures immune to <paramref name="attacker"/>'s effect number <paramref name="immunity"/> (−1: none).</summary>
+    private void DropImmune(Creature attacker, int immunity)
+    {
+        if (immunity < 0)
+        {
+            return;
+        }
+
+        for (var i = _candidates.Count - 1; i >= 0; i--)
+        {
+            if (_candidates[i].IsImmuneToEffect(attacker.Id, immunity))
+            {
+                _candidates.RemoveAt(i);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The creatures an area catches: the DMG count, front line first, never an ally. Standing enemies fill it first (the
+    /// caster aims at those still fighting, so the count is what it can catch of them); while the count has room, enemies
+    /// lying at 0 HP and not dead come next — a dying party member or a downed troll lies where it fell, inside the area,
+    /// and takes its share: a death-save failure (massive damage kills), a Dex save it fails as an unconscious creature,
+    /// and a troll's regeneration stopped by fire. The downed are gathered and shuffled only when the count has room, so a
+    /// fight whose areas never do draws the same numbers as when they were left out.
+    /// </summary>
     private void PickArea(Creature attacker, int count, List<Creature> into)
     {
         into.Clear();
@@ -221,11 +284,21 @@ internal sealed partial class Fight
             return;
         }
 
+        FillArea(attacker, count, into, down: false);
+        if (into.Count < count)
+        {
+            FillArea(attacker, count, into, down: true);
+        }
+    }
+
+    /// <summary>Adds the attacker's enemies that are standing (or, with <paramref name="down"/>, at 0 HP and alive) to the area: front line, then back line, each shuffled.</summary>
+    private void FillArea(Creature attacker, int count, List<Creature> into, bool down)
+    {
         _front.Clear();
         _back.Clear();
         foreach (var c in _c)
         {
-            if (c.Side != attacker.Side && c.Up)
+            if (c.Side != attacker.Side && (down ? c.Down && !c.Dead : c.Up))
             {
                 (c.T.Front ? _front : _back).Add(c);
             }

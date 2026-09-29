@@ -50,7 +50,7 @@ public sealed record SpellProfile
     /// <summary>2014 cantrip tables by character level (1, 5, 11, 17).</summary>
     public IReadOnlyDictionary<int, IReadOnlyList<DamageRoll>> DamageByCharacterLevel { get; init; } = new Dictionary<int, IReadOnlyList<DamageRoll>>();
 
-    /// <summary>Cantrips without a table: <c>dice</c> (×1/×2/×3/×4 at 1/5/11/17) or <c>beams</c> (that many attacks).</summary>
+    /// <summary>Cantrips without a table: <see cref="CantripScalings"/>.</summary>
     public string? CantripScaling { get; init; }
 
     /// <summary>The spellcasting modifier is added to each damage roll (Spiritual Weapon).</summary>
@@ -74,6 +74,12 @@ public sealed record SpellProfile
 
     /// <summary>Parry spells (Shield).</summary>
     public int? AcBonus { get; init; }
+
+    /// <summary>
+    /// Power Word Kill: a target with at most this many hit points dies outright; otherwise <see cref="Damage"/> applies
+    /// (2024: 12d12 Psychic; 2014: none). Becomes <see cref="StatBlockAction.KillAtOrBelowHp"/> on every cast.
+    /// </summary>
+    public int? KillAtOrBelowHp { get; init; }
 
     /// <summary>How a lingering effect is simplified; an <c>approximated</c> warning on every caster.</summary>
     public string? Approximation { get; init; }
@@ -106,4 +112,22 @@ public static class SpellProfileKinds
     public const string NotModelled = "not_modelled";
 
     public static readonly IReadOnlyList<string> All = [Attack, Save, AutoHit, Heal, Parry, NoCombatEffect, NotModelled];
+
+    /// <summary>The kinds the simulator casts, and so the kinds an overlay entry may give.</summary>
+    public static readonly IReadOnlyList<string> Combat = [Attack, Save, AutoHit, Heal, Parry];
+}
+
+/// <summary>
+/// <see cref="SpellProfile.CantripScaling"/> values, and the overlay's <c>cantrip</c> field: how a cantrip without a
+/// damage table grows with the caster's level.
+/// </summary>
+public static class CantripScalings
+{
+    /// <summary>Its dice ×1/×2/×3/×4 at caster levels 1/5/11/17 (Fire Bolt).</summary>
+    public const string Dice = "dice";
+
+    /// <summary>1/2/3/4 attacks at caster levels 1/5/11/17, each its own roll (Eldritch Blast's beams).</summary>
+    public const string Beams = "beams";
+
+    public static readonly IReadOnlyList<string> All = [Dice, Beams];
 }

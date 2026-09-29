@@ -1070,7 +1070,12 @@ internal sealed class TurnEvaluator
         return mixture.Build();
     }
 
-    /// <summary>The hit's damage given that it is above 0 (a Vex hit that granted Advantage).</summary>
+    /// <summary>
+    /// The hit's damage given that it is above 0 (a Vex hit that granted Advantage). The Vex split asks for it only when
+    /// <see cref="DamageSummary.ZeroChance"/> is strictly between 0 and 1, so a value above 0 exists; should none (a hit
+    /// the target is immune to, read through a caller that skipped the split), the branch has no damage to condition on
+    /// and is the point at 0, never an empty distribution that throws.
+    /// </summary>
     private Pmf<double> NonZero(AttackLine line, bool crit, HitExpansion hit)
     {
         var key = (line.Index, crit, hit.Riders, hit.Savage, hit.PowerBonus, true);
@@ -1087,7 +1092,7 @@ internal sealed class TurnEvaluator
                 }
             }
 
-            pmf = Pmf<double>.FromPairs(pairs, 1.0);
+            pmf = pairs.Count == 0 || scale <= 0 ? Pmf<double>.Point(0) : Pmf<double>.FromPairs(pairs, 1.0);
             _conditional[key] = pmf;
         }
 

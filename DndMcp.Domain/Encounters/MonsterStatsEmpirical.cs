@@ -246,7 +246,6 @@ public static class MonsterStatsEmpirical
         new(ChallengeRating.All[27], 2, 22, 526.5, 17, 2, 24, 2, 8.1667),
         new(ChallengeRating.All[33], 1, 25, 697, 19, 1, 27, 1, 8.6667),
     ];
-
 }
 
 /// <summary>

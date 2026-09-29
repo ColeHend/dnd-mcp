@@ -138,7 +138,8 @@ public sealed class SimulationSpec
 
     /// <summary>
     /// Run batches of 10,000 fights until the 95% half-width of P(party wins) is at most this (0.001–0.5), up to 100,000
-    /// fights. Null: exactly <see cref="Iterations"/>.
+    /// fights, or fewer when the next batch would pass <see cref="SimulationLimits.WorkBudget"/> (the report then says the
+    /// precision was not reached, and why). Null: exactly <see cref="Iterations"/>.
     /// </summary>
     public double? Precision { get; init; }
 
@@ -166,10 +167,24 @@ public static class SimulationLimits
     public const int MinInitiativeBonus = -10;
     public const int MaxInitiativeBonus = 20;
 
-    /// <summary>Fights per parallel chunk (and per progress report).</summary>
+    /// <summary>
+    /// At most this many fights per parallel chunk (and per progress report); a heavy fight's chunk is smaller
+    /// (<see cref="ChunkWork"/>).
+    /// </summary>
     public const int ChunkSize = 1024;
 
-    /// <summary>Fights per batch in precision mode.</summary>
+    /// <summary>
+    /// A chunk's work at most, in the budget's measure (fights × combatants × round cap, × 2 with a comparison): a chunk of
+    /// the heaviest fights is about a second of one thread's work (a million creature-turns a second over 15 threads,
+    /// <see cref="WorkBudget"/>), so progress comes that often — measured on those runs, the first after 0.5 to 0.7 s and
+    /// the rest at most 0.45 s apart — and a run of a few heavy fights still spreads over every thread.
+    /// </summary>
+    public const long ChunkWork = 65_536;
+
+    /// <summary>
+    /// Fights per batch in precision mode. The budget charges precision mode this first batch, the least it runs; a
+    /// further batch runs only while the run's work stays within <see cref="WorkBudget"/>.
+    /// </summary>
     public const int PrecisionBatch = 10_000;
 
     public const double MinPrecision = 0.001;
@@ -177,13 +192,23 @@ public static class SimulationLimits
 
     /// <summary>
     /// The work cap: fights × combatants × round cap (× 2 with a comparison, which runs every fight twice) — an upper
-    /// bound on creature-turns. Measured on the development machine (16 cores, shared with other builds at the time): the
-    /// worst shape — 40 creatures that all stay standing to a 100-round cap, spread targeting (every monster values every
-    /// action against every candidate) and power-attack builds (a per-turn choice) — ran 65.5 million creature-turns in
-    /// 16.9 s (3.9 million a second); a typical 4v3 × 10,000 run takes under 0.1 s. At 60 million the worst accepted run
-    /// takes about 15 s, and ordinary requests (100,000 fights of a 4v3 at round cap 20 is 14 million) pass easily.
+    /// bound on creature-turns, sized so the worst accepted run takes about 20 s (contract §5.6). A creature-turn costs
+    /// more the more creatures there are (a monster values its actions against every candidate), so the worst shape is the
+    /// largest fight: 40 creatures that all stay standing to a 100-round cap. Measured on the development machine (16
+    /// threads, 15 of them fighting), 5,000 such fights (20 million) took 15.8 s as fighter walls, 19.0 s as power-attack
+    /// builds with spread targeting and 20.5 s as level 20 wizard archetypes against adult red dragons, about a million
+    /// creature-turns a second; 3 against 3 runs 4.8 million a second, and a typical 4v3 × 10,000 run 0.05 s. At the 60
+    /// million this cap used to be, the fighter walls took 43 s. Ordinary requests pass: 100,000 fights of a 4v3 at round
+    /// cap 20 is 14 million, and the default 10,000 fights allow 40 combatants to round 50.
+    /// <para>
+    /// Precision mode is charged its first batch (<see cref="PrecisionBatch"/>), not the 100,000 fights it may run: ±1% or
+    /// wider is always reached in that batch (the widest 95% half-width at 10,000 fights is ±0.98%), yet charged 100,000
+    /// fights a 4v2 with a comparison, or 11 combatants, at round cap 20 was refused. Its later batches stop where the next
+    /// would pass this cap, and the report says the precision was not reached at the work limit, so the worst case is the
+    /// same 20 million.
+    /// </para>
     /// </summary>
-    public const long WorkBudget = 60_000_000;
+    public const long WorkBudget = 20_000_000;
 
     /// <summary>The replay log's size; past it the log is cut with a closing line, and the summary is still shown.</summary>
     public const int ReplayLogChars = 20_000;

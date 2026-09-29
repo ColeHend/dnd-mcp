@@ -17,12 +17,29 @@ namespace DndMcp.Domain.Simulation;
 /// </para>
 /// <para>
 /// Expected damage here ranks choices only (hit odds from <see cref="AttackRoll.Odds"/>, damage means scaled by the
-/// target's resistances); every outcome is rolled. Conditions an action imposes add no value to its rank.
+/// target's resistances); every outcome is rolled. A condition an action imposes adds its <see cref="ConditionValue"/>
+/// times the chance it lands — a failed save for a save action, the hit (and the rider's failed save, when it has one) for
+/// an attack — so a lich reaches for Paralyzing Touch and a giant spider for Web when the target is worth holding. An
+/// outright kill (Power Word Kill) is worth the hit points it takes, and a single-target one is aimed at, and valued at,
+/// a creature it kills when there is one. An effect the target is immune to (it succeeded against it before:
+/// <see cref="StatBlockAction.ImmuneAfterSuccess"/>) is worth nothing against it, and an area of it that could reach
+/// only immune creatures is not used at all.
+/// </para>
+/// <para>
+/// <b>A use_actions routine that pays a usage slot</b> (the 2024 pit fiend's Hellfire Spellcasting, Recharge 4–6, which
+/// casts Fireball twice from the same shared recharge) pays it once: the uses it runs are neither checked against that
+/// slot nor charged for it again (<see cref="Paid"/>).
 /// </para>
 /// </summary>
 internal sealed partial class Fight
 {
     private readonly List<Creature> _monsterTargets = [];
+
+    /// <summary>The creature whose use_actions routine is running and has paid <see cref="_paidSlots"/> (−1: none).</summary>
+    private int _paidBy = -1;
+
+    /// <summary>The usage slots (bits, slots 0–63) the running routines of <see cref="_paidBy"/> have paid.</summary>
+    private ulong _paidSlots;
 
     private void MonsterTurn(Creature m)
     {
@@ -186,8 +203,9 @@ internal sealed partial class Fight
     private bool CanStillAct(Creature m) => m.Up && !m.Incapacitated && !_over;
 
     /// <summary>
-    /// Whether an action can be used now: recharged, a use or a slot left, and no second concentration. A use-actions
-    /// action needs everything it uses (at most three levels deep, so a malformed cycle cannot recurse forever).
+    /// Whether an action can be used now: recharged, a use or a slot left (or its usage slot already paid by the routine
+    /// running it, <see cref="Paid"/>), and no second concentration. A use-actions action needs everything it uses (at
+    /// most three levels deep, so a malformed cycle cannot recurse forever).
     /// </summary>
     private bool Available(Creature m, MonsterAction action, int depth = 0)
     {
@@ -196,7 +214,7 @@ internal sealed partial class Fight
             return false;
         }
 
-        if (action.UsageSlot >= 0)
+        if (action.UsageSlot >= 0 && !Paid(m, action.UsageSlot))
         {
             var usage = action.Source.Usage;
             if (usage.Kind == K.UsageKinds.Recharge ? !m.RechargeReady[action.UsageSlot] : m.UsesLeft[action.UsageSlot] <= 0)
@@ -233,9 +251,17 @@ internal sealed partial class Fight
 
     private const int MaxUseDepth = 3;
 
+    /// <summary>
+    /// Whether a use_actions routine of <paramref name="m"/> that is running now has already paid this usage slot: a use it
+    /// makes from the same slot (the Fireballs of the pit fiend's Hellfire Spellcasting share its recharge) is neither
+    /// refused for the spent slot nor charged again. Without it the routine would spend the shared recharge and then find
+    /// every spell it casts unavailable.
+    /// </summary>
+    private bool Paid(Creature m, int slot) => m.Id == _paidBy && slot is >= 0 and < 64 && (_paidSlots & (1UL << slot)) != 0;
+
     private void Consume(Creature m, MonsterAction action)
     {
-        if (action.UsageSlot >= 0)
+        if (action.UsageSlot >= 0 && !Paid(m, action.UsageSlot))
         {
             m.LimitedUsed[action.UsageSlot]++;
             if (action.Source.Usage.Kind == K.UsageKinds.Recharge)
@@ -270,6 +296,13 @@ internal sealed partial class Fight
             }
 
             Consume(m, action);
+            var (outerBy, outerSlots) = (_paidBy, _paidSlots);
+            if (action.UsageSlot is >= 0 and < 64)
+            {
+                _paidSlots = (outerBy == m.Id ? outerSlots : 0) | (1UL << action.UsageSlot);
+                _paidBy = m.Id;
+            }
+
             foreach (var (used, count) in action.Uses)
             {
                 for (var i = 0; i < count; i++)
@@ -281,6 +314,7 @@ internal sealed partial class Fight
                 }
             }
 
+            (_paidBy, _paidSlots) = (outerBy, outerSlots);
             return;
         }
 
@@ -335,7 +369,7 @@ internal sealed partial class Fight
         var mode = AttackMode(m, target, melee, advantage, false, out var autoCrit);
         var bonus = action.AttackBonus - ExhaustionPenalty(m);
         var face = RollD20(mode, false, false, out var faces);
-        var ac = target.T.ArmorClass + target.T.CoverBonus;
+        var ac = ArmorClass(target);
         var critFace = face == 20;
         var hit = critFace || (face != 1 && face + bonus >= ac);
         if (hit && !critFace && Parried(target, melee, face + bonus, ac))
@@ -351,6 +385,13 @@ internal sealed partial class Fight
 
         if (!hit)
         {
+            return;
+        }
+
+        if (KilledOutright(action.KillAtOrBelowHp, target))
+        {
+            Slay(m, target, action.Name);
+            Retaliate(m, target, melee);
             return;
         }
 
@@ -393,11 +434,6 @@ internal sealed partial class Fight
 
         ApplyDamage(m, target, damage, action.Magical, false, false, crit, false);
 
-        if (melee && target.T.Retaliation is { } retaliation && !m.Dead)
-        {
-            TraitDamage(target, m, retaliation);
-        }
-
         foreach (var effect in action.OnHit)
         {
             if (target.Dead)
@@ -407,7 +443,10 @@ internal sealed partial class Fight
 
             if (effect.Kind == K.EffectKinds.Save && effect.Save is { } save)
             {
-                if (!FitsSize(target, effect.MaxSize) && effect.Damage.Length == 0)
+                // A kill rider works only at or below its threshold ("If the target is a creature that has 100 hit points
+                // or fewer, it must succeed on a DC 15 Constitution saving throw or die"), read after the hit's damage.
+                if ((effect.KillAtOrBelowHp is not null && !KilledOutright(effect.KillAtOrBelowHp, target)) ||
+                    (!FitsSize(target, effect.MaxSize) && effect.Damage.Length == 0) || ShrugsOff(m, target, effect.ImmunityIndex, action.Name))
                 {
                     continue;
                 }
@@ -421,7 +460,7 @@ internal sealed partial class Fight
 
                 var fits = FitsSize(target, effect.MaxSize);
                 ResolveSave(m, target, save.Ability, save.Dc, save.OnSuccess, action.Magical, rolled, fits ? effect.Condition : null,
-                    ConcentrationTokenFor(m, action), action.Name, fits ? effect.ExtraConditions : null);
+                    ConcentrationTokenFor(m, action), action.Name, fits ? effect.ExtraConditions : null, effect.ImmunityIndex, lethal: effect.KillAtOrBelowHp is not null);
             }
             else if (effect.Kind == K.EffectKinds.Condition && FitsSize(target, effect.MaxSize))
             {
@@ -436,6 +475,8 @@ internal sealed partial class Fight
                 }
             }
         }
+
+        Retaliate(m, target, melee);
     }
 
     /// <summary>
@@ -456,11 +497,16 @@ internal sealed partial class Fight
         var targets = _monsterTargets;
         if (action.AreaCount > 0)
         {
+            if (OnlyImmuneInReach(m, action.ImmunityIndex))
+            {
+                return;
+            }
+
             PickArea(m, action.AreaCount, targets);
         }
         else
         {
-            PickDistinct(m, action.Targets, targets);
+            PickDistinct(m, action.Targets, targets, action.ImmunityIndex, action.KillAtOrBelowHp);
         }
 
         if (targets.Count == 0 || action.Save is not { } save)
@@ -484,13 +530,40 @@ internal sealed partial class Fight
 
         foreach (var target in targets.ToArray())
         {
-            ResolveSave(m, target, save.Ability, save.Dc, save.OnSuccess, action.Magical, rolled, action.Condition, token, action.Name, action.ExtraConditions);
+            ResolveSave(m, target, save.Ability, save.Dc, save.OnSuccess, action.Magical, rolled, action.Condition, token, action.Name, action.ExtraConditions,
+                action.ImmunityIndex, lethal: KilledOutright(action.KillAtOrBelowHp, target));
         }
 
         if (token != 0 && LinkedConditions(token) == 0)
         {
             EndConcentration(m, "has nothing left to hold");
         }
+    }
+
+    /// <summary>
+    /// Whether every enemy an area of this effect could catch (<see cref="PickArea"/>: standing, or at 0 HP and alive) is
+    /// immune to it (<see cref="StatBlockAction.ImmuneAfterSuccess"/>). The dragons' Multiattack runs "The dragon can use
+    /// its Frightful Presence" as a step whatever its value; once the whole party has shaken the fear off, the step is
+    /// skipped (the option not taken) instead of drawing an area and logging every creature's immunity, turn after turn.
+    /// A single-target effect needs no such test: <see cref="PickDistinct"/> leaves immune creatures out, and with none
+    /// left the effect is not used.
+    /// </summary>
+    private bool OnlyImmuneInReach(Creature m, int immunity)
+    {
+        if (immunity < 0)
+        {
+            return false;
+        }
+
+        foreach (var c in _c)
+        {
+            if (c.Side != m.Side && (c.Up || (c.Down && !c.Dead)) && !c.IsImmuneToEffect(m.Id, immunity))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private void MonsterAutoHit(Creature m, MonsterAction action)
@@ -514,7 +587,14 @@ internal sealed partial class Fight
 
             foreach (var target in _monsterTargets.ToArray())
             {
-                ApplyDamage(m, target, rolled, action.Magical, false, false, false, false);
+                if (KilledOutright(action.KillAtOrBelowHp, target))
+                {
+                    Slay(m, target, action.Name);
+                }
+                else
+                {
+                    ApplyDamage(m, target, rolled, action.Magical, false, false, false, false);
+                }
             }
 
             return;
@@ -523,7 +603,7 @@ internal sealed partial class Fight
         var used = false;
         for (var dart = 0; dart < action.Targets; dart++)
         {
-            var target = PickTarget(m, false);
+            var target = PickTarget(m, false, action.KillAtOrBelowHp);
             if (target is null)
             {
                 break;
@@ -537,6 +617,13 @@ internal sealed partial class Fight
                 {
                     _log.Line($"  {action.Name}");
                 }
+            }
+
+            // Power Word Kill: "If the target has 100 Hit Points or fewer, it dies. Otherwise, it takes 12d12 Psychic damage."
+            if (KilledOutright(action.KillAtOrBelowHp, target))
+            {
+                Slay(m, target, action.Name);
+                continue;
             }
 
             RollParts(action.Damage, _hit, false);
@@ -636,7 +723,7 @@ internal sealed partial class Fight
 
     /// <summary>
     /// E[damage] of using the action now: an attack against the policy's pick (focus fire, threat) or the average over the
-    /// candidates (spread and the rest); a save or auto-hit over the creatures it would reach.
+    /// candidates (spread and the rest); a save or auto-hit over the creatures it would reach (<see cref="EffectValue"/>).
     /// </summary>
     private double ActionValue(Creature m, MonsterAction action, int depth = 0)
     {
@@ -677,32 +764,30 @@ internal sealed partial class Fight
             return AttackValue(m, action, pick, melee);
         }
 
-        // The average over the candidates. Identical candidates (one entry's copies, unhurt or all hurt alike, with no
-        // conditions) have identical values: each distinct one is valued once.
+        // The average over the candidates, each valued on its own: every copy of an entry has its own template, and a
+        // value can hang on its exact hit points (an outright kill), so no two candidates are assumed alike.
         var sum = 0.0;
-        CombatantTemplate? lastTemplate = null;
-        var lastWounded = false;
-        var lastValue = 0.0;
         foreach (var c in _candidates)
         {
-            var plain = c.Conditions.Count == 0 && c.Up && !c.Dodging && c.SappedBy < 0 && !c.RecklessActive;
-            var wounded = c.Hp < c.MaxHp;
-            if (plain && lastTemplate == c.T && lastWounded == wounded && c.T.PermanentConditions == 0)
-            {
-                sum += lastValue;
-                continue;
-            }
-
-            var value = AttackValue(m, action, c, melee);
-            sum += value;
-            (lastTemplate, lastWounded, lastValue) = plain ? (c.T, wounded, value) : (null, false, 0.0);
+            sum += AttackValue(m, action, c, melee);
         }
 
         return sum / _candidates.Count;
     }
 
+    /// <summary>
+    /// A save or auto-hit action's E[damage]: the average per creature over the enemies standing, times the creatures (or
+    /// darts) it reaches. A single-target outright kill is aimed at a creature it kills when there is one
+    /// (<see cref="KillableAmong"/>), so it is valued at that choice instead (<see cref="KillAimedValue"/>).
+    /// </summary>
     private double EffectValue(Creature m, MonsterAction action)
     {
+        if (action.KillAtOrBelowHp is not null && action.AreaCount == 0 && action.Targets == 1 && (action.IsSave || action.IsAutoHit) &&
+            KillAimedValue(m, action) is { } aimed)
+        {
+            return aimed;
+        }
+
         if (action.IsSave || action.IsAutoHit)
         {
             var count = 0;
@@ -715,7 +800,7 @@ internal sealed partial class Fight
                 }
 
                 count++;
-                total += action.IsSave ? SaveValue(action, c) : action.MeanDamage * Factor(c, action.Damage.Length > 0 ? action.Damage[0].Type : DamageTypes.Typeless, action.Magical);
+                total += action.IsSave ? SaveValue(m, action, c) : AutoHitValue(action, c);
             }
 
             if (count == 0)
@@ -730,39 +815,136 @@ internal sealed partial class Fight
         return 0;
     }
 
+    /// <summary>
+    /// A single-target outright kill's value at the target it is aimed at (<see cref="PickTarget"/>,
+    /// <see cref="PickDistinct"/>): among the creatures it kills, the policy's own pick (focus fire, threat) or the average
+    /// over them (the policies that pick at random). Null when it kills no standing candidate: then the average over every
+    /// standing enemy stands, as for any other action. Valued over every enemy instead, the 2014 Power Word Kill (no effect above
+    /// 100 hit points) looked worth a fraction of the wizard it kills, and was aimed by the policy regardless.
+    /// </summary>
+    private double? KillAimedValue(Creature m, MonsterAction action)
+    {
+        FillCandidates(m, false);
+        if (action.IsSave)
+        {
+            DropImmune(m, action.ImmunityIndex);
+        }
+
+        if (!KillableAmong(action.KillAtOrBelowHp))
+        {
+            return null;
+        }
+
+        var policy = _setup.Targeting(m.Side);
+        if (policy is SimulationValues.Targeting.FocusFire or SimulationValues.Targeting.Threat)
+        {
+            var pick = Choose(_killable, policy);
+            return action.IsSave ? SaveValue(m, action, pick) : AutoHitValue(action, pick);
+        }
+
+        var sum = 0.0;
+        foreach (var c in _killable)
+        {
+            sum += action.IsSave ? SaveValue(m, action, c) : AutoHitValue(action, c);
+        }
+
+        return sum / _killable.Count;
+    }
+
     private double AttackValue(Creature m, MonsterAction action, Creature target, bool melee)
     {
         var mode = AttackMode(m, target, melee, TraitAdvantage(m, target, melee), false, out var autoCrit, consume: false);
-        var (hit, crit) = Odds(action.AttackBonus - ExhaustionPenalty(m), target.T.ArmorClass + target.T.CoverBonus, 20, mode, false, false, null, 0, autoCrit);
+        var (hit, crit) = Odds(action.AttackBonus - ExhaustionPenalty(m), ArmorClass(target), 20, mode, false, false, null, 0, autoCrit);
         var factor = action.Damage.Length > 0 ? Factor(target, action.Damage[0].Type, action.Magical) : 1;
+        if (KilledOutright(action.KillAtOrBelowHp, target))
+        {
+            return hit * Math.Max(KillValue(target), action.MeanDamage * factor);
+        }
+
         var value = (hit * action.MeanDamage * factor) + (crit * action.MeanCritExtra * factor);
         foreach (var effect in action.OnHit)
         {
-            if (effect.Kind == K.EffectKinds.Save && effect.Save is { } save && effect.Damage.Length > 0)
+            if (target.IsImmuneToEffect(m.Id, effect.ImmunityIndex))
+            {
+                continue;
+            }
+
+            var fits = FitsSize(target, effect.MaxSize);
+            if (effect.Kind == K.EffectKinds.Save && effect.Save is { } save)
             {
                 var fail = SavingThrowFail(target, save.Ability, save.Dc, action.Magical);
-                var mean = effect.Damage.Sum(d => d.Mean) * Factor(target, effect.Damage[0].Type, action.Magical);
-                value += hit * ((fail * mean) + ((1 - fail) * (save.OnSuccess == K.OnSuccess.Half ? mean / 2 : 0)));
+                if (effect.KillAtOrBelowHp is not null)
+                {
+                    value += KilledOutright(effect.KillAtOrBelowHp, target) ? hit * fail * KillValue(target) : 0;
+                    continue;
+                }
+
+                if (effect.Damage.Length > 0)
+                {
+                    var mean = effect.Damage.Sum(d => d.Mean) * Factor(target, effect.Damage[0].Type, action.Magical);
+                    value += hit * ((fail * mean) + ((1 - fail) * (save.OnSuccess == K.OnSuccess.Half ? mean / 2 : 0)));
+                }
+
+                if (fits)
+                {
+                    value += hit * fail * ConditionsValue(target, effect.Condition, effect.ExtraConditions);
+                }
+            }
+            else if (effect.Kind == K.EffectKinds.Condition && fits)
+            {
+                value += hit * ConditionsValue(target, effect.Condition, effect.ExtraConditions);
             }
         }
 
         return value;
     }
 
-    private double SaveValue(MonsterAction action, Creature target)
+    private double SaveValue(Creature m, MonsterAction action, Creature target)
     {
+        if (target.IsImmuneToEffect(m.Id, action.ImmunityIndex))
+        {
+            return 0;
+        }
+
         var save = action.Save!;
         var fail = SavingThrowFail(target, save.Ability, save.Dc, action.Magical);
         var mean = action.MeanDamage * (action.Damage.Length > 0 ? Factor(target, action.Damage[0].Type, action.Magical) : 1);
         var evasion = Evades(target, save.Ability, save.OnSuccess);
         var onFail = evasion ? mean / 2 : mean;
-        var onSuccess = save.OnSuccess == K.OnSuccess.Half && !evasion ? mean / 2 : 0;
-        var condition = action.Condition is not null ? ConditionValue(target, action.Condition.Condition) : 0;
-        foreach (var more in action.ExtraConditions)
+        if (KilledOutright(action.KillAtOrBelowHp, target))
         {
-            condition += ConditionValue(target, more.Condition);
+            onFail = Math.Max(onFail, KillValue(target));
         }
 
+        var onSuccess = save.OnSuccess == K.OnSuccess.Half && !evasion ? mean / 2 : 0;
+        var condition = ConditionsValue(target, action.Condition, action.ExtraConditions);
         return (fail * (onFail + condition)) + ((1 - fail) * onSuccess);
+    }
+
+    /// <summary>An auto-hit's E[damage] on one creature (per dart), or what its outright kill takes when the creature is at or below the threshold.</summary>
+    private static double AutoHitValue(MonsterAction action, Creature target)
+    {
+        var mean = action.MeanDamage * Factor(target, action.Damage.Length > 0 ? action.Damage[0].Type : DamageTypes.Typeless, action.Magical);
+        return KilledOutright(action.KillAtOrBelowHp, target) ? Math.Max(mean, KillValue(target)) : mean;
+    }
+
+    /// <summary>
+    /// What an outright kill is worth in the policies' currency: the hit points (and temporary ones) it takes, which is
+    /// what damage that dropped the creature would have had to deal. The callers rank the larger of it and the action's
+    /// own damage, so the 2024 Power Word Kill (12d12 otherwise) never ranks below its damage, and the 2014 one (no effect
+    /// otherwise) is still worth casting at a creature it kills.
+    /// </summary>
+    private static double KillValue(Creature target) => target.Hp + target.TempHp;
+
+    /// <summary>The conditions one failed save or hit imposes together, each by <see cref="ConditionValue"/>.</summary>
+    private static double ConditionsValue(Creature target, ConditionTemplate? condition, ConditionTemplate[] extra)
+    {
+        var value = condition is not null ? ConditionValue(target, condition.Condition) : 0;
+        foreach (var more in extra)
+        {
+            value += ConditionValue(target, more.Condition);
+        }
+
+        return value;
     }
 }

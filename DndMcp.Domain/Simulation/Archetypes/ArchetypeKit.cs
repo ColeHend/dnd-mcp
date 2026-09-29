@@ -343,7 +343,8 @@ internal static class SpellSlots
         [4, 3, 3, 3, 3, 2, 2, 1, 1],
     ];
 
-    // Paladin and ranger from level 2 (level 1: none in 2014, two 1st-level slots in 2024).
+    // Paladin and ranger from level 2; the empty level 1 row only keeps the index (level 1 differs by edition: none in
+    // 2014, two 1st-level slots in 2024; HalfTotal refuses it).
     private static readonly int[][] Half =
     [
         [], [2], [3], [3], [4, 2], [4, 2], [4, 3], [4, 3], [4, 3, 2], [4, 3, 2],
@@ -358,7 +359,16 @@ internal static class SpellSlots
     public static int FullExactly(int classLevel, int slotLevel) =>
         Full[classLevel - 1].Length >= slotLevel ? Full[classLevel - 1][slotLevel - 1] : 0;
 
-    /// <summary>A half caster's slots of every level (2024 paladin: two at level 1).</summary>
-    public static int HalfTotal(int classLevel, string edition) =>
-        classLevel == 1 ? (edition == V.Editions.E2024 ? 2 : 0) : Half[classLevel - 1].Sum();
+    /// <summary>
+    /// A half caster's slots of every level, from class level 2, where the editions' tables agree. Level 1 is refused
+    /// rather than answered: it differs by edition (2014 none, 2024 paladin two) and no archetype spends a half caster's
+    /// slots there (the paladin's smite starts at 2), so a value would be untested data waiting for a caller.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="classLevel"/> is below 2 or above 20.</exception>
+    public static int HalfTotal(int classLevel)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(classLevel, 2);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(classLevel, DslLimits.MaxLevel);
+        return Half[classLevel - 1].Sum();
+    }
 }

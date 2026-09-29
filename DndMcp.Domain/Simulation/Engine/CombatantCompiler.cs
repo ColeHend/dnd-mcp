@@ -23,7 +23,7 @@ namespace DndMcp.Domain.Simulation;
 /// </summary>
 internal static class CombatantCompiler
 {
-    public static CombatantTemplate FromStatBlock(StatBlock block, CombatantSpec spec, int id, int entry, int side, string label, bool rollHp)
+    public static CombatantTemplate FromStatBlock(StatBlock block, CombatantSpec spec, int id, int side, string label, bool rollHp)
     {
         var all = new List<MonsterAction>();
         MonsterAction Compile(StatBlockAction action)
@@ -56,6 +56,25 @@ internal static class CombatantCompiler
         foreach (var action in all.Where(a => a.IsUseActions))
         {
             action.Uses = Resolve(action.Source.Uses).Where(u => u.Item1 != action).ToArray();
+        }
+
+        // Immunity after a success: one number per action or rider that grants it, which a target records per source
+        // creature once it succeeds or shakes the condition off (Frightful Presence, Horrifying Visage, Moan...).
+        var immunities = 0;
+        foreach (var action in all)
+        {
+            if (action.Source.ImmuneAfterSuccess)
+            {
+                action.ImmunityIndex = immunities++;
+            }
+
+            for (var r = 0; r < action.OnHit.Length; r++)
+            {
+                if (action.Source.OnHit[r].ImmuneAfterSuccess)
+                {
+                    action.OnHit[r].ImmunityIndex = immunities++;
+                }
+            }
         }
 
         var multiattacks = block.Multiattacks
@@ -120,7 +139,6 @@ internal static class CombatantCompiler
         return new CombatantTemplate
         {
             Id = id,
-            Entry = entry,
             Side = side,
             Label = label,
             Edition = block.Edition,
@@ -219,6 +237,7 @@ internal static class CombatantCompiler
             Condition = ConditionTemplate.From(e.Condition, e.Save, action.Magical || action.IsSpell),
             ExtraConditions = ConditionTemplate.FromAll(null, e.ExtraConditions, e.Save, action.Magical || action.IsSpell),
             MaxSize = e.MaxSize,
+            KillAtOrBelowHp = e.KillAtOrBelowHp,
         }).ToArray();
         var riderMean = onHit.Where(e => e.Kind == K.EffectKinds.Damage).SelectMany(e => e.Damage).Sum(d => d.Mean);
         var riderCrit = onHit.Where(e => e.Kind == K.EffectKinds.Damage).SelectMany(e => e.Damage).Sum(d => d.DiceMean);
@@ -248,7 +267,7 @@ internal static class CombatantCompiler
     }
 
     /// <summary>A build at its level as a combatant: HP, AC and saves from the spec, the rest from the resolved build.</summary>
-    public static CombatantTemplate FromBuild(ResolvedBuild build, CombatantSpec spec, int id, int entry, int side, string label, bool pcLike)
+    public static CombatantTemplate FromBuild(ResolvedBuild build, CombatantSpec spec, int id, int side, string label, bool pcLike)
     {
         var pc = CompileBuild(build);
         foreach (var attack in pc.Attacks)
@@ -279,7 +298,6 @@ internal static class CombatantCompiler
         return new CombatantTemplate
         {
             Id = id,
-            Entry = entry,
             Side = side,
             Label = label,
             Edition = build.Edition,

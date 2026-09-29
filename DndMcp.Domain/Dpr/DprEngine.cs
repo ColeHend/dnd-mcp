@@ -19,8 +19,11 @@ namespace DndMcp.Domain.Dpr;
 /// <para>
 /// <b>What it refuses to guess.</b> Kill triggers (GWM's "reduce a creature to 0 hit points") need the target's HP track
 /// and are left to the simulator; a reaction spends no resources; Sap, Nick, Push and Slow report notes rather than
-/// damage. Each shows up in <see cref="DprResult.Notes"/> when the build has it, so a reader never mistakes a convention
-/// for a measurement.
+/// damage. Each shows up in <see cref="DprResult.Notes"/> when the build has it (Nick only while the Light weapon's extra
+/// attack is still made with the Bonus Action, whichever Light weapon carries Nick. A build whose Attack action already
+/// holds that attack, read as two different Light weapon attacks there or an offhand one other than the Nick weapon's,
+/// has modelled it, and a bonus_action Light attack beside it (Dual Wielder's) is not noted; see
+/// <see cref="ResolvedBuild.UnmodelledNickNote"/>), so a reader never mistakes a convention for a measurement.
 /// </para>
 /// </summary>
 public static class DprEngine

@@ -68,7 +68,7 @@ internal static class CasterArchetypes
             Title = "Cleric",
             Edition = edition,
             HitDie = 8,
-            Position = ArchetypeCatalog.Front,
+            Position = SimulationValues.Positions.Front,
             Abilities = AbilityTrack.Standard(
                 [V.Abilities.Wis, V.Abilities.Con, V.Abilities.Dex, V.Abilities.Str, V.Abilities.Cha, V.Abilities.Int],
                 AbilityTrack.StandardAsiLevels(edition)),
@@ -167,7 +167,7 @@ internal static class CasterArchetypes
             Title = "Druid",
             Edition = edition,
             HitDie = 8,
-            Position = ArchetypeCatalog.Back,
+            Position = SimulationValues.Positions.Back,
             Abilities = AbilityTrack.Standard(
                 [V.Abilities.Wis, V.Abilities.Con, V.Abilities.Dex, V.Abilities.Int, V.Abilities.Cha, V.Abilities.Str],
                 AbilityTrack.StandardAsiLevels(edition)),
@@ -291,7 +291,7 @@ internal static class CasterArchetypes
             Title = "Warlock",
             Edition = edition,
             HitDie = 8,
-            Position = ArchetypeCatalog.Back,
+            Position = SimulationValues.Positions.Back,
             Abilities = AbilityTrack.Standard(
                 [V.Abilities.Cha, V.Abilities.Con, V.Abilities.Dex, V.Abilities.Wis, V.Abilities.Int, V.Abilities.Str],
                 AbilityTrack.StandardAsiLevels(edition)),
@@ -377,7 +377,7 @@ internal static class CasterArchetypes
             Title = "Bard",
             Edition = edition,
             HitDie = 8,
-            Position = ArchetypeCatalog.Back,
+            Position = SimulationValues.Positions.Back,
             Abilities = AbilityTrack.Standard(
                 [V.Abilities.Cha, V.Abilities.Con, V.Abilities.Dex, V.Abilities.Wis, V.Abilities.Int, V.Abilities.Str],
                 AbilityTrack.StandardAsiLevels(edition)),
@@ -407,7 +407,7 @@ internal static class CasterArchetypes
         Title = title,
         Edition = edition,
         HitDie = 6,
-        Position = ArchetypeCatalog.Back,
+        Position = SimulationValues.Positions.Back,
         Abilities = AbilityTrack.Standard(
             [ability, V.Abilities.Con, V.Abilities.Dex, V.Abilities.Wis, ability == V.Abilities.Int ? V.Abilities.Cha : V.Abilities.Int, V.Abilities.Str],
             AbilityTrack.StandardAsiLevels(edition)),

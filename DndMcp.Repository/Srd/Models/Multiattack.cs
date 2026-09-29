@@ -123,7 +123,7 @@ public sealed class MultiattackAction
 /// </summary>
 public sealed class MultiattackOption
 {
-    /// <summary><c>action</c> or <c>multiple</c>.</summary>
+    /// <summary><see cref="MultiattackOptionTypes"/>: <c>action</c> or <c>multiple</c>.</summary>
     public required string OptionType { get; init; }
 
     /// <summary>Set when <see cref="OptionType"/> is <c>action</c> (and on every item of a <c>multiple</c>).</summary>
@@ -138,6 +138,19 @@ public sealed class MultiattackOption
 
     /// <summary>The actions taken together when <see cref="OptionType"/> is <c>multiple</c>.</summary>
     public IReadOnlyList<MultiattackOption>? Items { get; init; }
+}
+
+/// <summary>
+/// <see cref="MultiattackOption.OptionType"/> values. A reader that compares the literals instead would silently read
+/// a bundle ("one Bite and one Claw") as one use of an action with no name.
+/// </summary>
+public static class MultiattackOptionTypes
+{
+    /// <summary>One action: <see cref="MultiattackOption.ActionName"/>, <see cref="MultiattackOption.Count"/> times.</summary>
+    public const string Action = "action";
+
+    /// <summary>A bundle of actions taken together: <see cref="MultiattackOption.Items"/>.</summary>
+    public const string Multiple = "multiple";
 }
 
 /// <summary>

@@ -25,7 +25,8 @@ Fire, Wall of Ice, Web), plus the common PC combat spells no monster casts (Fire
 Inflict Wounds) for party archetypes and builds.
 
 Judgments, marked as such: `approximation` on the spells whose effect lingers or branches (a zone's damage dealt once;
-Power Word Kill's outright kill of a creature at 100 Hit Points or fewer simulated as its 12d12 alternative; Ice Knife's
-explosion left out), and `note` where a detail is not simulated (Guiding Bolt's Advantage, Harm's maximum reduction).
+Ice Knife's explosion left out), and `note` where a detail is not simulated (Guiding Bolt's Advantage, Harm's maximum
+reduction). Power Word Kill is exact: `kill_at_or_below_hp` 100 kills a target with 100 Hit Points or fewer outright,
+and one with more takes the 12d12 Psychic damage.
 Cast levels come from the monster data (a 2024 stat block lists the level it casts at); upcasting adds the `upcast`
 dice or `upcast_targets` per level above the spell's own.

@@ -65,6 +65,21 @@ public sealed class StatBlockTargetTests
     }
 
     [Theory]
+    [InlineData("", true)]
+    [InlineData(", \"magical\"", false)]
+    public void Evaluate_GrazeOnAMiss_IsJudgedByItsAttacksProperties(string properties, bool resisted)
+    {
+        // A miss's Graze damage (the Str modifier, the weapon's slashing) is the attack's damage: a magical greatsword's
+        // graze overcomes the werewolf's nonmagical resistance as its hits do.
+        var build = Level5($$"""[{ "name": "Greatsword", "damage": "2d6", "damage_type": "slashing", "properties": ["melee", "heavy", "two-handed"{{properties}}], "mastery": "graze" }]""");
+
+        var result = EvaluateVs(build, TargetStatBlocks.WerewolfLike());
+        var equivalent = Round1(build, resisted ? """{ "ac": 11, "resistances": ["slashing"] }""" : """{ "ac": 11 }""");
+
+        Assert.Equal(equivalent, result.DamagePerRound, Exact);
+    }
+
+    [Theory]
     [InlineData(false, true)]
     [InlineData(true, false)]
     public void Evaluate_SaveEffectOnAQualifiedResistance_IsMagicalWhenItSaysSo(bool magical, bool resisted)

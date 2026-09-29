@@ -12,6 +12,7 @@ internal sealed class RunTally
         RoundCap = setup.RoundCap;
         RoundsHistogram = new long[setup.RoundCap];
         Creatures = setup.Templates.Select(t => new CreatureTally(t)).ToArray();
+        Entries = setup.Entries.Select(ids => new EntryTally(ids)).ToArray();
     }
 
     public int RoundCap { get; }
@@ -20,15 +21,30 @@ internal sealed class RunTally
     public long Wins;
     public long Defeats;
     public long Draws;
+
+    /// <summary>Fights that ended with at least one party member dead.</summary>
     public long AnyDeath;
+
+    /// <summary>
+    /// Fights that ended with at least one party member dying (<see cref="CreatureTally.IsDying"/>): the fight stops when a
+    /// side has nobody above 0 HP, win or lose, and its death saves are never finished.
+    /// </summary>
+    public long AnyDying;
+
     public long RoundsSum;
     public long RoundsSquares;
     public readonly long[] RoundsHistogram;
     public readonly CreatureTally[] Creatures;
 
+    /// <summary>Per entry: the squares of each fight's totals over its copies, for the per-entry means' intervals.</summary>
+    public readonly EntryTally[] Entries;
+
     // Comparison (variant minus baseline, per fight).
     public long VariantWins;
     public long VariantAnyDeath;
+
+    /// <summary>The variant's fights that ended with a party member dying (<see cref="AnyDying"/>'s twin).</summary>
+    public long VariantAnyDying;
     public long VariantRoundsSum;
     public long VariantRoundsSquares;
     public long WinDiffSum;
@@ -37,8 +53,11 @@ internal sealed class RunTally
     public long RoundsDiffSquares;
     public long DeathDiffSum;
     public long DeathDiffSquares;
+    public long DyingDiffSum;
+    public long DyingDiffSquares;
 
-    public (bool Win, bool AnyDeath) Add(FightOutcome outcome, Creature[] creatures)
+    /// <summary>One fight's outcome and creatures; returns what the variant's same fight is paired against.</summary>
+    public (bool Win, bool AnyDeath, bool AnyDying) Add(FightOutcome outcome, Creature[] creatures)
     {
         Fights++;
         var win = outcome.Outcome == SimulationValues.Outcomes.PartyWins;
@@ -59,10 +78,12 @@ internal sealed class RunTally
         RoundsSquares += (long)outcome.Rounds * outcome.Rounds;
         RoundsHistogram[Math.Clamp(outcome.Rounds, 1, RoundCap) - 1]++;
         var anyDeath = false;
+        var anyDying = false;
         for (var i = 0; i < creatures.Length; i++)
         {
             Creatures[i].Add(creatures[i]);
             anyDeath |= creatures[i].Side == 0 && creatures[i].Dead;
+            anyDying |= creatures[i].Side == 0 && CreatureTally.IsDying(creatures[i]);
         }
 
         if (anyDeath)
@@ -70,17 +91,29 @@ internal sealed class RunTally
             AnyDeath++;
         }
 
-        return (win, anyDeath);
+        if (anyDying)
+        {
+            AnyDying++;
+        }
+
+        foreach (var entry in Entries)
+        {
+            entry.Add(creatures);
+        }
+
+        return (win, anyDeath, anyDying);
     }
 
     /// <summary>The variant's fight on the same seed as the baseline's: its own outcome and the paired differences.</summary>
-    public void AddVariant(FightOutcome variant, Creature[] creatures, (bool Win, bool AnyDeath) baseline, int baselineRounds)
+    public void AddVariant(FightOutcome variant, Creature[] creatures, (bool Win, bool AnyDeath, bool AnyDying) baseline, int baselineRounds)
     {
         var win = variant.Outcome == SimulationValues.Outcomes.PartyWins;
         var anyDeath = false;
+        var anyDying = false;
         foreach (var c in creatures)
         {
             anyDeath |= c.Side == 0 && c.Dead;
+            anyDying |= c.Side == 0 && CreatureTally.IsDying(c);
         }
 
         if (win)
@@ -91,6 +124,11 @@ internal sealed class RunTally
         if (anyDeath)
         {
             VariantAnyDeath++;
+        }
+
+        if (anyDying)
+        {
+            VariantAnyDying++;
         }
 
         VariantRoundsSum += variant.Rounds;
@@ -104,6 +142,9 @@ internal sealed class RunTally
         var deathDiff = (anyDeath ? 1 : 0) - (baseline.AnyDeath ? 1 : 0);
         DeathDiffSum += deathDiff;
         DeathDiffSquares += deathDiff * deathDiff;
+        var dyingDiff = (anyDying ? 1 : 0) - (baseline.AnyDying ? 1 : 0);
+        DyingDiffSum += dyingDiff;
+        DyingDiffSquares += dyingDiff * dyingDiff;
     }
 
     public void Merge(RunTally other)
@@ -113,6 +154,7 @@ internal sealed class RunTally
         Defeats += other.Defeats;
         Draws += other.Draws;
         AnyDeath += other.AnyDeath;
+        AnyDying += other.AnyDying;
         RoundsSum += other.RoundsSum;
         RoundsSquares += other.RoundsSquares;
         for (var i = 0; i < RoundsHistogram.Length; i++)
@@ -125,8 +167,14 @@ internal sealed class RunTally
             Creatures[i].Merge(other.Creatures[i]);
         }
 
+        for (var i = 0; i < Entries.Length; i++)
+        {
+            Entries[i].Merge(other.Entries[i]);
+        }
+
         VariantWins += other.VariantWins;
         VariantAnyDeath += other.VariantAnyDeath;
+        VariantAnyDying += other.VariantAnyDying;
         VariantRoundsSum += other.VariantRoundsSum;
         VariantRoundsSquares += other.VariantRoundsSquares;
         WinDiffSum += other.WinDiffSum;
@@ -135,10 +183,15 @@ internal sealed class RunTally
         RoundsDiffSquares += other.RoundsDiffSquares;
         DeathDiffSum += other.DeathDiffSum;
         DeathDiffSquares += other.DeathDiffSquares;
+        DyingDiffSum += other.DyingDiffSum;
+        DyingDiffSquares += other.DyingDiffSquares;
     }
 }
 
-/// <summary>One creature's integer accumulators over many fights.</summary>
+/// <summary>
+/// One creature's integer accumulators over many fights: sums, which pool into its entry's; the squares that size the
+/// entry's intervals are the entry's own (<see cref="EntryTally"/>).
+/// </summary>
 internal sealed class CreatureTally
 {
     public CreatureTally(CombatantTemplate template)
@@ -152,25 +205,32 @@ internal sealed class CreatureTally
 
     public long Dropped;
     public long Dead;
+
+    /// <summary>Fights it ended dying (<see cref="IsDying"/>).</summary>
+    public long Dying;
+
     public long HpLostSum;
-    public long HpLostSquares;
     public readonly long[] HpLostHistogram;
     public long StartHpSum;
     public long DealtRaw;
-    public long DealtRawSquares;
     public long DealtEffective;
-    public long DealtEffectiveSquares;
     public long TakenRaw;
-    public long TakenRawSquares;
     public long TakenEffective;
-    public long TakenEffectiveSquares;
     public long Kills;
-    public long KillsSquares;
     public long LegendaryResistance;
     public long LegendaryActions;
     public readonly long[] ResourceUsed;
     public readonly long[] LimitedUsed;
     public readonly long[] PoolUsed;
+
+    /// <summary>
+    /// At 0 HP, making death saves, neither stable nor dead: what it was when the fight stopped, which the report shows as
+    /// it is rather than guessing the saves the fight never rolled. A troll down at 0 HP waits to regenerate, not dying.
+    /// </summary>
+    public static bool IsDying(Creature c) => c.Down && !c.Dead && !c.Stable && c.T.PcLike;
+
+    /// <summary>Hit points lost by the end of the fight: all of them when dead.</summary>
+    public static int HpLost(Creature c) => c.Dead ? c.MaxHp : Math.Max(0, c.MaxHp - c.Hp);
 
     public void Add(Creature c)
     {
@@ -184,21 +244,20 @@ internal sealed class CreatureTally
             Dead++;
         }
 
-        var lost = c.Dead ? c.MaxHp : Math.Max(0, c.MaxHp - c.Hp);
+        if (IsDying(c))
+        {
+            Dying++;
+        }
+
+        var lost = HpLost(c);
         HpLostSum += lost;
-        HpLostSquares += (long)lost * lost;
         HpLostHistogram[Math.Min(lost, HpLostHistogram.Length - 1)]++;
         StartHpSum += c.MaxHp;
         DealtRaw += c.DealtRaw;
-        DealtRawSquares += c.DealtRaw * c.DealtRaw;
         DealtEffective += c.DealtEffective;
-        DealtEffectiveSquares += c.DealtEffective * c.DealtEffective;
         TakenRaw += c.TakenRaw;
-        TakenRawSquares += c.TakenRaw * c.TakenRaw;
         TakenEffective += c.TakenEffective;
-        TakenEffectiveSquares += c.TakenEffective * c.TakenEffective;
         Kills += c.Kills;
-        KillsSquares += (long)c.Kills * c.Kills;
         LegendaryResistance += c.LegendaryResistanceSpent;
         LegendaryActions += c.LegendaryActionsUsed;
         if (c.Pc is { } pc)
@@ -224,8 +283,8 @@ internal sealed class CreatureTally
     {
         Dropped += other.Dropped;
         Dead += other.Dead;
+        Dying += other.Dying;
         HpLostSum += other.HpLostSum;
-        HpLostSquares += other.HpLostSquares;
         for (var i = 0; i < HpLostHistogram.Length; i++)
         {
             HpLostHistogram[i] += other.HpLostHistogram[i];
@@ -233,15 +292,10 @@ internal sealed class CreatureTally
 
         StartHpSum += other.StartHpSum;
         DealtRaw += other.DealtRaw;
-        DealtRawSquares += other.DealtRawSquares;
         DealtEffective += other.DealtEffective;
-        DealtEffectiveSquares += other.DealtEffectiveSquares;
         TakenRaw += other.TakenRaw;
-        TakenRawSquares += other.TakenRawSquares;
         TakenEffective += other.TakenEffective;
-        TakenEffectiveSquares += other.TakenEffectiveSquares;
         Kills += other.Kills;
-        KillsSquares += other.KillsSquares;
         LegendaryResistance += other.LegendaryResistance;
         LegendaryActions += other.LegendaryActions;
         for (var i = 0; i < ResourceUsed.Length; i++)
@@ -258,5 +312,53 @@ internal sealed class CreatureTally
         {
             PoolUsed[i] += other.PoolUsed[i];
         }
+    }
+}
+
+/// <summary>
+/// One entry's squares for its per-creature means' CLT intervals: per fight, the total over its copies, squared. Each
+/// fight is one sample because copies are not independent (they fight the same fight); squaring each creature's value
+/// instead would treat them as if they were, and narrow the interval by up to √copies. The sums are the creatures' own
+/// (<see cref="CreatureTally"/>), pooled.
+/// </summary>
+internal sealed class EntryTally(int[] ids)
+{
+    public long HpLostSquares;
+    public long DealtRawSquares;
+    public long DealtEffectiveSquares;
+    public long TakenRawSquares;
+    public long TakenEffectiveSquares;
+    public long KillsSquares;
+
+    public void Add(Creature[] creatures)
+    {
+        long lost = 0, dealt = 0, dealtEffective = 0, taken = 0, takenEffective = 0, kills = 0;
+        foreach (var id in ids)
+        {
+            var c = creatures[id];
+            lost += CreatureTally.HpLost(c);
+            dealt += c.DealtRaw;
+            dealtEffective += c.DealtEffective;
+            taken += c.TakenRaw;
+            takenEffective += c.TakenEffective;
+            kills += c.Kills;
+        }
+
+        HpLostSquares += lost * lost;
+        DealtRawSquares += dealt * dealt;
+        DealtEffectiveSquares += dealtEffective * dealtEffective;
+        TakenRawSquares += taken * taken;
+        TakenEffectiveSquares += takenEffective * takenEffective;
+        KillsSquares += kills * kills;
+    }
+
+    public void Merge(EntryTally other)
+    {
+        HpLostSquares += other.HpLostSquares;
+        DealtRawSquares += other.DealtRawSquares;
+        DealtEffectiveSquares += other.DealtEffectiveSquares;
+        TakenRawSquares += other.TakenRawSquares;
+        TakenEffectiveSquares += other.TakenEffectiveSquares;
+        KillsSquares += other.KillsSquares;
     }
 }

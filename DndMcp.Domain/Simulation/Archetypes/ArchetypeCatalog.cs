@@ -27,12 +27,6 @@ namespace DndMcp.Domain.Simulation.Archetypes;
 /// </summary>
 public static class ArchetypeCatalog
 {
-    /// <summary>Position of a melee or armoured member.</summary>
-    public const string Front = "front";
-
-    /// <summary>Position of a ranged or spellcasting member.</summary>
-    public const string Back = "back";
-
     /// <summary>The archetype names, as a party entry's <c>archetype</c> takes them, in the order messages list them.</summary>
     public static IReadOnlyList<string> Names { get; } =
         ["fighter", "barbarian", "paladin", "ranger", "rogue", "monk", "cleric", "druid", "wizard", "sorcerer", "warlock", "bard"];

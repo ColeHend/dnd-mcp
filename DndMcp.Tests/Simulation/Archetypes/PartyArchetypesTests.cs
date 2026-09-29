@@ -121,7 +121,7 @@ public sealed class PartyArchetypesTests
     [Fact]
     public void Overrides_TheEntrysFieldsReplaceTheArchetypes_SavesPerAbility()
     {
-        // A level 6 2024 paladin: Str 18, Con 16, Cha 13, Wis 12, Dex 10, Int 8; PB 3; Aura of Protection +1 on every save.
+        // A level 6 2024 paladin: Str 18, Cha 16, Con 13, Wis 12, Dex 10, Int 8; PB 3; Aura of Protection +3 on every save.
         var entry = new CombatantSpec
         {
             Archetype = "paladin", Level = 6, Edition = "2024", Name = "Sir Tank", Hp = 99, Ac = 21, Position = "back", Count = 2,
@@ -135,8 +135,8 @@ public sealed class PartyArchetypesTests
         {
             Assert.Equal((99, 21, 5, false, true), (t.AverageHp, t.ArmorClass, t.InitiativeBonus, t.Front, t.PcLike));
             Assert.Equal("2024", t.Edition);
-            // wis as given; the other five keep the aura (str 4 + 1, dex 0 + 1, con 3 + 1, int -1 + 1, cha 1 + 3 + 1).
-            Assert.Equal([5, 1, 4, 0, 12, 5], t.Saves);
+            // wis as given; the other five keep the aura (str 4 + 3, dex 0 + 3, con 1 + 3, int -1 + 3, cha 3 + 3 + 3).
+            Assert.Equal([7, 3, 4, 2, 12, 9], t.Saves);
         });
     }
 
@@ -146,7 +146,7 @@ public sealed class PartyArchetypesTests
         var templates = Prepare(new CombatantSpec { Archetype = "paladin", Level = 6, Edition = "2024", SaveProficiencies = ["str", "con"] });
 
         // Proficient in str and con (+3); the aura, computed from the archetype's own proficiencies, goes with them.
-        Assert.Equal([7, 0, 6, -1, 1, 1], templates.Single().Saves);
+        Assert.Equal([7, 0, 4, -1, 1, 3], templates.Single().Saves);
     }
 
     [Fact]

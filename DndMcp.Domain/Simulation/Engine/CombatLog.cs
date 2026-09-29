@@ -40,8 +40,6 @@ internal sealed class CombatLog
         _text.AppendLine(line);
     }
 
-    public bool Truncated => _truncated;
-
     /// <summary>The log with the summary appended (never cut).</summary>
     public string Finish(string summary) => _text + summary;
 }

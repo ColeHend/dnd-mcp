@@ -19,9 +19,6 @@ internal sealed class CombatantTemplate
     /// <summary>The creature's index in every fight's creature array.</summary>
     public required int Id { get; init; }
 
-    /// <summary>The entry (party entries first, then enemies) it was made from.</summary>
-    public required int Entry { get; init; }
-
     /// <summary>0 = party, 1 = enemies.</summary>
     public required int Side { get; init; }
 
@@ -122,7 +119,11 @@ internal sealed class CombatantTemplate
 
     public MonsterAction[] BonusActions { get; init; } = [];
 
-    /// <summary>Reactions of kind parry (the only monster reactions used in v1).</summary>
+    /// <summary>
+    /// Reactions of kind parry (the only monster reactions used in v1). A spell parry (Shield, <see cref="MonsterAction.IsSpell"/>)
+    /// raises the AC until the start of the caster's next turn (<see cref="Creature.ShieldAc"/>); a true Parry covers the
+    /// one attack that triggered it.
+    /// </summary>
     public MonsterAction[] Parries { get; init; } = [];
 
     public MultiattackPlan[] Multiattacks { get; init; } = [];
@@ -176,8 +177,6 @@ internal sealed class CombatantTemplate
 
     /// <summary>Starts the fight at 0 HP and dying (the death-save test's creature left alone).</summary>
     public bool StartsDown { get; set; }
-
-    public int Save(string ability) => Saves[AbilityIndex(ability)];
 
     public static int AbilityIndex(string ability) => ability switch
     {
@@ -344,6 +343,17 @@ internal sealed class MonsterAction
     /// <summary>Index in <see cref="CombatantTemplate.LegendaryActions"/> (for once-per-round flags), −1 otherwise.</summary>
     public int LegendaryIndex { get; set; } = -1;
 
+    /// <summary>
+    /// For an action with <see cref="StatBlockAction.ImmuneAfterSuccess"/>: its number among the creature's
+    /// immunity-granting effects (actions and riders, numbered by the compiler), which a target that succeeded against it
+    /// records (<see cref="Creature.BecomeImmuneToEffect"/>); −1 for every other action. One number per compiled action,
+    /// so the same Frightful Presence used as an action or through a legendary use_actions is one immunity.
+    /// </summary>
+    public int ImmunityIndex { get; set; } = -1;
+
+    /// <summary>An outright kill at or below this many hit points (<see cref="StatBlockAction.KillAtOrBelowHp"/>: Power Word Kill), or null.</summary>
+    public int? KillAtOrBelowHp => Source.KillAtOrBelowHp;
+
     /// <summary>What the simulator can do with it: attack, save, auto_hit, heal or use_actions (parry is a reaction).</summary>
     public bool Usable => IsAttack || IsSave || IsAutoHit || IsHeal || IsUseActions;
 
@@ -370,6 +380,15 @@ internal sealed class MonsterOnHit
 
     /// <summary>The largest size it works on, or null.</summary>
     public string? MaxSize { get; init; }
+
+    /// <summary>
+    /// A save rider that kills on a failure a target with at most this many hit points (the 2014 solar's Slaying Longbow,
+    /// <see cref="ActionEffect.KillAtOrBelowHp"/>); a target above it is not affected by the rider at all. Null otherwise.
+    /// </summary>
+    public int? KillAtOrBelowHp { get; init; }
+
+    /// <summary>For a rider with <see cref="ActionEffect.ImmuneAfterSuccess"/>, its immunity number (<see cref="MonsterAction.ImmunityIndex"/>); −1 otherwise.</summary>
+    public int ImmunityIndex { get; set; } = -1;
 }
 
 /// <summary>A multiattack routine with its steps resolved to actions.</summary>
@@ -467,12 +486,7 @@ internal sealed class PcBuild
 
     public required int[] FreeSaves { get; init; }
 
-    public string Edition => Build.Edition;
-
     public ResolvedRulings Rulings => Build.Rulings;
-
-    /// <summary>The highest modifier number (arrays indexed by number are this long + 1).</summary>
-    public int MaxNumber => Gated.Length - 1;
 }
 
 /// <summary>One attack of a build, compiled: its dice, flat parts per way of making it, and which modifiers apply.</summary>

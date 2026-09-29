@@ -133,7 +133,8 @@
   "power-word-kill": {
     "kind": "auto_hit",
     "damage": [{"dice": "12d12", "type": "psychic"}],
-    "approximation": "A creature with 100 Hit Points or fewer dies outright; the simulator deals the 12d12 Psychic damage the spell deals to a creature with more."
+    "kill_at_or_below_hp": 100,
+    "note": "A target with 100 Hit Points or fewer dies outright; one with more takes the 12d12 Psychic damage."
   },
   "ray-of-sickness": {
     "kind": "attack", "attack": "ranged",
@@ -160,7 +161,7 @@
   },
   "shield": {
     "kind": "parry", "ac_bonus": 5,
-    "note": "Its +5 AC lasts until the start of the caster's next turn; the simulator applies it to the triggering attack only."
+    "note": "Its +5 AC lasts until the start of the caster's next turn, including against the triggering attack; the simulator keeps it up for every attack until then."
   },
   "spirit-guardians": {
     "kind": "save", "save": "wis", "on_success": "half",

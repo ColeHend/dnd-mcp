@@ -106,7 +106,7 @@ public sealed class SpellCatalogueTests
         ["2014/nondetection"] = "no_combat_effect",
         ["2014/pass-without-trace"] = "no_combat_effect",
         ["2014/plane-shift"] = "not_modelled",
-        ["2014/power-word-kill"] = "not_modelled",
+        ["2014/power-word-kill"] = "auto_hit",
         ["2014/power-word-stun"] = "not_modelled",
         ["2014/prestidigitation"] = "no_combat_effect",
         ["2014/produce-flame"] = "attack",
@@ -378,12 +378,29 @@ public sealed class SpellCatalogueTests
         Assert.Equal(("1d10", "3d10"), (at4.Damage[0].Dice.Text, at11.Damage[0].Dice.Text));
     }
 
+    [Theory]
+    [InlineData(4, "1d10")]
+    [InlineData(5, "2d10")]
+    [InlineData(16, "3d10")]
+    [InlineData(17, "4d10")]
+    public void Cast_Cantrip_StepsUpAtFiveElevenSeventeen(int casterLevel, string dice) =>
+        Assert.Equal(dice, SpellNormalizer.Cast(Profile("2024", "fire-bolt"), "Fire Bolt", 0, casterLevel, 13, 5, 3, StatBlockValues.ActionSlots.Action, UsageSpec.AtWill).Damage[0].Dice.Text);
+
     [Fact]
     public void Cast_EldritchBlast_MakesOneAttackPerBeam()
     {
         var at17 = SpellNormalizer.Cast(Profile("2014", "eldritch-blast"), "Eldritch Blast", 0, 17, 15, 7, 4, StatBlockValues.ActionSlots.Action, UsageSpec.AtWill);
 
         Assert.Equal((4, "1d10"), (at17.AttackRolls, at17.Damage[0].Dice.Text));
+    }
+
+    [Theory]
+    [InlineData("2014")]
+    [InlineData("2024")]
+    public void Cast_SpiritualWeapon_AddsTheCastersModifierToItsDamage(string edition)
+    {
+        var weapon = SpellNormalizer.Cast(Profile(edition, "spiritual-weapon"), "Spiritual Weapon", 2, 1, 15, 7, 4, StatBlockValues.ActionSlots.BonusAction, UsageSpec.AtWill);
+        Assert.Equal("1d8+4", weapon.Damage[0].Dice.Text);
     }
 
     [Fact]

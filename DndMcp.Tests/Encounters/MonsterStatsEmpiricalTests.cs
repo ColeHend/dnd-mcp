@@ -1,7 +1,9 @@
 using System.Globalization;
 using System.Text;
 using DndMcp.Domain.Encounters;
+using DndMcp.Domain.Simulation;
 using DndMcp.Repository.Srd;
+using DndMcp.Tests.Simulation;
 using DndMcp.Tests.Srd.Combatants;
 using Xunit;
 
@@ -65,6 +67,20 @@ public sealed class MonsterStatsEmpiricalTests
     [Theory]
     [InlineData("2014")]
     [InlineData("2024")]
+    public void MonsterStats_CR25_IsOneSixthOfTheWayFromCR24ToCR30(string edition)
+    {
+        var cr24 = MonsterStatsEmpirical.MonsterStats(edition, ChallengeRating.Parse("24"));
+        var cr30 = MonsterStatsEmpirical.MonsterStats(edition, ChallengeRating.Parse("30"));
+
+        var cr25 = MonsterStatsEmpirical.MonsterStats(edition, ChallengeRating.Parse("25"));
+
+        Assert.True(cr25.IsInterpolated);
+        Assert.Equal(Math.Round(cr24.HitPoints + ((cr30.HitPoints - cr24.HitPoints) / 6), 2), cr25.HitPoints);
+    }
+
+    [Theory]
+    [InlineData("2014")]
+    [InlineData("2024")]
     public void MonsterStats_EveryCr_HasARow(string edition)
     {
         Assert.All(ChallengeRating.All, cr =>
@@ -74,6 +90,22 @@ public sealed class MonsterStatsEmpiricalTests
             Assert.InRange(row.ArmorClass, 5, 26);
             Assert.True(row.HitPoints > 0);
         });
+    }
+
+    [Fact]
+    public void Compute_AShapechangersForms_CountOnceAsTheHybrid()
+    {
+        // Three records of one shapechanger (human, hybrid, animal): one monster, counted as the form it fights in.
+        StatBlock Form(string slug, int ac) =>
+            TestStatBlocks.Create("Werething", ac, 50, "10d8", (10, 10, 10, 10, 10, 10), [TestStatBlocks.Attack("Bite", 4, "1d6", "piercing")]) with
+            {
+                Ref = $"2014/monster/{slug}",
+                Forms = new[] { "werething-animal", "werething-human", "werething-hybrid" }.Where(s => s != slug).Select(s => $"2014/monster/{s}").ToList(),
+            };
+
+        var rows = MonsterStatsEmpirical.Compute([Form("werething-animal", 13), Form("werething-human", 11), Form("werething-hybrid", 15)]);
+
+        Assert.Equal((1, 15.0), (rows.Single().Count, rows.Single().ArmorClass));
     }
 
     [Fact]

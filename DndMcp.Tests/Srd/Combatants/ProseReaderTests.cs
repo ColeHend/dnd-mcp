@@ -72,6 +72,35 @@ public sealed class ProseReaderTests
         Assert.Equal((ability, dc), (save.Ability, save.Dc));
     }
 
+    [Fact]
+    public void ReadDuration_RepeatTheSaveWithoutASaveClause_IsNotSaveEnds()
+    {
+        // Save-ends needs the save to repeat: without one the repeat sentence cannot end it, and "for 1 minute" rules.
+        const string text = "The target is poisoned for 1 minute. It repeats the saving throw at the end of each of its turns, ending the effect on itself on a success.";
+
+        var reading = ProseText.ReadDuration(text, text.IndexOf("poisoned", StringComparison.Ordinal), save: null);
+
+        Assert.NotNull(reading);
+        Assert.Equal((StatBlockValues.Durations.Rounds, (int?)10), (reading.Duration, reading.Rounds));
+    }
+
+    [Theory]
+    [InlineData("The target does nothing", "The target does nothing.")]
+    [InlineData("The target takes no action", "The target takes no action or Bonus Action and uses all its movement to move in a random direction.")]
+    public void SentenceEnd_AFullStopBeforeADigit_EndsTheSentence(string from, string sentence)
+    {
+        // 2024 gibbering mouther, Gibbering: each row of its d8 table starts with the roll ("5-6."), not a capital.
+        var text = ProseText.Normalize(
+            "Failure: The target rolls 1d8 to determine what it does during the current turn: 1–4. The target does nothing. " +
+            "5–6. The target takes no action or Bonus Action and uses all its movement to move in a random direction. " +
+            "7–8. The target makes a melee attack against a randomly determined creature within its reach or does nothing if it can’t make such an attack.");
+        var start = text.IndexOf(from, StringComparison.Ordinal);
+
+        var end = ProseText.SentenceEnd(text, start);
+
+        Assert.Equal(sentence, text[start..end]);
+    }
+
     [Theory]
     [InlineData("the target is grappled (escape DC 13).", "grappled")]
     [InlineData("it must succeed on a DC 11 Strength saving throw or be knocked prone.", "prone")]

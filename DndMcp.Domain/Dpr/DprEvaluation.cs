@@ -727,7 +727,15 @@ internal sealed class DprEvaluation
                 $"Sap adds no damage: P(at least one sapping hit) per turn is {tally[_layout.Sap]:0.###}, each giving the target Disadvantage on its next attack roll."));
         }
 
-        foreach (var mastery in new[] { V.Masteries.Nick, V.Masteries.Push, V.Masteries.Slow })
+        // Nick only moves the Light weapon's extra attack from the Bonus Action into the Attack action: noted while the
+        // build still makes that attack with the Bonus Action (not once its Attack action holds it), by the rule and in
+        // the words balance_simulate uses.
+        if (_build.UnmodelledNickNote() is { } nick)
+        {
+            notes.Add(nick);
+        }
+
+        foreach (var mastery in new[] { V.Masteries.Push, V.Masteries.Slow })
         {
             var attacks = _build.Attacks.Where(a => a.Mastery == mastery).Select(a => a.Name).ToList();
             if (attacks.Count == 0)
@@ -735,9 +743,7 @@ internal sealed class DprEvaluation
                 continue;
             }
 
-            notes.Add(mastery == V.Masteries.Nick
-                ? $"{string.Join(", ", attacks)}: Nick changes only the action economy; model it by making the Light weapon's extra attack an action attack (count) instead of a bonus_action one."
-                : $"{string.Join(", ", attacks)}: {mastery} adds no damage per round in v1 (there is no grid or movement).");
+            notes.Add($"{string.Join(", ", attacks)}: {mastery} adds no damage per round in v1 (there is no grid or movement).");
         }
 
         if (_build.Attacks.Any(a => a.Mastery == V.Masteries.Cleave) && _target.SecondTargetRate == 0)

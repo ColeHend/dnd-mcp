@@ -70,7 +70,7 @@ public sealed partial class SpellOverlayTests
     }
 
     /// <summary>What an entry claims, each looked for in the text: dice, damage types, the save's ability, "half as much",
-    /// the area's size and shape, counts, conditions, healing and AC. An entry with an approximation may name an area the
+    /// the area's size and shape, counts, conditions, healing, AC and a kill threshold. An entry with an approximation may name an area the
     /// text describes in other words (a wall counted as a line).</summary>
     private static IEnumerable<string> Check(string slug, SpellOverlayEntry entry, string text)
     {
@@ -147,6 +147,11 @@ public sealed partial class SpellOverlayTests
             yield return $"+{ac} AC not in the text";
         }
 
+        if (entry.KillAtOrBelowHp is { } kill && !Regex.IsMatch(flat, $@"\b{kill} hit points or fewer, it dies", RegexOptions.IgnoreCase))
+        {
+            yield return $"a kill at {kill} hit points or fewer not in the text";
+        }
+
         if (entry.Cantrip == "beams" && !flat.Contains("two beams", StringComparison.OrdinalIgnoreCase))
         {
             yield return "beams not in the text";
@@ -184,11 +189,33 @@ public sealed partial class SpellOverlayTests
     [InlineData("""{"fireball": {"area": {"shape": "blob", "size": 20}}}""", "area")]
     [InlineData("""{"hold-person": {"condition": {"condition": "held", "duration": "save_ends"}}}""", "condition")]
     [InlineData("""{"fireball": {"dice": "8d6"}}""", "not valid")]
+    [InlineData("""{"scorching-ray": {"targets": 21}}""", "targets must be 1-20; it is 21")]
+    [InlineData("""{"scorching-ray": {"targets": 0}}""", "targets must be 1-20; it is 0")]
+    [InlineData("""{"scorching-ray": {"upcast_targets": 11}}""", "upcast_targets must be 0-10; it is 11")]
+    [InlineData("""{"fireball": {"area": {"shape": "sphere", "size": 1001}}}""", "size 1-1000")]
+    [InlineData("""{"shield": {"ac_bonus": 50}}""", "ac_bonus must be 1-10; it is 50")]
+    [InlineData("""{"power-word-kill": {"kill_at_or_below_hp": 0}}""", "kill_at_or_below_hp must be 1-1000; it is 0")]
     public void Parse_BrokenEntry_IsRefusedWithWhatIsWrong(string json, string fragment)
     {
         var ex = Assert.Throws<InvalidDataException>(() => SpellOverlay.Parse([("2024", json)]));
 
         Assert.Contains(fragment, ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Power Word Kill in both editions: "If the target has 100 Hit Points or fewer, it dies. Otherwise, it takes 12d12
+    /// Psychic damage" (2024); "If the creature you choose has 100 hit points or fewer, it dies. Otherwise, the spell has
+    /// no effect" (2014). Without its entry the 2014 spell is not cast at all and the 2024 one only deals the 12d12.
+    /// </summary>
+    [Theory]
+    [InlineData("2014", "")]
+    [InlineData("2024", "12d12 psychic")]
+    public void Overlay_PowerWordKill_KillsAt100HitPointsOrFewerAndOtherwiseDealsItsDamage(string edition, string damage)
+    {
+        var profile = SpellNormalizer.Normalize(CorrectedSrd.Shipped.Get(edition, SrdKinds.Spell, "power-word-kill")!, Shipped);
+
+        Assert.Equal((SpellProfileKinds.AutoHit, (int?)100, damage),
+            (profile.Kind, profile.KillAtOrBelowHp, string.Join(" + ", profile.Damage.Select(d => $"{d.Dice} {d.DamageType}"))));
     }
 
     [Fact]

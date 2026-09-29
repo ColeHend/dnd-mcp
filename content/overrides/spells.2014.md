@@ -13,7 +13,9 @@ An object keyed by spell index. Fields (all optional): `kind` (`attack` | `save`
 (`[{"dice", "type"}]`, at the spell's level and per slot level above), `damage_adds_modifier`, `cantrip`
 (`dice` | `beams`), `targets` / `upcast_targets`, `area` / `no_area`, `condition`
 (`{"condition", "duration", "rounds"?}` in the stat block vocabulary), `heal` / `heal_modifier` / `upcast_heal`,
-`ac_bonus`, `approximation` (how a lingering effect is simplified: an `approximated` warning on every caster) and `note`.
+`ac_bonus`, `kill_at_or_below_hp` (a target with at most that many hit points dies outright), `approximation` (how a
+lingering effect is simplified: an `approximated` warning on every caster) and `note`. Counts and sizes are range
+checked at load (targets 1–20, upcast targets 0–10, area size 1–1000, AC bonus 1–10, kill threshold 1–1000).
 
 ## What is here
 
@@ -24,8 +26,12 @@ An object keyed by spell index. Fields (all optional): `kind` (`attack` | `save`
 - Acid Arrow's delayed 2d4, Flame Strike's area (the record's 40 is the cylinder's height, the radius is 10),
   Disintegrate (one creature: the recorded cube is for objects), Spirit Guardians (no damage in the record), Shield
   (+5 AC as a parry).
+- Power Word Kill: a creature with 100 hit points or fewer dies; the record has no damage, so without the entry the
+  spell is not cast at all.
 - Approximations for areas that linger (Cloudkill, Insect Plague, Wall of Fire, Blade Barrier): their damage is dealt
   once, when cast.
+- Notes only, on what the cast leaves out: Guiding Bolt (the Advantage it grants on the next attack roll) and Spiritual
+  Weapon (cast as a Bonus Action; its attacks on later turns).
 
 Which spells have no combat effect or are not modelled is a judgment, not a fact of the text: that catalogue is code
 (`SpellNormalizer.NoCombatEffect` / `NotModelled`), pinned by `SpellCatalogueTests`.

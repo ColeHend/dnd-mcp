@@ -12,19 +12,22 @@ namespace DndMcp.Domain.Simulation;
 ///
 /// <para>
 /// <b>The turn</b>: the advantage-rate sources are sampled once; setup costs are paid on the first turn (and a lost
-/// concentration setup re-paid when it looks worth it); healing by policy; then the Action — the Attack action (its
+/// concentration setup re-paid when it looks worth it), and an advantage source a setup switches on is sampled as it is
+/// paid, so it applies to this turn's attacks; healing by policy; then the Action — the Attack action (its
 /// attacks in list order, each <c>count</c> times, then every Action Surge with a use left) or an Action save effect,
 /// whichever is expected to deal more against the likely targets; then the Bonus Action — bonus_action attacks (an offhand
 /// attack only after the Attack action), a triggered extra attack (hit, crit, always, crit_or_kill — the kill is real
-/// here), or a Bonus Action save effect, by expected damage; then save effects that cost no action. The reaction attack
-/// is drawn with its per-round probability and made at the end of the next enemy turn.
+/// here), or a Bonus Action save effect, by expected damage; then save effects that cost no action — neither once the
+/// build has dropped or been incapacitated during its own turn (a retaliation trait's burn, a death burst it caused).
+/// The reaction attack is drawn with its per-round probability and made at the end of the next enemy turn.
 /// </para>
 /// <para>
 /// <b>Per attack</b> (the closed form's rules, rolled): d20 with the sample's rate sources, Vex, conditions and
 /// Lucky/Elven Accuracy, bonus dice, the power attacks switched on this turn; on a hit, riders by policy (any_hit,
 /// crits_only, crit_or_last as rules; optimal by a myopic backward rule over the phase's remaining eligible attacks),
-/// Savage Attacker, the damage, Vex, Sap, conditions on hit (with their durations carried), Topple, Cleave against a real
-/// second enemy, and the triggers; on a miss Graze and on_miss riders. Untyped riders deal the attack's damage type.
+/// Savage Attacker, the damage, Vex, Sap, conditions on hit (with their durations carried), Topple, the target's
+/// retaliation trait on a melee hit, Cleave against a real second enemy, and the triggers; on a miss Graze and on_miss
+/// riders. Untyped riders deal the attack's damage type.
 /// </para>
 /// </summary>
 internal sealed partial class Fight
@@ -42,10 +45,20 @@ internal sealed partial class Fight
         ctx.Begin(reaction: false);
         DrawReaction(pc, state);
 
+        // The advantage-rate sources, sampled once for the turn. One still waiting for its setup is sampled only once this
+        // turn pays it (phase 4 §3.4: "active for every later attack from that point", and the setup is paid before the
+        // Action): Innate Sorcery set up with the Bonus Action gives round 1's Fire Bolt Advantage. Sampling it after the
+        // setups, rather than moving the setups first, keeps every other build on the same random stream, and keeps the
+        // re-setup rule's estimate (WorthSettingUp reads the sample) reading the sources that were already up.
+        var waiting = 0UL;
         for (var i = 0; i < build.Advantage.Length; i++)
         {
             var source = build.Advantage[i];
-            if (state.IsActive(source.Source.Number) && Chance(source.Rate))
+            if (!state.IsActive(source.Source.Number))
+            {
+                waiting |= 1UL << i;
+            }
+            else if (Chance(source.Rate))
             {
                 ctx.Present |= 1UL << i;
             }
@@ -53,6 +66,15 @@ internal sealed partial class Fight
 
         var action = true;
         PaySetups(pc, state, ctx, ref action);
+        for (var i = 0; waiting != 0 && i < build.Advantage.Length; i++)
+        {
+            var source = build.Advantage[i];
+            if ((waiting & (1UL << i)) != 0 && state.IsActive(source.Source.Number) && Chance(source.Rate))
+            {
+                ctx.Present |= 1UL << i;
+            }
+        }
+
         PcHeals(pc, state, ctx, ref action);
         if (action && TryEscape(pc))
         {
@@ -72,10 +94,16 @@ internal sealed partial class Fight
             RunAttackAction(pc, state, ctx, withAction: false);
         }
 
-        PcBonusAction(pc, state, ctx);
+        // A melee hit on a retaliating creature, or a death burst the build caused, can drop or incapacitate it during its
+        // own turn: a creature at 0 HP takes no Bonus Action and keeps no effect going.
+        if (CanStillAct(pc))
+        {
+            PcBonusAction(pc, state, ctx);
+        }
+
         foreach (var s in build.FreeSaves)
         {
-            if (CanCast(pc, state, s))
+            if (CanStillAct(pc) && CanCast(pc, state, s))
             {
                 CastSaveEffect(pc, state, s);
             }
@@ -609,8 +637,7 @@ internal sealed partial class Fight
         return (advantage, disadvantage);
     }
 
-    private int TargetArmorClass(Creature target, PcAttack attack) =>
-        target.T.ArmorClass + (attack.A.IgnoresCover ? 0 : target.T.CoverBonus);
+    private static int TargetArmorClass(Creature target, PcAttack attack) => ArmorClass(target, attack.A.IgnoresCover);
 
     private void MakeAttack(Creature pc, PcState state, PcTurnContext ctx, PcAttack attack, LineKind kind, Creature target, int restFrom)
     {
@@ -652,7 +679,13 @@ internal sealed partial class Fight
         }
     }
 
-    /// <summary>A monster's parry reaction: when its AC bonus turns a hit (not a critical one) into a miss.</summary>
+    /// <summary>
+    /// A monster's parry reaction, spent when its AC bonus turns a hit (not a critical one) into a miss. A true Parry ("adds
+    /// 2 to its AC against one melee attack that would hit it") covers that one attack. A spell parry (Shield: "+5 bonus to
+    /// AC, including against the triggering attack, until the start of your next turn", 2014 alike) stays up: every later
+    /// attack roll against the caster meets it until the caster's next turn starts (<see cref="Creature.ShieldAc"/>), so
+    /// the rest of a party's attacks that round face the mage's AC 20, not its 15.
+    /// </summary>
     private bool Parried(Creature target, bool melee, int total, int ac)
     {
         if (target.T.Parries.Length == 0 || !target.ReactionAvailable || target.Incapacitated || target.Surprised)
@@ -669,9 +702,14 @@ internal sealed partial class Fight
 
             target.ReactionAvailable = false;
             Consume(target, parry);
+            if (parry.IsSpell)
+            {
+                target.ShieldAc = Math.Max(target.ShieldAc, parry.AcBonus);
+            }
+
             if (_log is not null)
             {
-                _log.Line($"    {target.Label} uses {parry.Name} (+{parry.AcBonus} AC): the attack misses");
+                _log.Line($"    {target.Label} uses {parry.Name} (+{parry.AcBonus} AC{(parry.IsSpell ? " until the start of its next turn" : "")}): the attack misses");
             }
 
             return true;
@@ -850,15 +888,18 @@ internal sealed partial class Fight
                     AddCondition(pc, target, ProneTemplate, 0);
                 }
             }
+        }
 
-            if (attack.A.Mastery == V.Masteries.Cleave && attack.Melee && !ctx.CleaveUsed)
+        Retaliate(pc, target, attack.Melee);
+
+        // Cleave is a further attack: not once the burn has dropped the build.
+        if (kind.IsMainTarget() && attack.A.Mastery == V.Masteries.Cleave && attack.Melee && !ctx.CleaveUsed && CanStillAct(pc))
+        {
+            ctx.CleaveUsed = true;
+            var second = CleaveTarget(pc, target);
+            if (second is not null)
             {
-                ctx.CleaveUsed = true;
-                var second = CleaveTarget(pc, target);
-                if (second is not null)
-                {
-                    MakeAttack(pc, state, ctx, attack, LineKind.Cleave, second, restFrom);
-                }
+                MakeAttack(pc, state, ctx, attack, LineKind.Cleave, second, restFrom);
             }
         }
 

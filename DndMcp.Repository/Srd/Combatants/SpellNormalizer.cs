@@ -133,7 +133,6 @@ public static class SpellNormalizer
         ["mind-blank"] = "mental protection",
         ["mirror-image"] = "duplicates that absorb attacks",
         ["plane-shift"] = "banishes a creature to another plane",
-        ["power-word-kill"] = "kills a creature with 100 hit points or fewer (2014; the 2024 overlay casts its 12d12 alternative)",
         ["power-word-stun"] = "stuns a creature with 150 hit points or fewer",
         ["protection-from-poison"] = "poison resistance",
         ["ray-of-enfeeblement"] = "halves Strength-based damage",
@@ -237,10 +236,10 @@ public static class SpellNormalizer
             }
             else
             {
-                damage = profile.CantripScaling == "dice" ? profile.Damage.Select(d => d with { Dice = d.Dice.ScaleDice(tier) }).ToList() : profile.Damage;
+                damage = profile.CantripScaling == CantripScalings.Dice ? profile.Damage.Select(d => d with { Dice = d.Dice.ScaleDice(tier) }).ToList() : profile.Damage;
             }
 
-            if (profile.CantripScaling == "beams")
+            if (profile.CantripScaling == CantripScalings.Beams)
             {
                 targets = tier;
             }
@@ -282,6 +281,7 @@ public static class SpellNormalizer
             SpellLevel = profile.Level == 0 ? 0 : castLevel,
             Concentration = profile.Concentration,
             Usage = usage,
+            KillAtOrBelowHp = profile.KillAtOrBelowHp,
             Text = profile.Name,
             Notes = notes,
         };
@@ -465,6 +465,7 @@ public static class SpellNormalizer
             HealingAddsModifier = entry.HealModifier ?? derived.HealingAddsModifier,
             UpcastHealing = entry.UpcastHeal is { } up ? ProseText.Dice(up) : derived.UpcastHealing,
             AcBonus = entry.AcBonus ?? derived.AcBonus,
+            KillAtOrBelowHp = entry.KillAtOrBelowHp ?? derived.KillAtOrBelowHp,
             Approximation = entry.Approximation ?? derived.Approximation,
             Reason = null,
             Notes = notes,

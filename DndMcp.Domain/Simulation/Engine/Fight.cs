@@ -14,8 +14,10 @@ namespace DndMcp.Domain.Simulation;
 /// <b>The round</b> (both editions): each creature in initiative order takes its turn — start of turn (conditions that end
 /// now, recharge, Legendary Action reset, regeneration, ongoing damage, the death save, standing up), its Action and Bonus
 /// Action, end of turn (save-ends saves, durations) — and after it, pending reaction attacks against it, then one
-/// legendary action by each other legendary creature that can take one. The fight ends the moment a side has no
-/// creature standing (a party member at 0 HP counts as down even while dying), or at the round cap as a draw.
+/// legendary action by each other legendary creature that can take one. A dead creature takes no turn, but at its place
+/// the durations counted on its turns still run out (what it imposed until the start or end of its next turn, and round
+/// counts): a dead lich's Paralyzing Touch ends there. The fight ends the moment a side has no creature standing (a party
+/// member at 0 HP counts as down even while dying), or at the round cap as a draw.
 /// </para>
 /// <para>
 /// The partial files hold the rest: <c>Fight.Rolls</c> (dice, d20s, saves, advantage), <c>Fight.Damage</c> (damage,
@@ -56,8 +58,6 @@ internal sealed partial class Fight
     /// <summary>The harness: each round's cumulative damage dealt by creature 0, filled when set (length = round cap).</summary>
     public long[]? RoundDealt { get; set; }
 
-    private FightSetup Setup => _setup;
-
     /// <summary>Runs one whole fight from <paramref name="seed"/>; the creatures keep its end state for the caller's statistics.</summary>
     public FightOutcome Run(ulong seed, CombatLog? log = null)
     {
@@ -81,6 +81,8 @@ internal sealed partial class Fight
                 var creature = _c[id];
                 if (creature.Dead)
                 {
+                    // No turn, and no legendary actions after it: only the durations counted on its turns run out.
+                    DeadCreaturesPlace(creature);
                     continue;
                 }
 
@@ -149,6 +151,7 @@ internal sealed partial class Fight
 
     private void StartOfFight(Creature c)
     {
+        GainTempHp(c, c.T.TempHpAtStart);
         if (c.Pc is { } pc)
         {
             var build = pc.Build;
@@ -158,7 +161,8 @@ internal sealed partial class Fight
             }
 
             // A concentration modifier with no setup cost (the warlock baseline's Hex) is already up when the fight starts, so
-            // it is already held: damage can break it from round 1. One cast as a save effect is concentrated on when cast.
+            // it is already held: damage can break it from round 1, and then it is off for the rest of the fight (it has no
+            // setup to pay again). One cast as a save effect is concentrated on when cast.
             if (build.ConcentrationNumber > 0 && !build.Gated[build.ConcentrationNumber] && !IsSaveEffect(build, build.ConcentrationNumber))
             {
                 StartConcentration(c, build.ConcentrationLabel!, build.ConcentrationNumber, deactivates: true);
@@ -258,8 +262,20 @@ internal sealed partial class Fight
     // Turns.
     // ------------------------------------------------------------------------------------------------------------------
 
+    /// <summary>
+    /// One creature's turn: start, Action and Bonus Action, end. A dead creature takes none; a scripted turn of one is its
+    /// place in the order coming round (<see cref="DeadCreaturesPlace"/>), as it is in <see cref="Run"/>. A creature that
+    /// dies during its turn still ends that turn for what it imposed (<see cref="SourceTurnEnds"/>), so "until the end of
+    /// the source's next turn" imposed during it ends at the creature's next place in the order, not a round later.
+    /// </summary>
     internal void TakeTurn(Creature c)
     {
+        if (c.Dead)
+        {
+            DeadCreaturesPlace(c);
+            return;
+        }
+
         _turnId++;
         _active = c.Id;
         c.TurnsTaken++;
@@ -289,27 +305,40 @@ internal sealed partial class Fight
         {
             EndOfTurn(c);
         }
+        else
+        {
+            SourceTurnEnds(c);
+        }
 
         _active = -1;
         CheckOver();
+    }
+
+    /// <summary>
+    /// A dead creature's place in the initiative order. It takes no turn (no recharge, regeneration, death save or
+    /// Legendary Action reset, no action, no legendary actions after it), but the durations counted on its turns still run
+    /// out there: what it imposed "until the start of its next turn" ends where that turn would start, and "until the end
+    /// of its next turn" and round counts end or tick where it would end. Without it the 2024 lich's Paralyzing Touch ("until the start of the lich's next turn") would hold its
+    /// target for the rest of the fight once the lich died, open to Advantage and automatic critical hits from the lich's
+    /// allies. No die is rolled and nothing is logged unless a condition ends, so a fight in which nothing a dead creature
+    /// imposed is still running draws and logs exactly what it did when the dead were skipped.
+    /// </summary>
+    private void DeadCreaturesPlace(Creature c)
+    {
+        SourceTurnStarts(c, "its source is dead; its turn would start");
+        SourceTurnEnds(c);
     }
 
     private static bool CanAct(Creature c) => c.Up && !c.Incapacitated && !c.Surprised && !c.T.Inert;
 
     internal void StartOfTurn(Creature c)
     {
-        // "Until the start of the source's next turn" ends now, and so do Sap's Disadvantage and the Dodge.
-        foreach (var other in _c)
-        {
-            RemoveMatching(other, DurationKind.UntilStartOfSourceTurn, c.Id, -1, "its source's turn starts");
-            if (other.SappedBy == c.Id)
-            {
-                other.SappedBy = -1;
-            }
-        }
+        SourceTurnStarts(c, "its source's turn starts");
 
-        // "Until the start of its next turn" on the creature itself ends now (before an aura imposes it afresh).
+        // "Until the start of its next turn" on the creature itself ends now (before an aura imposes it afresh), and so
+        // do a Shield it cast and the Dodge.
         RemoveMatching(c, DurationKind.UntilStartOfTargetTurn, null, -1, "its turn starts");
+        c.ShieldAc = 0;
         c.Dodging = false;
         c.RecklessActive = false;
         if (!c.Surprised)
@@ -374,6 +403,22 @@ internal sealed partial class Fight
         if (c.Pc is { } pc)
         {
             pc.ReactionPending = false;
+        }
+    }
+
+    /// <summary>
+    /// The start of <paramref name="c"/>'s turn for what it imposed on others: "until the start of the source's next turn"
+    /// ends now, and so does the Disadvantage of its Sap. It runs at a dead creature's place too (<see cref="DeadCreaturesPlace"/>).
+    /// </summary>
+    private void SourceTurnStarts(Creature c, string why)
+    {
+        foreach (var other in _c)
+        {
+            RemoveMatching(other, DurationKind.UntilStartOfSourceTurn, c.Id, -1, why);
+            if (other.SappedBy == c.Id)
+            {
+                other.SappedBy = -1;
+            }
         }
     }
 
@@ -498,7 +543,27 @@ internal sealed partial class Fight
             }
         }
 
-        // Durations counted on this creature's turn as the source.
+        SourceTurnEnds(c);
+
+        if (c.VexTarget >= 0 && c.VexTurn < _turnId)
+        {
+            c.VexTarget = -1;
+        }
+
+        if (c.Surprised)
+        {
+            c.Surprised = false;
+            c.ReactionAvailable = true;
+        }
+    }
+
+    /// <summary>
+    /// The end of <paramref name="c"/>'s turn for what it imposed on others: "until the end of the source's next turn"
+    /// ends (unless imposed during this very turn), and round counts (a Rounds duration, a save-ends cap) tick down. It
+    /// runs at the end of a turn in which it died, and at a dead creature's place (<see cref="DeadCreaturesPlace"/>).
+    /// </summary>
+    private void SourceTurnEnds(Creature c)
+    {
         foreach (var other in _c)
         {
             for (var i = 0; i < other.Conditions.Count; i++)
@@ -540,17 +605,6 @@ internal sealed partial class Fight
                     i--;
                 }
             }
-        }
-
-        if (c.VexTarget >= 0 && c.VexTurn < _turnId)
-        {
-            c.VexTarget = -1;
-        }
-
-        if (c.Surprised)
-        {
-            c.Surprised = false;
-            c.ReactionAvailable = true;
         }
     }
 
@@ -598,7 +652,7 @@ internal sealed partial class Fight
         var enemies = false;
         foreach (var c in _c)
         {
-            if (c.Standing)
+            if (c.Up)
             {
                 if (c.Side == 0)
                 {

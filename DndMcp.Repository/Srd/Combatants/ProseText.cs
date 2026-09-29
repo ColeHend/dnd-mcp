@@ -333,7 +333,7 @@ internal static partial class ProseText
                 continue;
             }
 
-            foreach (var word in ConditionList().Split(m.Groups["list"].Value))
+            foreach (var word in ListSeparator().Split(m.Groups["list"].Value))
             {
                 if (ConditionKey(word) is { } key)
                 {
@@ -349,7 +349,7 @@ internal static partial class ProseText
                 continue;
             }
 
-            foreach (var word in ConditionList().Split(m.Groups["list"].Value))
+            foreach (var word in ListSeparator().Split(m.Groups["list"].Value))
             {
                 if (ConditionKey(word) is { } key && !found.Any(f => f.Condition == key && Math.Abs(f.Index - m.Index) < 3))
                 {
@@ -582,8 +582,24 @@ internal static partial class ProseText
     [GeneratedRegex(@"\b(?:is|be|become|becomes|are|falls|fall)\s+(?:also\s+)?(?:magically\s+)?(?:knocked\s+)?(?<list>(?:blinded|charmed|deafened|frightened|grappled|incapacitated|paralyzed|petrified|poisoned|prone|restrained|stunned|unconscious)(?:(?:,\s*|\s+and\s+|,\s*and\s+)(?:blinded|charmed|deafened|frightened|grappled|incapacitated|paralyzed|petrified|poisoned|prone|restrained|stunned|unconscious))*)\b|\bknocked (?<list>prone)\b", RegexOptions.IgnoreCase)]
     private static partial Regex IsCondition();
 
+    /// <summary>
+    /// The 2024 Rules Glossary's Burning hazard ("A burning creature or object takes 1d4 Fire damage at the start of
+    /// each of its turns"), as a warning names it: a stat block that sets a creature burning gives no damage of its own.
+    /// </summary>
+    public const string BurningHazard = "Burning: 1d4 Fire damage at the start of each of its turns until the fire is put out.";
+
+    /// <summary>
+    /// A 2024 text that sets a creature burning: the Burn and Touch hits ("If the target is a creature or a flammable
+    /// object, it starts burning") and the fire elemental's Fire Aura ("Creatures and flammable objects in the
+    /// Emanation start burning"). Hurl Flame's "If the target is a flammable object …, it starts burning" names no
+    /// creature and does not match: an object burning changes no fight.
+    /// </summary>
+    [GeneratedRegex(@"\bcreatures?\b[^.]*\bstarts? burning\b", RegexOptions.IgnoreCase)]
+    internal static partial Regex StartsBurning();
+
+    /// <summary>The separators of a written list ("a, b, and c", "a and b"): conditions here, damage types in <see cref="DamageAdjustmentReader"/>.</summary>
     [GeneratedRegex(@",\s*and\s+|\s+and\s+|,\s*")]
-    private static partial Regex ConditionList();
+    internal static partial Regex ListSeparator();
 
     [GeneratedRegex(@"\b(?:if|unless|while|when|whether|that|who|which|until)\b[^,.;:\u2014]*$", RegexOptions.IgnoreCase)]
     private static partial Regex StateTest();

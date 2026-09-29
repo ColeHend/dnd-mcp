@@ -9,7 +9,9 @@ using DndMcp.Domain.Simulation;
 using DndMcp.Formatting;
 using DndMcp.Hosting;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol;
+using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
 namespace DndMcp.Tools;
@@ -45,10 +47,20 @@ namespace DndMcp.Tools;
 /// second typed copy would push the tool's definition past 32 KB.
 /// </para>
 /// <para>
-/// <b>Progress and cancellation.</b> Waiting for the rules index reports progress as every rules tool does; the fights
-/// run on the thread pool while this method forwards their progress (chunks of 1,024) at most every quarter second
-/// (<see cref="FightProgressPump"/>), which also resets Claude Code's idle timeout on a long run. The token is honoured
-/// between fights. The work is bounded by <see cref="SimulationLimits.WorkBudget"/> (about 15 s at worst).
+/// <b>Progress and cancellation.</b> The rules index wait, the wait for another call's fights (<see cref="FightGate"/>)
+/// and then the fights (after each chunk, a second or so of work at most) report through one <see cref="ProgressPump"/>,
+/// which sends the latest value at once and then at most every quarter second, each send awaited before the next, so a
+/// watching user sees the run move and Claude Code's idle timeout is reset on a long run. The fights stop between fights
+/// when the request is cancelled or the client closes the session (<see cref="SessionEnded"/>). The work is bounded by
+/// <see cref="SimulationLimits.WorkBudget"/> (about 20 s at worst): a run over it is refused, except that precision mode is
+/// charged only its first batch and stops its later batches at the limit, saying so.
+/// </para>
+/// <para>
+/// <b>The fights never take the whole thread pool</b> (<see cref="FightThreads"/>, <see cref="FightGate"/>). The stdio
+/// transport reads the client's next message — its <c>notifications/cancelled</c> among them — on a pool thread, and the
+/// pump's sends need one too. With every pool thread in the parallel loop, a cancel was read 12.6 s after it was sent
+/// while 15 cores burned on an abandoned run, and the first progress came at 81,920 of 100,000 fights: exactly what the
+/// two promises above exist to prevent, and every other request on the session waited behind the run as well.
 /// </para>
 /// </summary>
 public sealed class SimulateTools
@@ -59,19 +71,74 @@ public sealed class SimulateTools
 
     private const string EntryExample = "{\"monster\": \"Ogre\", \"count\": 3}";
 
+    /// <summary>
+    /// The threads the fights may use: every core but one (at least one). Reading it the first time also raises the
+    /// thread pool's minimum to four above the core count, once per process, so the pool hands out the threads the
+    /// fights leave free at once rather than injecting them one every half second or so after it sees starvation: the
+    /// stdio transport's read of stdin can hold one, and the pump needs one per send. Both halves are needed (measured on
+    /// 16 cores, 100,000 fights): capped alone, the cancel was still unread 5 s later and the first progress came at
+    /// 81,920 fights, as with no cap; raised alone, the parallel loop takes the raised threads too, and the first progress
+    /// came at 30,000 to 54,000 fights. Together the cancel was read in 10 ms, and the first progress comes with the
+    /// first chunks (<c>SimulateToolTests</c>' long stdio runs pin both). The cap holds across calls only because one
+    /// call fights at a time (<see cref="FightGate"/>). The cost is one core of throughput; the report does not depend on
+    /// the thread count (<see cref="Simulator"/>).
+    /// </summary>
+    internal static readonly int FightThreads = ReservePoolThreads();
+
+    /// <summary>
+    /// One call's fights at a time, process-wide, so <see cref="FightThreads"/> caps the fights of every call together.
+    /// <c>balance_simulate</c> is read-only, so a client may run two at once ("party A, and party B"); each with a set of
+    /// its own, two long runs wanted 30 pool threads of the 20 the minimum provides, and the starvation came back: a ping
+    /// took 6 to 25 s, each call's first progress came at 60% of its run, and a cancel was read 3.3 s late. A call that
+    /// waits here reports it every second (<see cref="WaitForTheFightThreadsAsync"/>), so its idle timer is reset too, and
+    /// stops waiting when it is cancelled. The total time is the same as sharing the threads; the first call's answer
+    /// comes sooner.
+    /// </summary>
+    private static readonly SemaphoreSlim FightGate = new(1, 1);
+
+    /// <summary>How often a call waiting for <see cref="FightGate"/> reports it: as the rules index wait does.</summary>
+    private static readonly TimeSpan GateReportInterval = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// The answer to a call whose session ended mid-run (<see cref="SessionEnded"/>). Nobody reads it; returning it rather
+    /// than the cancellation keeps a client's normal shutdown out of the log as a failed tool call with a stack trace.
+    /// </summary>
+    internal const string SessionEndedText = "The session ended; the simulation was stopped.";
+
     private readonly StatBlockService _statBlocks;
 
-    public SimulateTools(StatBlockService statBlocks)
+    private readonly ILogger<SimulateTools> _logger;
+
+    private readonly ITransport? _transport;
+
+    /// <param name="statBlocks">The SRD stat blocks, resolved and cached once per process.</param>
+    /// <param name="logger">Notes a run stopped because the session ended (<see cref="SessionEndedText"/>).</param>
+    /// <param name="transport">
+    /// The session's transport, which the SDK registers for the stdio (and stream) transport; absent, only the request's
+    /// own token stops the fights. See <see cref="SessionEnded"/>.
+    /// </param>
+    public SimulateTools(StatBlockService statBlocks, ILogger<SimulateTools> logger, ITransport? transport = null)
     {
         _statBlocks = statBlocks;
+        _logger = logger;
+        _transport = transport;
     }
+
+    /// <summary>
+    /// Completes when the client has closed the session: the transport's message reader completes once the client's input
+    /// has ended (stdin closed, the MCP spec's stdio shutdown) and every message has been taken off the queue; requests
+    /// still being handled, this one included, are not waited for. The SDK itself does not cancel a request still running
+    /// then, and its shutdown waits for it, so an abandoned run kept 15 cores busy for 30 s more before the process could
+    /// exit. The fights are stopped then instead: nobody is left to read the answer.
+    /// </summary>
+    private Task? SessionEnded => _transport?.MessageReader.Completion;
 
     // Not idempotent: without a seed the same call draws new dice. Closed-world: the SRD data this binary ships.
     [McpServerTool(Name = "balance_simulate", Title = "Simulate a fight", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false)]
     [Description(
         "Monte Carlo simulation of a D&D 5e fight (2014 or 2024 rules): a party vs enemies, fought thousands of times with the " +
         "dice rolled. Gives P(party wins) with a 95% CI, P(defeat), P(draw), P(a party member dies), rounds (mean, median, " +
-        "p90) and per combatant: dropped to 0, dead, HP lost, damage dealt and taken, kills, resources used; what the SRD " +
+        "p90) and per combatant: dropped to 0, dead, still dying, HP lost, damage dealt and taken, kills, resources used; what the SRD " +
         "stat blocks' simulation leaves out; the assumptions. Exact damage per round: balance_dpr; the books' XP " +
         "difficulty: encounter_difficulty.\n" +
         "- party, enemies (required): lists of entries, each exactly one of:\n" +
@@ -105,7 +172,7 @@ public sealed class SimulateTools
         [Description("Who is surprised: \"none\" (default), \"party\" or \"enemies\".")] string? surprise = null,
         [Description("Enemy hit points: \"average\" (default, the stat block's) or \"roll\" (from the hit dice each fight).")]
         [AIParameterName("enemy_hp")] string? enemyHp = null,
-        [Description("Run batches of 10,000 fights until P(party wins)'s 95% half-width is at most this, 0.001-0.5 (e.g. 0.01), up to 100,000 fights. Replaces iterations.")]
+        [Description("Run batches of 10,000 fights until P(party wins)'s 95% half-width is at most this, 0.001-0.5 (e.g. 0.01), up to 100,000 fights (fewer for a very large fight: the work limit). Replaces iterations.")]
         double? precision = null,
         [Description("The number of one fight (1-based) to show turn by turn, e.g. 1.")] int? replay = null,
         [Description("How each side fights; every field optional, e.g. {\"enemies\": \"focus_fire\"}.")] PolicySpec? policies = null,
@@ -114,9 +181,58 @@ public sealed class SimulateTools
                      "build)}, e.g. {\"member\": 1, \"feature\": {\"name\": \"Great Weapon Master\", \"modifiers\": [...]}}.")]
         [CheckedAs(typeof(CompareSpec))] object? compare = null,
         [Description("Table rulings for every build, each false by default, as balance_dpr's.")] RulingsSpec? rulings = null,
-        IProgress<ProgressNotificationValue>? progress = null,
+        RequestContext<CallToolRequestParams>? context = null,
         CancellationToken cancellationToken = default)
     {
+        // The call stops with its request or with the session (SessionEnded), whichever ends first.
+        using var call = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        // The request's context (bound by the SDK, not in the schema) carries the client's progress token: the pump sends
+        // through the session itself, awaited, where the SDK's IProgress would send fire-and-forget (ProgressPump).
+        var pump = context is { Params.ProgressToken: { } token, Server: { } server }
+            ? new ProgressPump((value, ct) => server.NotifyProgressAsync(token, value, cancellationToken: ct))
+            : null;
+        var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sending = pump?.SendUntilAsync(finished.Task, call.Token) ?? Task.CompletedTask;
+        try
+        {
+            var work = SimulateAsync(
+                party, enemies, iterations, seed, roundCap, edition, surprise, enemyHp, precision, replay, policies, compare, rulings, pump, call.Token);
+            if (SessionEnded is { } ended && await Task.WhenAny(work, ended) != work)
+            {
+                await call.CancelAsync();
+                try
+                {
+                    return await work;
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // Stopped by the session's end, not by the request: the SDK would log that as a tool that failed.
+                    _logger.LogInformation("balance_simulate: {Message}", SessionEndedText);
+                    return SessionEndedText;
+                }
+            }
+
+            return await work;
+        }
+        finally
+        {
+            // Nothing is sent once the call has its answer: a send under way finishes before the result goes out.
+            finished.TrySetResult();
+            await sending;
+        }
+    }
+
+    /// <summary>
+    /// The call itself: resolve the monsters, check the run, wait for the fight threads (<see cref="FightGate"/>), run the
+    /// fights on <see cref="FightThreads"/> threads, render.
+    /// </summary>
+    private async Task<string> SimulateAsync(
+        CombatantSpec[] party, object enemies, int? iterations, ulong? seed, int? roundCap, string? edition, string? surprise, string? enemyHp,
+        double? precision, int? replay, PolicySpec? policies, object? compare, RulingsSpec? rulings, ProgressPump? progress,
+        CancellationToken cancellationToken)
+    {
+        var sinceCall = System.Diagnostics.Stopwatch.StartNew();
         var partyEntries = party ?? [];
         var enemyEntries = Enemies(enemies);
         var fightEdition = Edition(edition);
@@ -172,17 +288,55 @@ public sealed class SimulateTools
             Rulings = rulings,
         };
 
+        // Bad input and an oversized run are refused now, not after waiting for another call's fights.
+        var prepared = Simulator.Prepare(spec);
         var seedGiven = seed is not null;
         var masterSeed = seed ?? RandomSeed();
-        var pump = progress is null ? null : new FightProgressPump();
-        var run = Task.Run(() => Simulator.Run(spec, masterSeed, cancellationToken, pump), cancellationToken);
-        if (pump is not null)
+        await WaitForTheFightThreadsAsync(progress, sinceCall, cancellationToken);
+        SimulationReport report;
+        try
         {
-            await pump.ForwardAsync(run, progress!);
+            report = await Task.Run(() => Simulator.Run(prepared, masterSeed, cancellationToken, progress, FightThreads), cancellationToken);
+        }
+        finally
+        {
+            FightGate.Release();
         }
 
-        var report = await run;
         return SimulationMarkdown.Format(report, seedGiven, notes.Distinct(StringComparer.Ordinal).ToList());
+    }
+
+    /// <summary>
+    /// Enters <see cref="FightGate"/>, reporting every second it waits: the seconds since the call began, which stay above
+    /// the rules index wait's (its own seconds, counted from later) and below the fights' counts in all but the shortest
+    /// runs (a value not above the last is dropped, <see cref="ProgressPump"/>).
+    /// </summary>
+    /// <exception cref="OperationCanceledException">The call was cancelled while it waited; the gate is not held.</exception>
+    private static async Task WaitForTheFightThreadsAsync(ProgressPump? progress, System.Diagnostics.Stopwatch sinceCall, CancellationToken cancellationToken)
+    {
+        if (await FightGate.WaitAsync(TimeSpan.Zero, cancellationToken))
+        {
+            return;
+        }
+
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        do
+        {
+            progress?.Report(new ProgressNotificationValue
+            {
+                Progress = (float)sinceCall.Elapsed.TotalSeconds,
+                Message = string.Create(CultureInfo.InvariantCulture,
+                    $"Waiting for another simulation to finish ({waited.Elapsed.TotalSeconds:0} s); this one's fights start when it does."),
+            });
+        }
+        while (!await FightGate.WaitAsync(GateReportInterval, cancellationToken));
+    }
+
+    private static int ReservePoolThreads()
+    {
+        ThreadPool.GetMinThreads(out var workers, out var io);
+        ThreadPool.SetMinThreads(Math.Max(workers, Environment.ProcessorCount + 4), io);
+        return Math.Max(1, Environment.ProcessorCount - 1);
     }
 
     /// <summary>A 64-bit seed from the OS's cryptographic generator: the one source of randomness a seedless call has.</summary>
@@ -287,39 +441,69 @@ public sealed class SimulateTools
     }
 
     /// <summary>
-    /// The simulator's (completed, planned) as MCP progress, forwarded from ONE loop at most every
-    /// <see cref="MinInterval"/>. The SDK sends each report fire-and-forget; reports made back to back from the worker
-    /// threads that finish chunks overtook each other on the wire (a 3,976 arriving after the 5,000), and the MCP spec
-    /// requires progress to increase with every notification. Spaced out, each send has long finished before the next
-    /// starts. The first chunk is forwarded at once, so even a short run shows it is moving; a run that ends between two
-    /// reports sends nothing more (the result follows).
+    /// One call's progress notifications, sent ONE AT A TIME, each awaited before the next and each above the last: the
+    /// MCP spec requires progress to increase with every notification. The SDK's own <see cref="IProgress{T}"/> sends
+    /// fire-and-forget, and reports made in turn still overtook each other on the wire — back to back a 3,976 arrived
+    /// after the 5,000, and spaced a quarter second apart under load a 1,024 after an 8,736 — so this sends through
+    /// <see cref="McpSession.NotifyProgressAsync(ProgressToken, ProgressNotificationValue, RequestOptions?, CancellationToken)"/>
+    /// itself and waits for each. <see cref="Report(ProgressNotificationValue)"/> only records the value (the rules index
+    /// wait's, the wait for another call's fights, then the simulator's after each chunk); <see cref="SendUntilAsync"/>
+    /// sends the latest, the first at once so even a short run shows it is moving, then at most every
+    /// <see cref="MinInterval"/>, so a burst of chunks costs one notification. A value not above the last one reported is
+    /// dropped: the waits count seconds and the fights count fights, and a one-fight run after a two-second wait must not
+    /// step back.
     /// </summary>
-    private sealed class FightProgressPump : IProgress<(int Completed, int Total)>
+    internal sealed class ProgressPump : IProgress<ProgressNotificationValue>, IProgress<(int Completed, int Total)>
     {
-        /// <summary>Often enough for Claude Code's idle timer and a watching user; far apart for sends never to overlap.</summary>
+        /// <summary>Often enough for Claude Code's idle timer and a watching user; seldom enough not to flood the client.</summary>
         public static readonly TimeSpan MinInterval = TimeSpan.FromMilliseconds(250);
 
+        private readonly Func<ProgressNotificationValue, CancellationToken, Task> _send;
         private readonly Lock _gate = new();
-        private (int Completed, int Total)? _latest;
+        private ProgressNotificationValue? _pending;
+        private float _last = float.NegativeInfinity;
         private TaskCompletionSource _changed = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        /// <summary>Called by the simulator after each chunk (it serialises the calls); only records the value.</summary>
-        public void Report((int Completed, int Total) value)
+        /// <param name="send">Sends one notification; the pump never starts one before the last has finished.</param>
+        public ProgressPump(Func<ProgressNotificationValue, CancellationToken, Task> send)
+        {
+            _send = send;
+        }
+
+        /// <summary>Records <paramref name="value"/> as the next to send, unless it is not above the last reported.</summary>
+        public void Report(ProgressNotificationValue value)
         {
             lock (_gate)
             {
-                _latest = value;
+                if (!(value.Progress > _last))
+                {
+                    return;
+                }
+
+                _last = value.Progress;
+                _pending = value;
                 _changed.TrySetResult();
             }
         }
 
-        /// <summary>Forwards the latest value to <paramref name="progress"/> until <paramref name="work"/> ends.</summary>
-        public async Task ForwardAsync(Task work, IProgress<ProgressNotificationValue> progress)
+        /// <summary>Called by the simulator after each chunk (it serialises the calls): fights completed of fights planned.</summary>
+        public void Report((int Completed, int Total) value) => Report(new ProgressNotificationValue
         {
-            var sent = -1;
+            Progress = value.Completed,
+            Total = value.Total,
+            Message = string.Create(CultureInfo.InvariantCulture, $"Simulated {value.Completed:N0} of {value.Total:N0} fights."),
+        });
+
+        /// <summary>
+        /// Sends the latest value reported until <paramref name="stop"/> completes, waiting for each send to finish. A send
+        /// cancelled, or failed because the transport is gone, ends the progress but not the call, whose own result or
+        /// cancellation follows (a transport that fails a notification fails the answer too, and the SDK logs that).
+        /// </summary>
+        public async Task SendUntilAsync(Task stop, CancellationToken cancellationToken)
+        {
             var since = System.Diagnostics.Stopwatch.StartNew();
             var first = true;
-            while (!work.IsCompleted)
+            while (!stop.IsCompleted)
             {
                 Task changed;
                 lock (_gate)
@@ -327,37 +511,43 @@ public sealed class SimulateTools
                     changed = _changed.Task;
                 }
 
-                await Task.WhenAny(work, changed).ConfigureAwait(false);
+                await Task.WhenAny(stop, changed).ConfigureAwait(false);
                 var wait = MinInterval - since.Elapsed;
                 if (!first && wait > TimeSpan.Zero)
                 {
-                    await Task.WhenAny(work, Task.Delay(wait)).ConfigureAwait(false);
+                    await Task.WhenAny(stop, Task.Delay(wait, CancellationToken.None)).ConfigureAwait(false);
                 }
 
-                if (work.IsCompleted)
+                if (stop.IsCompleted)
                 {
                     return;
                 }
 
-                (int Completed, int Total)? value;
+                ProgressNotificationValue? value;
                 lock (_gate)
                 {
-                    value = _latest;
+                    value = _pending;
+                    _pending = null;
                     _changed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 }
 
-                if (value is { } v && v.Completed > sent)
+                if (value is null)
                 {
-                    progress.Report(new ProgressNotificationValue
-                    {
-                        Progress = v.Completed,
-                        Total = v.Total,
-                        Message = string.Create(CultureInfo.InvariantCulture, $"Simulated {v.Completed:N0} of {v.Total:N0} fights."),
-                    });
-                    sent = v.Completed;
-                    since.Restart();
-                    first = false;
+                    continue;
                 }
+
+                try
+                {
+                    await _send(value, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException or InvalidOperationException)
+                {
+                    // Cancelled, or the transport is gone (the SDK's "not connected" is an InvalidOperationException).
+                    return;
+                }
+
+                since.Restart();
+                first = false;
             }
         }
     }

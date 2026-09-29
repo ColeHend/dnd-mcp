@@ -309,6 +309,21 @@ public sealed partial class BalanceDprToolTests : IClassFixture<McpServerHarness
     }
 
     [Fact]
+    public async Task CallTool_VexAgainstATargetImmuneToTheWeapon_AnswersNoDamage()
+    {
+        // Every hit deals 0, so Vex never grants Advantage. The damage's P(0) summed from the dice was 0.9999999999999999,
+        // which opened an empty "the hit dealt damage" branch; the model read only the SDK's bare error, not 0.
+        var text = await Success("""
+            {"build": {"name": "Vex duelist", "edition": "2024", "level": 5, "abilities": {"dex": 18},
+                       "attacks": [{"name": "Shortsword", "count": 2, "to_hit": {"ability": "dex"}, "damage": "1d6", "damage_type": "piercing",
+                                    "properties": ["melee", "finesse", "light"], "mastery": "vex"}]},
+             "target": {"ac": 15, "immunities": ["piercing"]}}
+            """);
+
+        Assert.StartsWith("# Damage per round: Vex duelist\n\n**0.00** damage per round at level 5 against AC 15", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task CallTool_BuildThatDoesNotScale_WarnsWhenEvaluatedAtOtherLevels()
     {
         var text = await Success($$"""{"build": {{Fighter2024()}}, "levels": [1, 5, 11]}""");

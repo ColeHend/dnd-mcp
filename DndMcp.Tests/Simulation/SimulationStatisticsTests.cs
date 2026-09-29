@@ -16,12 +16,24 @@ public sealed class SimulationStatisticsTests(ITestOutputHelper output)
     [InlineData(5, 10, 0.5, 0.236593, 0.763407)]
     [InlineData(10, 10, 1.0, 0.722467, 1.0)]
     [InlineData(9_604, 19_208, 0.5, 0.492930, 0.507070)]
+    [InlineData(0, 0, 0.0, 0.0, 1.0)] // no trials: nothing is known, the whole unit interval
     public void Wilson_MatchesHandComputedIntervals(long count, long total, double estimate, double low, double high)
     {
         var p = SimulationStatistics.Wilson(count, total);
         Assert.Equal(estimate, p.Estimate, 12);
         Assert.Equal(low, p.Low, 6);
         Assert.Equal(high, p.High, 6);
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(7)]
+    [InlineData(100)]
+    public void Wilson_NoneOrEvery_TheBoundAtThatEndIsExact(long total)
+    {
+        // At 0 of n, centre − half-width is 0 on paper but 3.5e-18 in doubles at n = 100 (printed as "< 0.01%" before Wilson
+        // made the bound exact).
+        Assert.Equal((0.0, 1.0), (SimulationStatistics.Wilson(0, total).Low, SimulationStatistics.Wilson(total, total).High));
     }
 
     [Fact]
@@ -50,10 +62,32 @@ public sealed class SimulationStatisticsTests(ITestOutputHelper output)
     [InlineData(0.5, 2)]
     [InlineData(0.9, 3)]
     [InlineData(0.1, 1)]
+    [InlineData(0.4, 1)] // cumulative exactly reaches the fraction: that value, not the next
+    [InlineData(0.8, 2)]
     public void Percentile_IsTheSmallestValueReachingTheFraction(double fraction, long expected)
     {
         // Values 1..3 (offset 1) with counts 4, 4, 2: cumulative 0.4, 0.8, 1.0.
         Assert.Equal(expected, SimulationStatistics.Percentile([4, 4, 2], fraction, offset: 1));
+    }
+
+    [Theory]
+    [InlineData(0.5, 20)]
+    [InlineData(0.9, 30)]
+    [InlineData(0.1, 10)]
+    [InlineData(0.4, 10)]
+    [InlineData(0.8, 20)]
+    public void Percentile_SparseHistogram_FollowsTheSameRule(double fraction, long expected)
+    {
+        // The agreement harness's round-1 damage: counts by value, in no order, with gaps. The same counts 4, 4, 2 as above.
+        var histogram = new Dictionary<long, long> { [30] = 2, [10] = 4, [20] = 4 };
+        Assert.Equal(expected, SimulationStatistics.Percentile(histogram, fraction));
+        Assert.Equal(expected, new DummyDprResult(10, 1, 0, 0, 0, 0, histogram).Round1Percentile(fraction));
+    }
+
+    [Fact]
+    public void Percentile_Empty_IsTheOffsetOrZero()
+    {
+        Assert.Equal((5L, 0L), (SimulationStatistics.Percentile([0, 0], 0.5, offset: 5), SimulationStatistics.Percentile(new Dictionary<long, long>(), 0.5)));
     }
 
     [Fact]

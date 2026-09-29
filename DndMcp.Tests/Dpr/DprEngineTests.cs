@@ -291,13 +291,102 @@ public sealed class DprEngineTests
 
     [Theory]
     [InlineData("""{ "name": "Push", "damage": "1d8", "mastery": "push" }""", "Push: push adds no damage per round")]
-    [InlineData("""{ "name": "Nick", "damage": "1d4", "mastery": "nick", "properties": ["light"] }""", "Nick: Nick changes only the action economy")]
+    [InlineData("""{ "name": "Dagger", "damage": "1d4", "properties": ["light"] }, { "name": "Nick", "damage": "1d4", "mastery": "nick", "properties": ["light"], "action": "bonus_action", "offhand": true }""", "Nick: Nick changes only the action economy")]
     [InlineData("""{ "name": "Axe", "damage": "1d12", "mastery": "cleave" }""", "Cleave never triggers here")]
     public void Evaluate_MasteryWithoutDamageValue_SaysSo(string attack, string note)
     {
         var result = Evaluate(Level5($"[{attack}]"), Ac15);
 
         Assert.Contains(result.Notes, n => n.StartsWith(note, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(", \"offhand\": true")]
+    [InlineData("")]
+    public void Evaluate_NickWeaponAlreadyAttackingInTheAttackAction_IsNotNoted(string offhand)
+    {
+        // Nick's only effect is moving the Light weapon's extra attack into the Attack action. A build that already makes
+        // the Nick weapon's attack an action attack (the 2024 rogue archetype's scimitar) has modelled it, and a note
+        // telling it to do so would be wrong; only a Nick attack still made with the Bonus Action is noted.
+        var build = Level5($$"""[{ "name": "Shortsword", "damage": "1d6", "to_hit": {"ability": "dex"}, "properties": ["light", "finesse"], "mastery": "vex" }, { "name": "Scimitar", "damage": "1d6", "to_hit": {"ability": "dex"}, "properties": ["light", "finesse"], "mastery": "nick"{{offhand}} }]""");
+
+        var result = Evaluate(build, Ac15);
+
+        Assert.DoesNotContain(result.Notes, n => n.Contains("Nick", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(""", "offhand": true""")]
+    [InlineData("")]
+    public void Evaluate_NickWeaponInTheActionBesideABonusActionLightAttack_IsNotedNamingBoth(string offhand)
+    {
+        // The Nick text does not say which of the two Light weapons must carry it, so a Nick dagger in the Attack action
+        // beside a shortsword whose extra attack still costs the Bonus Action has not modelled Nick: the note names the
+        // bonus_action attack and where Nick is. (balance_simulate gives the same note, by the same rule.)
+        var build = Level5($$"""
+            [{ "name": "Dagger", "count": 2, "damage": "1d4", "to_hit": {"ability": "dex"}, "properties": ["light", "finesse"], "mastery": "nick" },
+             { "name": "Shortsword", "action": "bonus_action"{{offhand}}, "damage": "1d6", "to_hit": {"ability": "dex"}, "properties": ["light", "finesse"], "mastery": "vex" }]
+            """);
+
+        var result = Evaluate(build, Ac15);
+
+        Assert.Equal(
+            "Shortsword: Nick (on Dagger) changes only the action economy; model it by making the Light weapon's extra attack an action " +
+            "attack (count) instead of a bonus_action one.", Assert.Single(result.Notes, n => n.Contains("Nick", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void Evaluate_NickBesideABonusActionAttackThatIsNotTheLightExtraAttack_IsNotNoted()
+    {
+        // A bonus_action attack that is neither offhand nor Light (a polearm's butt end) is not the Light property's extra
+        // attack, so Nick has nothing to move.
+        var build = Level5("""
+            [{ "name": "Dagger", "count": 2, "damage": "1d4", "to_hit": {"ability": "dex"}, "properties": ["light", "finesse"], "mastery": "nick" },
+             { "name": "Butt End", "action": "bonus_action", "damage": "1d4", "properties": ["reach"] }]
+            """);
+
+        var result = Evaluate(build, Ac15);
+
+        Assert.DoesNotContain(result.Notes, n => n.Contains("Nick", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(""", "properties": ["light", "finesse"]""", "")]                         // two Light weapons in the action
+    [InlineData(""", "properties": ["light", "finesse"]""", """, "offhand": true""")]    // ... the second one offhand
+    [InlineData("", """, "offhand": true""")]                                             // offhand beside Nick, light left out
+    public void Evaluate_NickExtraAttackAlreadyInTheActionBesideADualWielderAttack_IsNotNoted(string properties, string offhand)
+    {
+        // The common 2024 Nick build: the scimitar (Nick) and the shortsword both attack in the Attack action, so Nick's
+        // move is made, and the Dual Wielder feat adds a bonus_action Light attack. That attack is not the Light
+        // property's extra attack, and a note telling the build to move it into the action would be wrong.
+        var build = Level5($$"""
+            [{ "name": "Scimitar", "count": 2, "damage": "1d6", "to_hit": {"ability": "dex"}, "properties": ["light", "finesse"], "mastery": "nick" },
+             { "name": "Shortsword", "damage": "1d6", "to_hit": {"ability": "dex"}{{properties}}{{offhand}}, "mastery": "vex" },
+             { "name": "Dual Wielder Shortsword", "action": "bonus_action", "offhand": true, "damage": "1d6", "to_hit": {"ability": "dex"}, "properties": ["light", "finesse"] }]
+            """);
+
+        var result = Evaluate(build, Ac15);
+
+        Assert.DoesNotContain(result.Notes, n => n.Contains("Nick", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Evaluate_OffhandNickWeaponTheActionsOnlyLightAttack_IsStillNoted()
+    {
+        // The Light property's extra attack is made with a different Light weapon from the one that earned it, so a Nick
+        // scimitar that is the Attack action's only Light attack is not that extra attack even when marked offhand: the
+        // bonus_action shortsword still is, and Nick could move it into the action.
+        var build = Level5("""
+            [{ "name": "Longsword", "damage": "1d8", "properties": ["melee", "versatile"] },
+             { "name": "Scimitar", "offhand": true, "damage": "1d6", "to_hit": {"ability": "dex"}, "properties": ["light", "finesse"], "mastery": "nick" },
+             { "name": "Shortsword", "action": "bonus_action", "offhand": true, "damage": "1d6", "to_hit": {"ability": "dex"}, "properties": ["light", "finesse"] }]
+            """);
+
+        var result = Evaluate(build, Ac15);
+
+        Assert.Equal(
+            "Shortsword: Nick (on Scimitar) changes only the action economy; model it by making the Light weapon's extra attack an action " +
+            "attack (count) instead of a bonus_action one.", Assert.Single(result.Notes, n => n.Contains("Nick", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -422,6 +511,18 @@ public sealed class DprEngineTests
     public void Evaluate_UntypedRiderOnAnAttackTheTargetIsImmuneTo_DealsNothing()
     {
         Assert.Equal(0, Round1(Level5($"[{Rapier}]", $"[{SneakAttack()}]"), """{ "ac": 15, "immunities": ["piercing"] }"""), Exact);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void Evaluate_VexOnAnAttackTheTargetIsImmuneTo_DealsNothing(int count)
+    {
+        // Every hit deals 0, so no Vex is ever granted. The chance of 0 summed from the dice is 0.9999999999999999, not 1:
+        // it must not open a "the hit dealt damage" branch that has no damage in it.
+        var vex = Level5($$"""[{ "name": "Shortsword", "count": {{count}}, "to_hit": {"ability": "dex"}, "damage": "1d6", "damage_type": "piercing", "properties": ["melee", "finesse", "light"], "mastery": "vex" }]""");
+
+        Assert.Equal(0, Evaluate(vex, """{ "ac": 15, "immunities": ["piercing"] }""").DamagePerRound, Exact);
     }
 
     [Fact]

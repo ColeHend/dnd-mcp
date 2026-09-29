@@ -5372,6 +5372,30 @@
       "source": "SRD 5.1 markdown 10_Monsters/Monsters_Each/Solar_(Angel).md › Solar › Slaying Longbow"
     },
     {
+      "ref": "2014/monster/violet-fungus",
+      "set": {
+        "condition_immunities": [
+          {
+            "index": "blinded",
+            "name": "Blinded",
+            "url": "/api/2014/conditions/blinded"
+          },
+          {
+            "index": "deafened",
+            "name": "Deafened",
+            "url": "/api/2014/conditions/deafened"
+          },
+          {
+            "index": "frightened",
+            "name": "Frightened",
+            "url": "/api/2014/conditions/frightened"
+          }
+        ]
+      },
+      "reason": "Upstream lists the condition immunity \"Blinded\" twice and drops \"Deafened\"; the SRD gives blinded, deafened, frightened.",
+      "source": "SRD 5.1 markdown 10_Monsters/Monsters_Each/Violet_Fungus_(Fungi).md › Violet Fungus › Condition Immunities"
+    },
+    {
       "ref": "2014/spell/blight",
       "set": {
         "higher_level": [

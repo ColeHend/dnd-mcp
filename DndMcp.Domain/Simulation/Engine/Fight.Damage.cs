@@ -24,8 +24,9 @@ internal readonly record struct DamageResult(int Dealt, int Effective, bool Drop
 /// <b>At 0 HP</b> a PC-like creature falls unconscious and prone and starts dying; leftover damage of at least its hit
 /// point maximum kills it outright (massive damage). Damage while at 0 HP is a death-save failure (two on a crit), or death
 /// when it is at least the maximum. Other creatures die at 0 HP, except through Relentless, Undead Fortitude, or a
-/// troll's regeneration. One Constitution save per damage instance keeps concentration (DC max(10, half), capped at 30 in
-/// a 2024 fight).
+/// troll's regeneration. An outright kill by hit points (Power Word Kill, the solar's Slaying Longbow and Slaying Bow) is a
+/// death with no damage, so none of those apply to it. One Constitution save per damage instance keeps concentration (DC max(10,
+/// half), capped at 30 in a 2024 fight).
 /// </para>
 /// </summary>
 internal sealed partial class Fight
@@ -391,7 +392,11 @@ internal sealed partial class Fight
         }
     }
 
-    /// <summary>Temporary hit points never stack: the creature keeps the higher of what it has and what it gains.</summary>
+    /// <summary>
+    /// Temporary hit points never stack: the creature keeps the higher of what it has and what it gains. The only grant
+    /// today is a build's temp_hp at the start of the fight (from 0), so the "keeps the higher" half is pinned by the rules
+    /// test alone; a second source (a monster's or a spell's temporary hit points) must come through here to keep it.
+    /// </summary>
     internal void GainTempHp(Creature c, int amount)
     {
         c.TempHp = Math.Max(c.TempHp, amount);
@@ -401,8 +406,21 @@ internal sealed partial class Fight
     // Concentration.
     // ------------------------------------------------------------------------------------------------------------------
 
+    /// <summary>
+    /// Starts concentrating on <paramref name="label"/> and returns the token its conditions carry. A build that already
+    /// concentrates on the same modifier keeps that concentration and its token: a setup-paid save effect (the cleric
+    /// archetype's Spirit Guardians, <c>setup: action</c>, <c>action_cost: none</c>) runs every turn on the concentration
+    /// its setup started, and ending it here would switch the setup off (<see cref="Creature.ConcentrationDeactivates"/>),
+    /// so the build would pay its Action to set it up again every turn and never attack. Anything else (a monster's
+    /// concentration spell, modifier 0) ends the old concentration first.
+    /// </summary>
     internal int StartConcentration(Creature c, string label, int modifier, bool deactivates)
     {
+        if (modifier > 0 && c.ConcentrationToken != 0 && c.ConcentrationModifier == modifier)
+        {
+            return c.ConcentrationToken;
+        }
+
         EndConcentration(c, "starts concentrating on something else");
         c.ConcentrationToken = ++_tokens;
         c.ConcentrationModifier = modifier;
@@ -513,8 +531,12 @@ internal sealed partial class Fight
     // Conditions.
     // ------------------------------------------------------------------------------------------------------------------
 
-    /// <summary>Imposes a condition (refused by an immunity); returns whether it landed.</summary>
-    internal bool AddCondition(Creature? source, Creature target, ConditionTemplate template, int concentrationToken, bool quiet = false)
+    /// <summary>
+    /// Imposes a condition (refused by an immunity); returns whether it landed. <paramref name="immunity"/> is the imposing
+    /// effect's <see cref="MonsterAction.ImmunityIndex"/> (−1: none): when this condition ends, the target becomes immune to
+    /// that effect of <paramref name="source"/> (<see cref="RemoveAt"/>).
+    /// </summary>
+    internal bool AddCondition(Creature? source, Creature target, ConditionTemplate template, int concentrationToken, bool quiet = false, int immunity = -1)
     {
         if (target.Dead)
         {
@@ -543,6 +565,7 @@ internal sealed partial class Fight
                 : (source is not null && _active == source.Id ? 1 : 0),
             Template = template,
             ConcentrationToken = concentrationToken,
+            Immunity = source is null ? -1 : immunity,
         });
         target.CondCount[condition]++;
         if (_log is not null && !quiet)
@@ -582,10 +605,17 @@ internal sealed partial class Fight
         _ => "for the fight",
     };
 
+    /// <summary>
+    /// Ends one condition. Every way a condition ends comes through here (its duration, a repeated save, an escape, the
+    /// source's concentration or grapple ending), which is what "the effect ends for it" means for an effect that leaves
+    /// immunity behind (<see cref="ActiveCondition.Immunity"/>).
+    /// </summary>
     private static void RemoveAt(Creature target, int index)
     {
-        target.CondCount[target.Conditions[index].Condition]--;
+        var active = target.Conditions[index];
+        target.CondCount[active.Condition]--;
         target.Conditions.RemoveAt(index);
+        target.BecomeImmuneToEffect(active.Source, active.Immunity);
     }
 
     /// <summary>Removes the conditions with this duration (from this source, and of this condition, when given).</summary>
@@ -649,23 +679,40 @@ internal sealed partial class Fight
     /// <summary>
     /// One target's share of a save effect whose damage was already rolled (shared by every target of an area): the save,
     /// Legendary Resistance, half or none on a success (Evasion: none, and half on a failure), and the condition on a failure.
+    /// <paramref name="immunity"/> is the effect's <see cref="MonsterAction.ImmunityIndex"/> (−1: none): a target immune to
+    /// it is not affected at all, and a success (Legendary Resistance's too) makes it immune. <paramref name="lethal"/>: a
+    /// failure kills it outright instead of dealing the damage or imposing the conditions — the 2024 solar's Slaying Bow on
+    /// a creature with 100 Hit Points or fewer: "it dies. It otherwise takes …" — which Legendary Resistance's "conditions"
+    /// policy treats like a condition that matters. Damaging first would count the damage as dealt and taken and could
+    /// trip Relentless, Undead Fortitude or massive damage before a death that has none. (The 2014 Slaying Longbow's rider
+    /// carries no damage of its own; the hit's damage lands before it, and its threshold is read after that damage.)
     /// </summary>
     private void ResolveSave(Creature source, Creature target, string ability, int dc, string onSuccess, bool magical, int[]? rolled,
-                             ConditionTemplate? condition, int token, string what, ConditionTemplate[]? extra = null)
+                             ConditionTemplate? condition, int token, string what, ConditionTemplate[]? extra = null, int immunity = -1, bool lethal = false)
     {
-        if (target.Dead)
+        if (target.Dead || ShrugsOff(source, target, immunity, what))
         {
             return;
         }
 
         var evasion = Evades(target, ability, onSuccess);
-        var imposes = Imposes(target, condition);
+        var imposes = lethal || Imposes(target, condition);
         foreach (var more in extra ?? [])
         {
             imposes |= Imposes(target, more);
         }
 
         var success = SaveAgainst(target, ability, dc, magical, imposes, rolled, evasion, what);
+        if (success)
+        {
+            target.BecomeImmuneToEffect(source.Id, immunity);
+        }
+        else if (lethal)
+        {
+            Slay(source, target, what);
+            return;
+        }
+
         if (rolled is not null)
         {
             if (!success)
@@ -682,15 +729,59 @@ internal sealed partial class Fight
         {
             if (condition is not null)
             {
-                AddCondition(source, target, condition, token);
+                AddCondition(source, target, condition, token, immunity: immunity);
             }
 
             foreach (var more in extra ?? [])
             {
-                AddCondition(source, target, more, token);
+                AddCondition(source, target, more, token, immunity: immunity);
             }
         }
     }
+
+    /// <summary>Whether <paramref name="target"/> is immune to this effect of <paramref name="source"/> (it succeeded against it, or shook it off, before).</summary>
+    private bool ShrugsOff(Creature source, Creature target, int immunity, string what)
+    {
+        if (!target.IsImmuneToEffect(source.Id, immunity))
+        {
+            return false;
+        }
+
+        if (_log is not null)
+        {
+            _log.Line($"    {target.Label} is immune to {source.Label}'s {what} (it succeeded against it or shook it off before)");
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// An outright kill ("it dies": Power Word Kill at 100 hit points or fewer, a failed save against the solar's Slaying
+    /// Longbow or Slaying Bow): no damage, so no death saves, no massive-damage test, no Relentless, Undead Fortitude or regeneration from
+    /// 0; it counts as a death, and as a kill for the source.
+    /// </summary>
+    private void Slay(Creature source, Creature target, string what)
+    {
+        if (target.Dead)
+        {
+            return;
+        }
+
+        if (_log is not null)
+        {
+            _log.Line($"    {what}: {target.Label} ({target.Hp} HP) dies outright");
+        }
+
+        Die(target, source);
+    }
+
+    /// <summary>
+    /// Whether an action's outright kill (<see cref="StatBlockAction.KillAtOrBelowHp"/>) takes <paramref name="target"/>:
+    /// "If the target has 100 Hit Points or fewer, it dies" reads its hit points, not its temporary ones; a creature at 0
+    /// (dying) has fewer. The harness's infinite-HP dummies are never killed.
+    /// </summary>
+    private static bool KilledOutright(int? killAtOrBelowHp, Creature target) =>
+        killAtOrBelowHp is { } threshold && target.Hp <= threshold && !target.Dead && !target.T.InfiniteHp;
 
     /// <summary>Whether this condition would change something on the target (Legendary Resistance's "conditions" test).</summary>
     private static bool Imposes(Creature target, ConditionTemplate? condition) =>
@@ -706,6 +797,21 @@ internal sealed partial class Fight
         foreach (var part in parts)
         {
             into[part.Type] += RollTerms(part.Dice, crit ? 2 : 1, null, false) + part.Flat;
+        }
+    }
+
+    /// <summary>
+    /// A retaliation trait (a fire elemental's body, Heated Body: "a creature that touches it or hits it with a melee attack
+    /// takes 10 fire damage") after a hit on its owner: ONE rule for both sides' hits, so a party member's blade is burned as
+    /// a monster's claw is. It comes after the hit's own effects (damage, riders, conditions) and before anything the
+    /// attacker does next. <paramref name="melee"/> is how the attack was MADE: a weapon thrown from the back line, or a
+    /// build's attack with the ranged property, is not a melee attack.
+    /// </summary>
+    private void Retaliate(Creature attacker, Creature target, bool melee)
+    {
+        if (melee && target.T.Retaliation is { } retaliation && !attacker.Dead)
+        {
+            TraitDamage(target, attacker, retaliation);
         }
     }
 

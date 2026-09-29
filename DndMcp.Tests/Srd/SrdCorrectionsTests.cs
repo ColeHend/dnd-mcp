@@ -53,7 +53,7 @@ public sealed partial class SrdCorrectionsTests
     [InlineData("2024/trait", 2)]
     [InlineData("2014/spell", 25)]
     [InlineData("2014/magic-item", 7)]
-    [InlineData("2014/monster", 18)]
+    [InlineData("2014/monster", 19)]
     public void Entries_PerEditionAndKind_MatchTheReviewedCount(string editionAndKind, int expected)
     {
         Assert.Equal(expected, Shipped.Entries.Count(e => $"{e.Target.Edition}/{e.Target.Kind}" == editionAndKind));
@@ -431,6 +431,8 @@ public sealed partial class SrdCorrectionsTests
     [InlineData("2014/monster/deep-gnome-svirfneblin", "xp", "100", null)]
     [InlineData("2014/monster/dretch", "xp", "50", null)]
     [InlineData("2014/monster/riding-horse", "xp", "50", null)]
+    // Phase 5 review: blinded listed twice where the SRD gives blinded, deafened, frightened.
+    [InlineData("2014/monster/violet-fungus", "condition_immunities", "{\"index\":\"blinded\",\"name\":\"Blinded\",\"url\":\"/api/2014/conditions/blinded\"},{\"index\":\"deafened\"", null)]
     public void Corrected_Value_HasTheSrdValueAndNotTheDamage(string reference, string property, string present, string? absent)
     {
         var json = Corrected(reference).GetProperty(property).GetRawText();

@@ -12,8 +12,14 @@ public sealed record TargetProfileRow
     /// <summary>A <see cref="DslValues.Profiles"/> value.</summary>
     public required string Profile { get; init; }
 
+    /// <summary>The CR whose row this is (the numbers below are that CR's), as <see cref="TargetProfiles.Row"/> was asked for it.</summary>
     public required ChallengeRating ChallengeRating { get; init; }
 
+    /// <summary>
+    /// The row's AC: the DMG table's for dmg2014; for mm2014 / mm2024 the median AC of that edition's SRD monsters of the
+    /// CR (interpolated where none has it), rounded to the nearest whole number with a half rounded UP (see
+    /// <see cref="TargetProfiles"/>), so a profile never flatters a build by a rounding.
+    /// </summary>
     public required int ArmorClass { get; init; }
 
     /// <summary>The AC is an upper bound, not a typical value (the DMG's CR 0 row, "13 or lower"): the result says so.</summary>
