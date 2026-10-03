@@ -49,6 +49,17 @@ namespace DndMcp.Tools;
 /// read one stat block two ways. It is refused for any other kind of entry, with the formats listed: answering a spell in
 /// another format would let the model take its text for "what the simulator does".
 /// </para>
+/// <para>
+/// <b>Edition defaults</b> (contract §3.7, §9): an omitted <c>edition</c> means the active campaign's ruleset when it is
+/// 2014 or 2024 (<see cref="CampaignService.ReadDefaults"/>), else 2024, and the result then ends with a line naming the
+/// campaign (<see cref="CampaignDefaultNotes"/>), or saying that the campaign's settings could not be read when
+/// campaigns.db exists but failed (a 2014 campaign's lookup otherwise answered in 2024 with nothing said). rules_get's ref-conflict check sees only the caller's own edition, never
+/// the campaign's: a 2024 campaign must not refuse <c>{"ref": "2014/spell/fireball"}</c>, whose own edition wins, as the
+/// conflict message promises ("Leave edition out to use the ref's own"). "both" is never a default (it would double every
+/// rules answer). A lookup error in an edition the campaign chose (no entry by that name or ref, a kind that edition
+/// lacks) ends with the same note, so "Nothing in the 2014 SRD …" says where 2014 came from. With no campaign active, or
+/// an edition given, every answer and error is what it was before campaigns existed.
+/// </para>
 /// </summary>
 public sealed partial class RulesTools
 {
@@ -88,15 +99,17 @@ public sealed partial class RulesTools
     private readonly SrdIndexService _indexService;
     private readonly DndMcpServerOptions _options;
     private readonly StatBlockService _statBlocks;
+    private readonly CampaignService _campaigns;
 
     // Optional string arguments are nullable even where they have a default: models send null for "use the default", the
     // binder accepts it, and a non-nullable schema would make ToolArgumentGuard refuse the call for nothing.
 
-    public RulesTools(SrdIndexService indexService, DndMcpServerOptions options, StatBlockService statBlocks)
+    public RulesTools(SrdIndexService indexService, DndMcpServerOptions options, StatBlockService statBlocks, CampaignService campaigns)
     {
         _indexService = indexService;
         _options = options;
         _statBlocks = statBlocks;
+        _campaigns = campaigns;
     }
 
     // Idempotent and closed-world: the answers are a pure function of the vendored content this binary ships.
@@ -112,7 +125,7 @@ public sealed partial class RulesTools
         "thresholds) are not searched either: rules_get ref \"rules://tables\" lists them.\n" +
         "- query: the words to find. Every word must match; end a word with * for a prefix (fire*). An entry whose name is the " +
         "query comes first. If no entry has every word, entries matching any word are returned and the result says so.\n" +
-        "- edition: \"2024\" (default), \"2014\", or \"both\" to search both SRDs.\n" +
+        "- edition: \"2014\", \"2024\", or \"both\" to search both SRDs; default: the active campaign's ruleset, else 2024.\n" +
         "- kinds: optional filter, e.g. [\"spell\"] or [\"rule\",\"condition\"]. Kinds: ability-score, alignment, background, " +
         "class, condition, damage-type, equipment, equipment-category, feat, feature, language, magic-item, magic-school, " +
         "monster, poison (2024), proficiency, race (2014; species in 2024), rule, skill, species, spell, subclass, subrace, " +
@@ -121,19 +134,35 @@ public sealed partial class RulesTools
         "Example: {\"query\":\"grapple escape\",\"kinds\":[\"rule\",\"condition\"]}")]
     public async Task<string> Search(
         [Description("Words to find, e.g. \"fireball\", \"grapple escape\" or \"fire*\".")] string query,
-        [Description("\"2024\" (default), \"2014\" or \"both\".")] string? edition = SrdEdition.Edition2024,
+        [Description("\"2014\", \"2024\" or \"both\". Default: the active campaign's ruleset, else 2024.")] string? edition = null,
         [Description("Optional kinds to search within, e.g. [\"spell\", \"monster\"]. Omit to search everything.")] string[]? kinds = null,
         [Description("Most entries to return, 1-50. Default 10.")] int limit = DefaultLimit,
         IProgress<ProgressNotificationValue>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        var editions = SearchEditions(edition);
+        var chosen = GetEdition(edition);
+        var campaignNote = (string?)null;
+        if (chosen is null)
+        {
+            (chosen, campaignNote) = CampaignEditionOrNone();
+        }
+
+        var editions = SearchEditions(chosen);
         if (limit is < 1 or > SrdIndex.MaxSearchLimit)
         {
             throw new DndInputException($"limit must be between 1 and {SrdIndex.MaxSearchLimit} (got {limit}).");
         }
 
-        var kindFilter = KindFilter(kinds, editions);
+        IReadOnlyList<string>? kindFilter;
+        try
+        {
+            kindFilter = KindFilter(kinds, editions);
+        }
+        catch (DndInputException ex) when (campaignNote is not null)
+        {
+            throw InCampaignEdition(ex, campaignNote);
+        }
+
         CheckQueryBounds(query);
         if (Fts5Query.Terms(query) is null)
         {
@@ -143,7 +172,7 @@ public sealed partial class RulesTools
         }
 
         return await QueryAsync(
-            index => FormatSearch(query, editions, kindFilter, limit, index.Search(query, editions, kindFilter, limit)),
+            index => FormatSearch(query, editions, kindFilter, limit, index.Search(query, editions, kindFilter, limit), campaignNote),
             progress,
             cancellationToken);
     }
@@ -169,7 +198,7 @@ public sealed partial class RulesTools
         "Optional:\n" +
         "- kind: which kind of entry a name means when several share it, e.g. name \"Shield\" with kind \"magic-item\". Without " +
         "it the likeliest is shown (the spell) and the others are listed.\n" +
-        "- edition: \"2024\" (default), \"2014\", or \"both\" to compare. A ref's own edition is used when edition is omitted.\n" +
+        "- edition: \"2014\", \"2024\" or \"both\" to compare; default: a ref's own edition, else the active campaign's ruleset, else 2024.\n" +
         "- format: " + SrdMarkdown.FormatsText + ".\n" +
         "When nothing matches, the error lists close names and whether the other edition has the entry.\n" +
         "Example: {\"name\":\"grappled\",\"edition\":\"both\"}")]
@@ -177,7 +206,7 @@ public sealed partial class RulesTools
         [Description("An entry's ref, e.g. \"2024/spell/fireball\" or \"spell/fireball\". Give ref or name, not both.")] string? @ref = null,
         [Description("An entry's name, e.g. \"Fireball\". Give ref or name, not both.")] string? name = null,
         [Description("Optional kind for name, e.g. \"spell\", \"monster\", \"magic-item\", \"rule\".")] string? kind = null,
-        [Description("\"2024\" (default), \"2014\" or \"both\" (compare the editions).")] string? edition = null,
+        [Description("\"2014\", \"2024\" or \"both\" (compare the editions). Default: a ref's own edition, else the active campaign's ruleset, else 2024.")] string? edition = null,
         [Description("\"concise\" (default), \"full\" (adds the raw SRD JSON) or \"combatant\" (a monster as balance_simulate reads it).")]
         string? format = SrdMarkdown.Concise,
         IProgress<ProgressNotificationValue>? progress = null,
@@ -227,11 +256,16 @@ public sealed partial class RulesTools
         IProgress<ProgressNotificationValue>? progress,
         CancellationToken cancellationToken)
     {
+        // The edition a ref without one is read in: the caller's (2024 for "both"), else the active campaign's, else 2024.
+        // Only the caller's edition ever reaches the conflict check below.
+        var (defaultEdition, campaignNote) = edition is null
+            ? CampaignEdition()
+            : (edition is SrdEdition.Edition2014 ? SrdEdition.Edition2014 : SrdEdition.Edition2024, null);
         SrdRef reference;
         bool editionGiven;
         try
         {
-            reference = ParseRef(refText, edition is SrdEdition.Edition2014 ? SrdEdition.Edition2014 : SrdEdition.Edition2024, out editionGiven);
+            reference = ParseRef(refText, defaultEdition, out editionGiven);
         }
         catch (RefKindInOtherEditionException moved)
         {
@@ -250,14 +284,16 @@ public sealed partial class RulesTools
             throw await EditionConflictAsync(reference, edition, progress, cancellationToken);
         }
 
+        // The campaign decided only when the ref named no edition of its own.
+        var trailer = editionGiven ? null : campaignNote;
         return await QueryAsync(
             index =>
             {
-                var doc = index.Get(reference) ?? throw RefNotFound(index, reference);
+                var doc = index.Get(reference) ?? throw InCampaignEdition(RefNotFound(index, reference), trailer);
                 CheckFormatFits(doc, format);
                 return edition == Both
                     ? Compare(index, doc, format, alsoNamed: null, typedName: null, Combatants(index))
-                    : SrdMarkdown.Format(doc, format, index, combatant: Combatants(index));
+                    : SrdMarkdown.Format(doc, format, index, trailer, combatant: Combatants(index));
             },
             progress,
             cancellationToken);
@@ -279,9 +315,19 @@ public sealed partial class RulesTools
         }
 
         // A name lookup runs in one edition. "both" looks in 2024 first; FindByName's other-edition matches then supply the
-        // 2014 entry when 2024 has none, so a 2014-only entry still compares.
-        var lookupEdition = edition == SrdEdition.Edition2014 ? SrdEdition.Edition2014 : SrdEdition.Edition2024;
-        var kindInEdition = kind is null ? null : KindForNameLookup(kind, lookupEdition, edition == Both);
+        // 2014 entry when 2024 has none, so a 2014-only entry still compares. No edition: the active campaign's, else 2024.
+        var (lookupEdition, campaignNote) = edition is null
+            ? CampaignEdition()
+            : (edition == SrdEdition.Edition2014 ? SrdEdition.Edition2014 : SrdEdition.Edition2024, null);
+        string? kindInEdition;
+        try
+        {
+            kindInEdition = kind is null ? null : KindForNameLookup(kind, lookupEdition, edition == Both);
+        }
+        catch (DndInputException ex) when (campaignNote is not null)
+        {
+            throw InCampaignEdition(ex, campaignNote);
+        }
 
         return await QueryAsync(
             index =>
@@ -295,7 +341,7 @@ public sealed partial class RulesTools
 
                 if (matches.Count == 0)
                 {
-                    throw NameNotFound(index, name, lookupEdition, kindInEdition, edition == Both, lookup);
+                    throw InCampaignEdition(NameNotFound(index, name, lookupEdition, kindInEdition, edition == Both, lookup), campaignNote);
                 }
 
                 var best = matches[0];
@@ -306,11 +352,48 @@ public sealed partial class RulesTools
                 return edition == Both
                     ? Compare(index, best.Document, format, alsoNamed, typedName: best.MatchedAlias ?? name, Combatants(index))
                     : SrdMarkdown.Format(
-                        best.Document, format, index, alsoNamed, HeadingNote(best.Document, best.MatchedAlias ?? name), Combatants(index));
+                        best.Document, format, index, Trailer(alsoNamed, campaignNote), HeadingNote(best.Document, best.MatchedAlias ?? name),
+                        Combatants(index));
             },
             progress,
             cancellationToken);
     }
+
+    /// <summary>
+    /// The edition an omitted <c>edition</c> means: the active campaign's ruleset (2014 or 2024) with the note naming it, else
+    /// 2024 with no note, or with the note that the campaign's settings could not be read when campaigns.db exists but
+    /// failed (<see cref="CampaignDefaultNotes.Unreadable"/>). Read only when the call left edition out, so an explicit
+    /// edition never touches campaigns.db.
+    /// </summary>
+    private (string Edition, string? Note) CampaignEdition()
+    {
+        var (edition, note) = CampaignEditionOrNone();
+        return (edition ?? SrdEdition.Edition2024, note);
+    }
+
+    // The campaign's 2014/2024 ruleset and its note; else no edition, with the unreadable note when campaigns.db failed.
+    private (string? Edition, string? Note) CampaignEditionOrNone()
+    {
+        var reading = _campaigns.ReadDefaults();
+        if (reading.Edition is { } edition)
+        {
+            return (edition, CampaignDefaultNotes.Edition(edition, reading.Values!.Slug));
+        }
+
+        return (null, reading.UnreadablePath is { } path ? CampaignDefaultNotes.Unreadable(path, SrdEdition.Edition2024) : null);
+    }
+
+    /// <summary>
+    /// <paramref name="error"/> with the campaign's edition note after it when the campaign, not the call, chose the edition
+    /// the lookup failed in; otherwise the same exception. "Nothing in the 2014 SRD is named …" answers a call that sent no
+    /// edition, so without the note the model cannot tell why 2014 was searched, or that passing an edition is the fix.
+    /// </summary>
+    private static DndInputException InCampaignEdition(DndInputException error, string? campaignNote) =>
+        campaignNote is null ? error : new DndInputException($"{error.Message} {campaignNote}", error);
+
+    // The notes kept whole after a document: "Also named …", then the campaign's edition note.
+    private static string? Trailer(string? alsoNamed, string? campaignNote) =>
+        alsoNamed is null ? campaignNote : campaignNote is null ? alsoNamed : alsoNamed + "\n\n" + campaignNote;
 
     // SrdIndexService.QueryAsync reopens the index once when srd.db was deleted or replaced under the running server.
     private Task<T> QueryAsync<T>(
@@ -1032,8 +1115,9 @@ public sealed partial class RulesTools
         return normalized;
     }
 
+    // The edition already checked by GetEdition (and filled from the campaign when omitted); null is 2024.
     private static IReadOnlyList<string> SearchEditions(string? edition) =>
-        GetEdition(edition) switch
+        edition switch
         {
             null or SrdEdition.Edition2024 => [SrdEdition.Edition2024],
             SrdEdition.Edition2014 => [SrdEdition.Edition2014],
@@ -1079,6 +1163,19 @@ public sealed partial class RulesTools
 
     // The host's cached normalizer, reading spells through this index.
     private Func<SrdDocument, Domain.Simulation.StatBlock> Combatants(SrdIndex index) => doc => _statBlocks.Normalize(doc, index);
+
+    /// <param name="campaignNote">The line saying the active campaign chose the edition, last; null when it did not.</param>
+    private static string FormatSearch(
+        string query,
+        IReadOnlyList<string> editions,
+        IReadOnlyList<string>? kinds,
+        int limit,
+        SrdSearchResult result,
+        string? campaignNote)
+    {
+        var text = FormatSearch(query, editions, kinds, limit, result);
+        return campaignNote is null ? text : text + "\n\n" + campaignNote;
+    }
 
     private static string FormatSearch(
         string query,

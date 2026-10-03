@@ -21,7 +21,8 @@ namespace DndMcp.Domain.Simulation;
 /// <b>Overrides.</b> The simulator lays the entry's own fields over the expansion (<c>SimulationPreparation</c>):
 /// <c>name</c>, <c>hp</c>, <c>ac</c>, <c>position</c>, <c>count</c>, <c>initiative_bonus</c>, <c>death_saves</c> replace the
 /// archetype's; <c>saves</c> replace it per ability; <c>save_proficiencies</c> replace the archetype's proficiencies (and
-/// with them any computed save such as the aura). The entry's <c>edition</c>, or else the fight's, picks the rules.
+/// with them any computed save such as the aura). The entry's <c>edition</c>, or else the fight's, picks the rules (with a
+/// campaign active the host fills an entry's edition first; see <see cref="Expand"/>).
 /// </para>
 /// </summary>
 public static class PartyArchetypes
@@ -30,7 +31,14 @@ public static class PartyArchetypes
     public static IReadOnlyList<string> Names => ArchetypeCatalog.Names;
 
     /// <summary>The archetype at a level as a full combatant: a build, hit points, AC, save proficiencies and position.</summary>
-    /// <param name="edition">"2014" or "2024"; null means 2024 (the simulator passes the fight's edition when the entry has none).</param>
+    /// <param name="edition">
+    /// "2014" or "2024"; null means 2024. The simulator passes the entry's edition, else the fight's. With a 2014 or 2024
+    /// campaign active the host has already given an entry that names none the fight's edition, else the first party
+    /// entry's, else the campaign's ruleset (the host's <c>CampaignEditionFill</c>), so null does not reach here. With none
+    /// active the host fills nothing, and a first party entry's edition never reaches an archetype entry: null arrives
+    /// whenever neither the entry nor the fight names an edition (even beside a party build that names 2014), and 2024 is
+    /// then the same last resort the rules tools use.
+    /// </param>
     /// <exception cref="DndInputException">
     /// The archetype is not one of <see cref="Names"/> (the message lists them), the level is outside 1–20, or the edition is
     /// unknown — all in one message, without an item prefix (the simulator adds "party item 2 (…): ").

@@ -357,7 +357,8 @@ internal static class EncounterMarkdown
 
     private static string? Notes(EncounterReport report)
     {
-        var notes = report.Entries.SelectMany(e => e.Notes).Distinct(StringComparer.Ordinal).ToList();
+        // What the campaign decided comes first: it says which rules and levels every number above was computed for.
+        var notes = report.CampaignNotes.Concat(report.Entries.SelectMany(e => e.Notes)).Distinct(StringComparer.Ordinal).ToList();
         if (report.For2014 is null && report.Entries.Any(e => e.Exclude))
         {
             notes.Add("exclude changes only the 2014 multiplier's count; the 2024 method counts every creature's XP.");
@@ -476,7 +477,14 @@ internal sealed record EncounterReport(
     IReadOnlyList<string> Editions,
     IReadOnlyList<EncounterEntry> Entries,
     Edition2014Report? For2014,
-    Edition2024Report? For2024);
+    Edition2024Report? For2024)
+{
+    /// <summary>
+    /// The notes saying the active campaign supplied the edition or the level offset (<see cref="CampaignDefaultNotes"/>),
+    /// shown first among the notes; empty when the call gave both or no campaign is active.
+    /// </summary>
+    public IReadOnlyList<string> CampaignNotes { get; init; } = [];
+}
 
 /// <summary>
 /// One monsters item as resolved: a display name (its first edition's stat block, or its label), how many, whether 2014

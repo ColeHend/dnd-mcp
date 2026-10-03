@@ -176,7 +176,7 @@ public sealed class PartyArchetypesTests
     [Theory]
     [InlineData("necromancer", 5, null, "party item 1 (necromancer): archetype \"necromancer\" is not a party archetype; archetypes are fighter, barbarian, paladin, ranger, rogue, monk, cleric, druid, wizard, sorcerer, warlock, bard")]
     [InlineData("fighter", 21, null, "party item 1 (fighter): level 21 is not a character level; archetypes exist at levels 1-20.")]
-    [InlineData("fighter", 5, "3.5", "party item 1 (fighter): edition \"3.5\" is not an edition; give \"2014\" or \"2024\" (default \"2024\").")]
+    [InlineData("fighter", 5, "3.5", "party item 1 (fighter): edition \"3.5\" is not an edition; give \"2014\" or \"2024\" (left out: the fight's edition; else, with a 2014 or 2024 campaign active, the first party entry's, else the campaign's; else \"2024\").")]
     public void Refusals_NameTheItemAndSayWhatIsAccepted(string archetype, int level, string? edition, string expected)
     {
         var spec = SimKit.Spec([new SimulationCombatant(new CombatantSpec { Archetype = archetype, Level = level, Edition = edition })], [SimKit.Monster(TestStatBlocks.Ogre)]);

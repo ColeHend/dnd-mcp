@@ -19,8 +19,12 @@ namespace DndMcp.Domain.Simulation;
 /// <c>encounter_difficulty</c>) into a <see cref="StatBlock"/>, which reaches the Domain beside this spec in
 /// <see cref="SimulationCombatant"/>. The Domain never looks a name up.
 /// </para>
+/// <para>
+/// <b>A record, for <c>with</c> only</b>, as <see cref="BuildSpec"/>: the host fills an archetype's edition from the active
+/// campaign's ruleset by copying the entry. The published schema is unchanged (a sealed record adds no public property).
+/// </para>
 /// </summary>
-public sealed class CombatantSpec
+public sealed record CombatantSpec
 {
     [Description("A label (default: the build's or monster's name). Copies get \" 2\", \" 3\"...")]
     public string? Name { get; init; }

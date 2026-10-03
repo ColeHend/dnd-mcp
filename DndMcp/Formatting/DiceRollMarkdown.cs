@@ -32,7 +32,13 @@ internal static class DiceRollMarkdown
     /// <summary>Room kept for a group's closing "…+N more = S]".</summary>
     private const int SummaryReserve = 32;
 
-    public static string Format(DiceExpression expression, IReadOnlyList<DiceRoll> rolls, string? label, string source)
+    /// <param name="logNote">
+    /// What happened to the roll in the campaign log ("Logged to belmakor, session 12.", "Not logged: …"), or null when
+    /// there is nothing to say. It is the LAST line, after the randomness line: a result read top down still gives the dice
+    /// first, and the lines the existing layout pins (first line the roll, the legend second to last before the source)
+    /// keep their places whenever there is no note.
+    /// </param>
+    public static string Format(DiceExpression expression, IReadOnlyList<DiceRoll> rolls, string? label, string source, string? logNote = null)
     {
         var output = new StringBuilder();
         var markers = new Markers();
@@ -93,6 +99,11 @@ internal static class DiceRollMarkdown
         }
 
         output.Append("_Randomness: ").Append(source).Append("._");
+        if (logNote is not null)
+        {
+            output.AppendLine().Append(logNote);
+        }
+
         return output.ToString();
     }
 

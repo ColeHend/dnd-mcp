@@ -813,13 +813,49 @@ public sealed class SrdIndexServiceTests
         {
             var dataDirectory = server.Services.GetRequiredService<DndMcpServerOptions>().ResolveDataDirectory();
 
-            Assert.Equal(McpServerHarness.DataDirectory, dataDirectory);
+            Assert.Equal(server.DataDirectory, dataDirectory);
+            Assert.StartsWith(McpServerHarness.DataRoot + Path.DirectorySeparatorChar, dataDirectory, StringComparison.Ordinal);
             Assert.StartsWith(AppContext.BaseDirectory, dataDirectory, StringComparison.Ordinal);
         }
         finally
         {
             await server.DisposeAsync();
         }
+    }
+
+    [Fact]
+    public async Task Harness_TwoInstances_NeverShareADataDirectory()
+    {
+        // A shared data directory would let one test class's active campaign change another's edition defaults.
+        var first = new McpServerHarness();
+        var second = new McpServerHarness();
+        await first.InitializeAsync();
+        await second.InitializeAsync();
+        try
+        {
+            var firstData = first.Services.GetRequiredService<DndMcpServerOptions>().ResolveDataDirectory();
+            var secondData = second.Services.GetRequiredService<DndMcpServerOptions>().ResolveDataDirectory();
+
+            Assert.NotEqual(firstData, secondData);
+        }
+        finally
+        {
+            await first.DisposeAsync();
+            await second.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Harness_Dispose_DeletesItsDataDirectory()
+    {
+        var server = new McpServerHarness();
+        await server.InitializeAsync();
+        Directory.CreateDirectory(server.DataDirectory);
+        await File.WriteAllTextAsync(Path.Combine(server.DataDirectory, "left-behind.txt"), "x");
+
+        await server.DisposeAsync();
+
+        Assert.False(Directory.Exists(server.DataDirectory));
     }
 
     [Fact]
@@ -831,12 +867,80 @@ public sealed class SrdIndexServiceTests
         Assert.Equal(Path.Combine(home, ".local", "share", "dnd-mcp"), options.ResolveDataDirectory());
     }
 
+    [Fact]
+    public void ResolveCampaignDatabasePath_NothingSet_IsTheEnvironmentsDataDirectoryCampaignsDb()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "dnd-mcp-home");
+        var options = new DndMcpServerOptions { Paths = () => new DndMcpPaths(_ => null, home) };
+
+        Assert.Equal(Path.Combine(home, ".local", "share", "dnd-mcp", "campaigns.db"), options.ResolveCampaignDatabasePath());
+    }
+
+    [Fact]
+    public void ResolveCampaignDatabasePath_DndMcpDbSet_IsThatFile()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "dnd-mcp-home");
+        var database = Path.Combine(Path.GetTempPath(), "elsewhere", "mine.db");
+        var options = new DndMcpServerOptions
+        {
+            Paths = () => new DndMcpPaths(v => v == DndMcpPaths.CampaignDatabaseVariable ? database : null, home),
+        };
+
+        Assert.Equal(database, options.ResolveCampaignDatabasePath());
+    }
+
+    [Fact]
+    public void ResolveCampaignDatabasePath_DataDirectorySet_WinsOverDndMcpDb()
+    {
+        // The in-memory harness sets DataDirectory; a developer's exported DND_MCP_DB must never reach a test.
+        var home = Path.Combine(Path.GetTempPath(), "dnd-mcp-home");
+        var data = Path.Combine(Path.GetTempPath(), "dnd-mcp-test-data");
+        var options = new DndMcpServerOptions
+        {
+            DataDirectory = data,
+            Paths = () => new DndMcpPaths(v => v == DndMcpPaths.CampaignDatabaseVariable ? "/real/campaigns.db" : null, home),
+        };
+
+        Assert.Equal(Path.Combine(data, "campaigns.db"), options.ResolveCampaignDatabasePath());
+    }
+
+    [Fact]
+    public void ResolveCampaignDatabasePath_CampaignDatabaseSet_WinsOverEverything()
+    {
+        var shared = Path.Combine(Path.GetTempPath(), "shared", "campaigns.db");
+        var options = new DndMcpServerOptions
+        {
+            DataDirectory = Path.Combine(Path.GetTempPath(), "dnd-mcp-test-data"),
+            CampaignDatabase = shared,
+        };
+
+        Assert.Equal(shared, options.ResolveCampaignDatabasePath());
+    }
+
+    [Fact]
+    public async Task Harness_CampaignDatabase_LivesInTheHarnessDataDirectory()
+    {
+        var server = new McpServerHarness();
+        await server.InitializeAsync();
+        try
+        {
+            var path = server.Services.GetRequiredService<DndMcpServerOptions>().ResolveCampaignDatabasePath();
+
+            Assert.Equal(Path.Combine(server.DataDirectory, "campaigns.db"), path);
+        }
+        finally
+        {
+            await server.DisposeAsync();
+        }
+    }
+
     [Theory]
-    // A variable whose directory the options set is not consulted, so its warning would only mislead.
-    [InlineData(true, false, new[] { "DND_MCP_DATA_DIR" })]
+    // A variable whose directory the options set is not consulted, so its warning would only mislead. An explicit data
+    // directory also decides campaigns.db, so it silences DND_MCP_DB's warning too.
+    [InlineData(true, false, new[] { "DND_MCP_DATA_DIR", "DND_MCP_DB" })]
     [InlineData(false, true, new[] { "DND_MCP_CACHE_DIR" })]
     [InlineData(true, true, new string[0])]
-    [InlineData(false, false, new[] { "DND_MCP_CACHE_DIR", "DND_MCP_DATA_DIR" })]
+    [InlineData(false, false, new[] { "DND_MCP_CACHE_DIR", "DND_MCP_DATA_DIR", "DND_MCP_DB" })]
     public void PathWarnings_RelativeOverrides_WarnOnlyForTheDirectoriesTheEnvironmentDecides(bool cacheSet, bool dataSet, string[] warned)
     {
         var options = new DndMcpServerOptions

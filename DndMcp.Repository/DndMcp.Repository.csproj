@@ -20,6 +20,21 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
   </ItemGroup>
 
+  <!-- ILogger only (no logging implementation): CampaignDatabase reports failed daily backups, a journal mode that is not
+       WAL and backup-retention failures as warnings, because none of them may block a write. The host already uses
+       10.0.12 through Microsoft.Extensions.Hosting, so this adds no second version. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.12" />
+  </ItemGroup>
+
+  <!-- campaigns.db's schema ships inside the assembly as NNNN_name.sql resources, so the migrator can never run against a
+       migration set that differs from the code that reads the tables (loose files next to a single-file publish can be
+       stale or missing). The logical name is fixed, not derived from the folder, so a file move cannot silently drop a
+       migration from the set CampaignDbMigrator discovers. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Campaign\Migrations\*.sql" LogicalName="DndMcp.Repository.Campaign.Migrations.%(Filename)%(Extension)" />
+  </ItemGroup>
+
   <!-- The index builder's pairing and aliasing internals (SrdCounterparts.Match, IndexedDocument) are pinned directly
        by unit tests, the same arrangement as Domain's numerical internals. -->
   <ItemGroup>

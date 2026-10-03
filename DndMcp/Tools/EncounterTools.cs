@@ -40,6 +40,16 @@ namespace DndMcp.Tools;
 /// targets resolve names exactly as this tool does, through <see cref="StatBlockService"/>; only the wording around it
 /// (<see cref="Wording"/>: "monsters item N", a CR as the fallback) is this tool's.
 /// </para>
+/// <para>
+/// <b>Campaign defaults</b> (contract §3.7, §9): an omitted <c>edition</c> is the active campaign's ruleset (2014 or 2024;
+/// a mixed campaign gives none), else 2024; an omitted <c>effective_level_offset</c> is the campaign's
+/// <c>settings.effective_level_offset</c>, else 0. Each value the campaign supplied gets a note naming the campaign
+/// (<see cref="CampaignDefaultNotes"/>), because the call alone no longer says which rules or levels the answer used; when
+/// campaigns.db exists but could not be read, one note says so and what was used instead. An
+/// explicit value always wins, 0 included: "book levels only" must stay expressible in a campaign whose table runs a
+/// level hot. The schema says <c>"default": null</c> for both, since a published default cannot follow a campaign that
+/// changes between calls. <c>party: "campaign"</c> waits for Phase 7 (character sheets carry the levels).
+/// </para>
 /// </summary>
 public sealed class EncounterTools
 {
@@ -52,10 +62,12 @@ public sealed class EncounterTools
         "Example: {\"party\": [5, 5, 5, 5], \"monsters\": [{\"name\": \"Ogre\", \"count\": 3}], \"edition\": \"both\"}.";
 
     private readonly SrdIndexService _indexService;
+    private readonly CampaignService _campaigns;
 
-    public EncounterTools(SrdIndexService indexService)
+    public EncounterTools(SrdIndexService indexService, CampaignService campaigns)
     {
         _indexService = indexService;
+        _campaigns = campaigns;
     }
 
     // Idempotent and closed-world: a pure function of the arguments and the vendored content this binary ships.
@@ -72,9 +84,10 @@ public sealed class EncounterTools
         "  - cr: for a monster not in the SRD (most of the Monster Manual), \"1/4\" or \"13\", with name as its label;\n" +
         "  - count (default 1); exclude (2014: leave a far weaker monster out of the multiplier's count); lair (2024: " +
         "the stat block's in-lair XP; with cr, the next CR's XP).\n" +
-        "- edition: \"2024\" (default), \"2014\" or \"both\".\n" +
+        "- edition: \"2014\", \"2024\" or \"both\"; default: the active campaign's ruleset, else 2024.\n" +
         "- effective_level_offset: optional whole number, e.g. 1 for a party that fights like one level higher (a strong " +
-        "party or house rules); the result then shows both the book label and the effective-level label.\n" +
+        "party or house rules); the result then shows both the book label and the effective-level label. Default: the " +
+        "active campaign's effective_level_offset setting, else 0.\n" +
         "The tables themselves: rules_get with ref \"rules://tables\" lists them (XP by CR, 2024 budget, 2014 thresholds, " +
         "multipliers, adventuring-day XP, DMG monster statistics by CR).\n" +
         Examples)]
@@ -84,23 +97,58 @@ public sealed class EncounterTools
             "The monsters: [{\"name\": \"Ogre\", \"count\": 3}], [{\"ref\": \"2014/monster/goblin\", \"count\": 6}] or " +
             "[{\"cr\": \"5\", \"name\": \"Homebrew brute\"}].")]
         EncounterMonsterInput[] monsters,
-        [Description("\"2024\" (default), \"2014\" or \"both\".")] string? edition = SrdEdition.Edition2024,
-        [Description("Optional levels to add to every character for an effective-level reading, -10 to 10, e.g. 1. Default 0.")]
-        [AIParameterName("effective_level_offset")] int effectiveLevelOffset = 0,
+        [Description("\"2014\", \"2024\" or \"both\". Default: the active campaign's ruleset, else 2024.")] string? edition = null,
+        [Description("Optional levels to add to every character for an effective-level reading, -10 to 10, e.g. 1. Default: the active campaign's effective_level_offset setting, else 0.")]
+        [AIParameterName("effective_level_offset")] int? effectiveLevelOffset = null,
         IProgress<ProgressNotificationValue>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        var editions = Editions(edition);
+        var campaignNotes = new List<string>();
+        var editionGiven = !string.IsNullOrWhiteSpace(edition);
+        var editions = Editions(editionGiven ? edition : null);
         var levels = party ?? [];
         EncounterLimits.ValidateParty(levels);
-        EncounterLimits.ValidateOffset(effectiveLevelOffset);
+        if (effectiveLevelOffset is { } given)
+        {
+            EncounterLimits.ValidateOffset(given);
+        }
+
         var requests = Requests(monsters);
+
+        // Read campaigns.db only for what the call left out, after every argument check.
+        var offset = effectiveLevelOffset ?? 0;
+        if (!editionGiven || effectiveLevelOffset is null)
+        {
+            var reading = _campaigns.ReadDefaults();
+            if (reading.Values is { } defaults)
+            {
+                if (!editionGiven && reading.Edition is { } campaignEdition)
+                {
+                    editions = Editions(campaignEdition);
+                    campaignNotes.Add(CampaignDefaultNotes.Edition(campaignEdition, defaults.Slug));
+                }
+
+                if (effectiveLevelOffset is null && defaults.EffectiveLevelOffset is { } campaignOffset and not 0)
+                {
+                    offset = campaignOffset;
+                    campaignNotes.Add(CampaignDefaultNotes.LevelOffset(campaignOffset, defaults.Slug));
+                }
+            }
+            else if (reading.UnreadablePath is { } path)
+            {
+                // campaigns.db exists but failed: say what was used for each value the campaign would have decided.
+                campaignNotes.Add(CampaignDefaultNotes.Unreadable(path,
+                    !editionGiven && effectiveLevelOffset is null ? "2024 and no effective_level_offset"
+                    : !editionGiven ? SrdEdition.Edition2024
+                    : "no effective_level_offset"));
+            }
+        }
 
         var entries = requests.Any(r => r.NeedsIndex)
             ? await _indexService.QueryAsync(index => Resolve(requests, editions, index), progress, cancellationToken)
             : Resolve(requests, editions, index: null);
 
-        var effective = effectiveLevelOffset == 0 ? null : EffectiveParty.Of(levels, effectiveLevelOffset);
+        var effective = offset == 0 ? null : EffectiveParty.Of(levels, offset);
 
         Edition2014Report? for2014 = null;
         Edition2024Report? for2024 = null;
@@ -122,9 +170,10 @@ public sealed class EncounterTools
                 Encounter2024.Troubleshoot(levels, monsters2024));
         }
 
-        return EncounterMarkdown.Format(new EncounterReport(levels, effective, editions, entries, for2014, for2024));
+        return EncounterMarkdown.Format(new EncounterReport(levels, effective, editions, entries, for2014, for2024) { CampaignNotes = campaignNotes });
     }
 
+    // A blank or omitted edition is 2024 here: the campaign's default is applied by the caller, after the argument checks.
     private static IReadOnlyList<string> Editions(string? edition)
     {
         var value = string.IsNullOrWhiteSpace(edition) ? SrdEdition.Edition2024 : edition.Trim().ToLowerInvariant();

@@ -97,7 +97,11 @@ public static class ArchetypeCatalog
         var canonicalEdition = V.Editions.Default;
         if (edition is not null && !V.Editions.Set.TryMatch(edition, out canonicalEdition))
         {
-            problems.Add($"edition \"{DslText.Echo(edition)}\" is not an edition; give \"2014\" or \"2024\" (default \"2024\").");
+            // Not "(default "2024")": left out, an entry's edition is the fight's; with a 2014 or 2024 campaign active the host
+            // fills the rest before this runs, from the first party entry's edition, else the campaign's ruleset
+            // (CampaignEditionFill); 2024 is only what is left when none of those says. The order is balance_simulate's.
+            problems.Add($"edition \"{DslText.Echo(edition)}\" is not an edition; give \"2014\" or \"2024\" (left out: the fight's edition; " +
+                         "else, with a 2014 or 2024 campaign active, the first party entry's, else the campaign's; else \"2024\").");
             canonicalEdition = V.Editions.Default;
         }
 

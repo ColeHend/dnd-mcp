@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text.Json;
 using DndMcp.Domain.Core;
 using DndMcp.Hosting;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
@@ -35,10 +36,18 @@ public sealed class TestOnlyTools
 
     [McpServerTool(Name = "throw_on_demand", Title = "Throw on demand (test only)", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description("Test only: throws the exception named by kind.")]
-    public string ThrowOnDemand([Description("invalid_operation, argument, overflow, json or input.")] string kind)
+    public string ThrowOnDemand([Description("invalid_operation, argument, overflow, json, input, sqlite_busy, sqlite_corrupt or sqlite_notadb.")] string kind)
     {
         switch (kind)
         {
+            // What srd.db can raise under a rules tool: SQLite codes the campaign store maps to "campaigns.db is locked /
+            // damaged / not a database", which must stay the generic error from any tool that is not a campaign tool.
+            case "sqlite_busy":
+                throw new SqliteException(SecretDetail, 5);
+            case "sqlite_corrupt":
+                throw new SqliteException(SecretDetail, 11);
+            case "sqlite_notadb":
+                throw new SqliteException(SecretDetail, 26);
             case "invalid_operation":
                 throw new InvalidOperationException(SecretDetail);
             case "argument":

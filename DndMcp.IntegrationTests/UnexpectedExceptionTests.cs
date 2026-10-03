@@ -1,6 +1,9 @@
 using System.Text.Json;
 using DndMcp.Domain.Core;
+using DndMcp.Hosting;
 using DndMcp.IntegrationTests.Infrastructure;
+using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol;
 using Xunit;
 
@@ -43,6 +46,28 @@ public sealed class UnexpectedExceptionTests : IClassFixture<TestOnlyToolsServer
         // Not only the text block: nothing anywhere in the result (structured content, _meta) may carry it.
         var wholeResult = JsonSerializer.Serialize(result, McpJsonUtilities.DefaultOptions);
         Assert.DoesNotContain("secret", wholeResult, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// A SqliteException from a tool that is not a campaign tool (srd.db's, under a rules tool) stays the generic error,
+    /// even once campaigns.db's path is resolved and the same exception from a campaign tool would be mapped. The call-tool
+    /// filter gives the campaign store's message ("campaigns.db at … is damaged …", FH1) only for the campaign tools: from
+    /// any other tool it would send the user to repair a file that is fine, while the broken one goes unnamed.
+    /// </summary>
+    [Theory]
+    [InlineData("sqlite_busy")]
+    [InlineData("sqlite_corrupt")]
+    [InlineData("sqlite_notadb")]
+    public async Task CallTool_SqliteExceptionFromANonCampaignTool_ReturnsOnlyTheGenericTextNeverCampaignsDbs(string kind)
+    {
+        await _server.CallToolJsonAsync("campaign", """{"action": "list"}""");
+        var code = kind switch { "sqlite_busy" => 5, "sqlite_corrupt" => 11, _ => 26 };
+        Assert.True(_server.Services.GetRequiredService<CampaignService>().TryMapStoreFailure(new SqliteException("from a campaign tool", code), out _),
+            "campaigns.db's path is not resolved, so nothing would be mapped and this test could not fail.");
+
+        var result = await _server.Client.CallToolAsync(Tool, new Dictionary<string, object?> { ["kind"] = kind });
+
+        Assert.Equal($"An error occurred invoking '{Tool}'.", _server.ErrorText(result));
     }
 
     [Fact]

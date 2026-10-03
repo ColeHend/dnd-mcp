@@ -1,8 +1,10 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using DndMcp.Domain.Core;
 using DndMcp.Domain.Dice;
 using DndMcp.Domain.Features;
 using DndMcp.IntegrationTests.Infrastructure;
+using DndMcp.Repository.Campaign;
 using ModelContextProtocol;
 using Xunit;
 
@@ -19,13 +21,31 @@ namespace DndMcp.IntegrationTests;
 /// (drop it and every domain message vanishes), and <c>ToolArgumentGuard</c> (drop it and missing or mistyped
 /// arguments die in the SDK's binder). The expected texts here are exact so either regression fails a test.
 /// </para>
+/// <para>
+/// A third translation is the campaign tools' own: <see cref="CampaignStoreUnavailableException"/>, campaigns.db unusable
+/// for a reason the user can fix (from a newer dnd-mcp, locked, read-only, damaged), whose message names the file and what
+/// to do. The call-tool filter translates it for the tools, and a get-prompt and a read-resource filter repeat that for
+/// the prompts and the campaign:// resources, which the call-tool filter never sees. Each fails silently too (the SDK's
+/// bare error, and the user is never told to update), so each is pinned here against a campaigns.db from a newer version.
+/// The same message is owed when a read statement, not the open, meets the failure (a damaged page, another process's
+/// lock past the busy timeout): the filters map such a SqliteException through the store's own mapping, for the campaign
+/// tools, the prompts and the campaign:// resources only (any other tool's SQLite failure is srd.db's), pinned against a
+/// campaigns.db with one damaged table page.
+/// </para>
+/// <para>
+/// The class fixture's server has no campaigns (and must never make campaigns.db); the campaign rows that need one to
+/// exist, to get past "There are no campaigns yet" to a tool's own checks, use <see cref="OneCampaignServer"/>, and the
+/// unusable-store rows use <see cref="NewerCampaignsDatabaseServer"/> and <see cref="DamagedCampaignsDatabaseServer"/>.
+/// </para>
 /// </summary>
-public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>
+public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>, IClassFixture<OneCampaignServer>, IClassFixture<NewerCampaignsDatabaseServer>,
+    IClassFixture<DamagedCampaignsDatabaseServer>
 {
     private const string Prefix = "An error occurred invoking 'dice_roll': ";
 
     private const string AcceptedParameters =
-        "dice_roll accepts: expression (string, required), times (integer, optional), label (string, optional), seed (integer, optional).";
+        "dice_roll accepts: expression (string, required), times (integer, optional), label (string, optional), secret (boolean, optional), " +
+        "seed (integer, optional).";
 
     private const string RulesSearchParameters =
         "rules_search accepts: query (string, required), edition (string, optional), kinds (array of string, optional), limit (integer, optional).";
@@ -34,14 +54,24 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>
         "rules_get accepts: ref (string, optional), name (string, optional), kind (string, optional), edition (string, optional), format (string, optional).";
 
     private readonly McpServerHarness _server;
+    private readonly McpServerHarness _campaign;
+    private readonly NewerCampaignsDatabaseServer _newer;
+    private readonly DamagedCampaignsDatabaseServer _damaged;
 
-    public ToolErrorTests(McpServerHarness server)
+    public ToolErrorTests(McpServerHarness server, OneCampaignServer campaign, NewerCampaignsDatabaseServer newer, DamagedCampaignsDatabaseServer damaged)
     {
         _server = server;
+        _campaign = campaign.Harness;
+        _newer = newer;
+        _damaged = damaged;
     }
 
     [GeneratedRegex(@"^#\d+: \*\*-?\d+\*\*", RegexOptions.Multiline)]
     private static partial Regex NumberedResultLineRegex();
+
+    // A run of the 'x' a huge argument is made of: how much of it an error echoed.
+    [GeneratedRegex("x+")]
+    private static partial Regex EchoRunRegex();
 
     [Theory]
     [InlineData("2d6 3")]
@@ -453,6 +483,319 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>
 
         Assert.True(error.Length < 1_500, $"{error.Length} characters: {error[..Math.Min(300, error.Length)]}");
         Assert.Contains("…", error, StringComparison.Ordinal);
+    }
+
+    // What each campaign tool's guard refusal lists: every parameter in schema order, with its JSON type and whether it is
+    // required. The model reads this list to repair a call, so a parameter renamed or retyped must be a deliberate diff here.
+    private const string CampaignParameters =
+        "campaign accepts: action (string, required), campaign (string, optional), name (string, optional), role (string, optional), " +
+        "ruleset (string, optional), dm_name (string, optional), slug (string, optional), settings (object, optional), " +
+        "party_name (string, optional), my_character (string, optional), status (string, optional), summary_md (string, optional), " +
+        "current_location (string, optional), current_ingame (string, optional), perspective (string, optional), reason (string, optional), " +
+        "session (integer, optional), dry_run (boolean, optional).";
+
+    private const string CampaignSearchParameters =
+        "campaign_search accepts: query (string, optional), kinds (array of string, optional), statuses (array of string, optional), " +
+        "tags (array of string, optional), perspective (string, optional), include_facts (boolean, optional), as_of_session (integer, optional), " +
+        "limit (integer, optional), cursor (string, optional), campaign (string, optional).";
+
+    private const string CampaignGetParameters =
+        "campaign_get accepts: refs (array of string, required), include (array of string, optional), detail (string, optional), " +
+        "perspective (string, optional), as_of_session (integer, optional), campaign (string, optional).";
+
+    private const string CampaignWriteParameters =
+        "campaign_write accepts: ops (array of object, required), campaign (string, optional), session (integer, optional), " +
+        "reason (string, optional), dry_run (boolean, optional).";
+
+    private const string CampaignKnowledgeParameters =
+        "campaign_knowledge accepts: action (string, required), campaign (string, optional), targets (array of string, optional), " +
+        "knowers (array of object, optional), facts (array of string, optional), secret (string, optional), handout (string, optional), " +
+        "to (array of string, optional), how (string, optional), who (array of string, optional), text (string, optional), " +
+        "perspective (string, optional), diegetic (boolean, optional), audience (string, optional), about (array of string, optional), " +
+        "perspectives (array of string, optional), as_of_session (integer, optional), session (integer, optional), reason (string, optional), " +
+        "dry_run (boolean, optional).";
+
+    private const string CampaignSessionParameters =
+        "campaign_session accepts: action (string, required), campaign (string, optional), session (integer, optional), title (string, optional), " +
+        "arc (string, optional), prep_md (string, optional), played_on (string, optional), precision (string, optional), " +
+        "attendance (array of object, optional), ingame (string, optional), ingame_end (string, optional), notes (array of string, optional), " +
+        "recap_md (string, optional), next_hooks (array of string, optional), confidence (string, optional), status (string, optional), " +
+        "limit (integer, optional), cursor (string, optional), perspective (string, optional), reason (string, optional), dry_run (boolean, optional).";
+
+    private const string CampaignHistoryParameters =
+        "campaign_history accepts: action (string, required), since (string, optional), session (integer, optional), targets (array of string, optional), " +
+        "ref (string, optional), refs (array of string, optional), detail (string, optional), batch_id (string, optional), dry_run (boolean, optional), " +
+        "reason (string, optional), limit (integer, optional), cursor (string, optional), campaign (string, optional).";
+
+    [Theory]
+    [InlineData("campaign", "{}", "missing required argument 'action'", CampaignParameters)]
+    [InlineData("campaign", """{"action":"list","dry_run":"yes"}""", "argument 'dry_run' should be boolean or null but was the string \"yes\"", CampaignParameters)]
+    [InlineData("campaign", """{"action":"use","campaign":["belmakor"]}""", "argument 'campaign' should be string or null but was an array", CampaignParameters)]
+    [InlineData("campaign_search", """{"kinds":"character"}""", "argument 'kinds' should be array or null but was the string \"character\"", CampaignSearchParameters)]
+    [InlineData("campaign_search", """{"query":"old king","perspecitve":"party"}""", "unknown argument 'perspecitve'", CampaignSearchParameters)]
+    [InlineData("campaign_search", """{"as_of_session":"three"}""", "argument 'as_of_session' should be integer or null but was the string \"three\"", CampaignSearchParameters)]
+    [InlineData("campaign_get", "{}", "missing required argument 'refs'", CampaignGetParameters)]
+    [InlineData("campaign_get", """{"refs":"character:old-king"}""", "argument 'refs' should be array but was the string \"character:old-king\"", CampaignGetParameters)]
+    [InlineData("campaign_get", """{"refs":["f:1",2]}""", "argument 'refs' item 2 should be string but was the number 2", CampaignGetParameters)]
+    [InlineData("campaign_write", "{}", "missing required argument 'ops'", CampaignWriteParameters)]
+    [InlineData("campaign_write", """{"ops":{"op":"upsert"}}""", "argument 'ops' should be array but was an object", CampaignWriteParameters)]
+    [InlineData("campaign_write", """{"ops":[{"op":"tick","ref":"clock:storm","amount":"two"}]}""",
+        "argument 'ops' item 1 field 'amount' should be integer but was the string \"two\"", CampaignWriteParameters)]
+    [InlineData("campaign_write", """{"ops":[{"op":"fact","statement":"X","known_by":[{"who":"party","knwo":true}]}]}""",
+        "argument 'ops' item 1 field 'known_by' item 1 has unknown field 'knwo' (fields: who, state, known_as, how, via, session, note)", CampaignWriteParameters)]
+    [InlineData("campaign_knowledge", "{}", "missing required argument 'action'", CampaignKnowledgeParameters)]
+    [InlineData("campaign_knowledge", """{"action":"record","knowers":[{"whom":"party"}]}""",
+        "argument 'knowers' item 1 has unknown field 'whom' (fields: who, state, known_as, how, via, session, note)", CampaignKnowledgeParameters)]
+    [InlineData("campaign_knowledge", """{"action":"reveal","to":"party"}""", "argument 'to' should be array or null but was the string \"party\"", CampaignKnowledgeParameters)]
+    [InlineData("campaign_knowledge", """{"action":"check","text":"x","diegetic":"yes"}""", "argument 'diegetic' should be boolean or null but was the string \"yes\"", CampaignKnowledgeParameters)]
+    [InlineData("campaign_session", "{}", "missing required argument 'action'", CampaignSessionParameters)]
+    [InlineData("campaign_session", """{"action":"end","attendance":[{"charcter":"character:serif"}]}""",
+        "argument 'attendance' item 1 has unknown field 'charcter' (fields: character, present, note)", CampaignSessionParameters)]
+    [InlineData("campaign_session", """{"action":"end","attendance":[{"character":"character:serif","present":"no"}]}""",
+        "argument 'attendance' item 1 field 'present' should be boolean but was the string \"no\"", CampaignSessionParameters)]
+    [InlineData("campaign_session", """{"action":"list","limit":1.5}""", "argument 'limit' should be integer or null but was the number 1.5", CampaignSessionParameters)]
+    [InlineData("campaign_history", "{}", "missing required argument 'action'", CampaignHistoryParameters)]
+    [InlineData("campaign_history", """{"action":"undo","batch_id":5}""", "argument 'batch_id' should be string or null but was the number 5", CampaignHistoryParameters)]
+    [InlineData("campaign_history", """{"action":"since","targets":"f:1"}""", "argument 'targets' should be array or null but was the string \"f:1\"", CampaignHistoryParameters)]
+    [InlineData("campaign_history", """{"action":"since","session":99999999999}""", "argument 'session' was the number 99999999999, which is too large to be valid", CampaignHistoryParameters)]
+    public async Task CallTool_CampaignToolArgumentOfTheWrongShape_NamesItAndListsAcceptedParameters(
+        string tool, string argumentsJson, string problem, string accepted)
+    {
+        // The guard runs before the tool, so these need no campaign: every one would otherwise reach the SDK's binder and
+        // come back as the bare generic error (a typed op field, a knower, an attendance entry included).
+        var result = await _server.CallToolJsonAsync(tool, argumentsJson);
+
+        Assert.Equal($"An error occurred invoking '{tool}': Invalid arguments: {problem}. {accepted}", _server.ErrorText(result));
+    }
+
+    [Theory]
+    [InlineData("""[{"op":"upsert","kind":"character","name":"Iron Guts","stauts":"dead"}]""", "argument 'ops' item 1 has unknown field 'stauts' (fields: op, ref, kind, name, ")]
+    [InlineData("""[{"op":"upsert","kind":"character","name":"A"},{"op":"fact","statement":"X","gate":{"afetr":["f:1"]}}]""",
+        "argument 'ops' item 2 field 'gate' has unknown field 'afetr' (fields: after, with, prefer, seeds, routes, ")]
+    [InlineData("""[{"op":"fact","statement":"X","gate":{"routes":[{"id":"r1","clue":["f:1"]}]}}]""",
+        "argument 'ops' item 1 field 'gate' field 'routes' item 1 has unknown field 'clue' (fields: id, clues, min_clues)")]
+    public async Task CallTool_CampaignOpsFieldTheSchemaLacks_NamesTheItemAndFieldAndListsAcceptedParameters(string ops, string problem)
+    {
+        // A misspelt field anywhere in an op (a gate key, a route's clues) would bind and vanish, and the model would report
+        // a write that never happened. The field list of an op is long; the part naming the problem and the parameters are
+        // pinned.
+        var text = _server.ErrorText(await _server.CallToolJsonAsync("campaign_write", $$"""{"ops":{{ops}}}"""));
+
+        Assert.StartsWith("An error occurred invoking 'campaign_write': Invalid arguments: " + problem, text, StringComparison.Ordinal);
+        Assert.EndsWith(". " + CampaignWriteParameters, text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("campaign_search", """{"query":"old king"}""")]
+    [InlineData("campaign_get", """{"refs":["character:old-king"]}""")]
+    [InlineData("campaign_write", """{"ops":[{"op":"upsert","kind":"character","name":"Iron Guts"}]}""")]
+    [InlineData("campaign_knowledge", """{"action":"check","text":"Old king, come down"}""")]
+    [InlineData("campaign_session", """{"action":"list"}""")]
+    [InlineData("campaign_history", """{"action":"since"}""")]
+    public async Task CallTool_CampaignToolWithNoCampaigns_SaysHowToCreateOneAndCreatesNoDatabase(string tool, string argumentsJson)
+    {
+        // The first campaign call a new user makes. The answer must say what to do next, and asking must not leave a
+        // campaigns.db behind: a user who never creates a campaign must never find one.
+        var result = await _server.CallToolJsonAsync(tool, argumentsJson);
+
+        Assert.Equal(
+            $"An error occurred invoking '{tool}': There are no campaigns yet. Create one with campaign " +
+            "{\"action\": \"create\", \"name\": \"…\", \"role\": \"player\" or \"dm\", \"ruleset\": \"2024\"}.",
+            _server.ErrorText(result));
+        Assert.False(File.Exists(Path.Combine(_server.DataDirectory, "campaigns.db")), "Asking about campaigns created campaigns.db.");
+    }
+
+    [Theory]
+    // Each reaches the tool's own checks (a campaign exists), past the guard: what was wrong, then how to put it right.
+    [InlineData("campaign", """{"action":"destroy"}""", "action \"destroy\" is not one of list, summary, get, create, update, use", "Example: {\"action\": \"create\"")]
+    [InlineData("campaign", """{"action":"use"}""", "action \"use\" needs campaign", "Example: {\"action\": \"use\", \"campaign\": \"belmakor\"}")]
+    [InlineData("campaign_search", """{"campaign":"nope"}""", "No campaign \"nope\".", "Campaigns: surface (player, 2024). Pass one of those slugs.")]
+    [InlineData("campaign_get", """{"refs":["character:nobody"]}""", "refs item 1: \"character:nobody\": nothing in this campaign has that handle.", "campaign_search finds")]
+    [InlineData("campaign_get", """{"refs":["character:iron-guts"],"detail":"verbose"}""", "(got \"verbose\")", "detail must be \"concise\" (the default) or \"full\"")]
+    [InlineData("campaign_write", """{"ops":[{"op":"upsert","kind":"character"}]}""", "ops item 1 (upsert character): name is required", "e.g. {\"op\": \"upsert\", \"kind\": \"character\", \"name\": \"Iron Guts\"}")]
+    [InlineData("campaign_write", """{"ops":[{"op":"smite"}]}""", "ops item 1: op \"smite\" is not an op", "ops are upsert, delete, restore, link")]
+    [InlineData("campaign_knowledge", """{"action":"check","perspective":"character:nobody","text":"x"}""", "no character nobody in this campaign", "campaign_search with kinds [\"character\"] lists them")]
+    [InlineData("campaign_knowledge", """{"action":"reveal","text":"x"}""", "reveal does not take \"text\"", "reveal takes facts, secret, handout, to")]
+    [InlineData("campaign_session", """{"action":"start","recap_md":"x"}""", "start does not take \"recap_md\"", "start takes session, played_on, precision")]
+    [InlineData("campaign_history", """{"action":"entity"}""", "action \"entity\" needs ref", "Example: {\"action\": \"entity\", \"ref\": ")]
+    [InlineData("campaign_history", """{"action":"since","since":"yesterday"}""", "since \"yesterday\" is not a date", "such as \"2026-09-19\"")]
+    public async Task CallTool_CampaignToolBadInput_SaysWhatWasWrongAndHowToFixIt(string tool, string argumentsJson, string wrong, string fix)
+    {
+        // The wording belongs to the tools and the repository services, whose own tests pin it whole; what this pins is
+        // that it reaches the model after the prefix, naming what was wrong and carrying the way out.
+        var text = _campaign.ErrorText(await _campaign.CallToolJsonAsync(tool, argumentsJson));
+
+        Assert.StartsWith($"An error occurred invoking '{tool}': ", text, StringComparison.Ordinal);
+        Assert.Contains(wrong, text, StringComparison.Ordinal);
+        Assert.Contains(fix, text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    // HUGE is 100,000 characters. The ceiling on the echo is per row: the argument guard cuts a name it refuses at 40
+    // characters, the campaign tools cut a value at 80 (CampaignMarkdownText.Echo) and the repository's messages at 60 or
+    // 40. A length ceiling alone does not see the cut grow: the guard's refusal lists every parameter (campaign_session has
+    // 21, 778 characters in all), so a ceiling it fits under also fits a value echoed at 1,000 characters.
+    [InlineData("campaign", """{"action":"HUGE"}""", 80)]
+    [InlineData("campaign", """{"action":"list","HUGE":1}""", 40)]
+    [InlineData("campaign_search", """{"campaign":"HUGE"}""", 80)]
+    [InlineData("campaign_get", """{"refs":["HUGE"]}""", 80)]
+    [InlineData("campaign_get", """{"refs":["character:iron-guts"],"detail":"HUGE"}""", 80)]
+    [InlineData("campaign_write", """{"ops":[{"op":"HUGE"}]}""", 80)]
+    [InlineData("campaign_write", """{"ops":[{"op":"upsert","kind":"character","name":"HUGE"}]}""", 80)]
+    [InlineData("campaign_knowledge", """{"action":"HUGE"}""", 80)]
+    [InlineData("campaign_knowledge", """{"action":"check","perspective":"HUGE","text":"x"}""", 80)]
+    [InlineData("campaign_session", """{"action":"HUGE"}""", 80)]
+    [InlineData("campaign_session", """{"action":"list","HUGE":1}""", 40)]
+    [InlineData("campaign_history", """{"action":"HUGE"}""", 80)]
+    [InlineData("campaign_history", """{"action":"since","since":"HUGE"}""", 80)]
+    public async Task CallTool_HugeArgumentInACampaignError_IsEchoedShortened(string tool, string argumentsTemplate, int longestEcho)
+    {
+        var argumentsJson = argumentsTemplate.Replace("HUGE", new string('x', 100_000), StringComparison.Ordinal);
+
+        var error = _campaign.ErrorText(await _campaign.CallToolJsonAsync(tool, argumentsJson));
+        var echoed = EchoRunRegex().Matches(error).Select(m => m.Length).DefaultIfEmpty(0).Max();
+
+        Assert.True(echoed <= longestEcho, $"{echoed} characters of the argument came back (at most {longestEcho}): {error[..Math.Min(300, error.Length)]}");
+        Assert.True(error.Length < 1_000, $"{error.Length} characters: {error[..Math.Min(300, error.Length)]}");
+        Assert.Contains("…", error, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("campaign", """{"action":"list"}""")]
+    [InlineData("campaign", """{"action":"create","name":"Sky","role":"dm","ruleset":"2024"}""")]
+    [InlineData("campaign_search", """{"query":"old king"}""")]
+    [InlineData("campaign_get", """{"refs":["character:old-king"]}""")]
+    [InlineData("campaign_write", """{"ops":[{"op":"upsert","kind":"character","name":"Iron Guts"}]}""")]
+    [InlineData("campaign_knowledge", """{"action":"check","text":"Old king, come down"}""")]
+    [InlineData("campaign_session", """{"action":"list"}""")]
+    [InlineData("campaign_history", """{"action":"since"}""")]
+    public async Task CallTool_CampaignsDatabaseFromANewerVersion_ReturnsTheStoresMessageAndChangesNothing(string tool, string argumentsJson)
+    {
+        // The user's fix (update dnd-mcp, or point DND_MCP_DB elsewhere) is only in this message: without the call-tool
+        // filter's translation every campaign tool fails with the SDK's bare "An error occurred invoking '<tool>'.". The
+        // file must also be left exactly as it was (a newer build's data, which this one must neither migrate nor write).
+        var expected = _newer.StoreMessage();
+
+        var result = await _newer.Harness.CallToolJsonAsync(tool, argumentsJson);
+
+        Assert.StartsWith(
+            $"campaigns.db at {_newer.DatabasePath} was written by a newer version of dnd-mcp (schema version {NewerCampaignsDatabaseServer.SchemaVersion};",
+            expected,
+            StringComparison.Ordinal);
+        Assert.Equal($"An error occurred invoking '{tool}': {expected}", _newer.Harness.ErrorText(result));
+        Assert.Equal(NewerCampaignsDatabaseServer.SchemaVersion, _newer.UserVersion());
+    }
+
+    [Theory]
+    [InlineData("knowledge_check", """{"character":"aria-vale"}""")]
+    [InlineData("in_character", """{"character":"aria-vale"}""")]
+    [InlineData("session_prep", "{}")]
+    [InlineData("session_recap", """{"session":"2"}""")]
+    [InlineData("continuity_check", "{}")]
+    public async Task GetPrompt_CampaignsDatabaseFromANewerVersion_FailsWithTheStoresMessage(string prompt, string argumentsJson)
+    {
+        // A prompt reads the campaign before it writes its instructions, outside the call-tool filter: the get-prompt
+        // filter's translation is what puts the store's message, rather than the SDK's bare internal error, in front of the
+        // user who typed /mcp__dnd__<prompt>.
+        using var document = JsonDocument.Parse(argumentsJson);
+        var arguments = document.RootElement.EnumerateObject().ToDictionary(p => p.Name, p => (object?)p.Value.GetString());
+
+        var error = await Assert.ThrowsAsync<McpProtocolException>(() => _newer.Harness.Client.GetPromptAsync(prompt, arguments).AsTask());
+
+        Assert.Equal(McpErrorCode.InternalError, error.ErrorCode);
+        Assert.Equal("Request failed (remote): " + _newer.StoreMessage(), error.Message);
+        Assert.Equal(NewerCampaignsDatabaseServer.SchemaVersion, _newer.UserVersion());
+    }
+
+    [Theory]
+    // campaign://list is a registered resource; the others are served by the campaign read handler. One filter covers both.
+    [InlineData("campaign://list")]
+    [InlineData("campaign://sky/summary")]
+    [InlineData("campaign://sky/knowledge/party")]
+    public async Task ReadResource_CampaignsDatabaseFromANewerVersion_FailsWithTheStoresMessage(string uri)
+    {
+        // An @dnd: mention of a campaign resource, read outside the call-tool filter: the read-resource filter's translation
+        // is what tells the user why it cannot be read.
+        var error = await Assert.ThrowsAsync<McpProtocolException>(() => _newer.Harness.Client.ReadResourceAsync(uri).AsTask());
+
+        Assert.Equal(McpErrorCode.InternalError, error.ErrorCode);
+        Assert.Equal("Request failed (remote): " + _newer.StoreMessage(), error.Message);
+        Assert.Equal(NewerCampaignsDatabaseServer.SchemaVersion, _newer.UserVersion());
+    }
+
+    /// <summary>
+    /// FH1 (R04): a read that meets a damaged page (header and schema intact, so the open passes) returns the store's
+    /// message naming the file and its backups, as the same server's campaign_write does, never the SDK's bare "An error
+    /// occurred invoking '&lt;tool&gt;'.": the raw SqliteException of a read statement is mapped by the call-tool filter.
+    /// </summary>
+    [Theory]
+    [InlineData("campaign_get", """{"refs":["character:old-hero"]}""")]
+    [InlineData("campaign", """{"action":"summary"}""")]
+    [InlineData("campaign_history", """{"action":"since"}""")]
+    [InlineData("campaign_write", """{"ops":[{"op":"upsert","kind":"character","name":"Old Hero","summary":"changed"}]}""")]
+    public async Task CallTool_ReadOfADamagedCampaignsDatabasePage_ReturnsTheStoresMessage(string tool, string argumentsJson)
+    {
+        var result = await _damaged.Harness.CallToolJsonAsync(tool, argumentsJson);
+
+        Assert.Equal($"An error occurred invoking '{tool}': {_damaged.StoreMessage()}", _damaged.Harness.ErrorText(result));
+    }
+
+    /// <summary>FH1 (R04): the same read behind a prompt (it resolves the character) is mapped by the get-prompt filter.</summary>
+    [Fact]
+    public async Task GetPrompt_ReadOfADamagedCampaignsDatabasePage_FailsWithTheStoresMessage()
+    {
+        var arguments = new Dictionary<string, object?> { ["character"] = "old-hero", ["campaign"] = DamagedCampaignsDatabaseServer.Slug };
+
+        var error = await Assert.ThrowsAsync<McpProtocolException>(() => _damaged.Harness.Client.GetPromptAsync("in_character", arguments).AsTask());
+
+        Assert.Equal(McpErrorCode.InternalError, error.ErrorCode);
+        Assert.Equal("Request failed (remote): " + _damaged.StoreMessage(), error.Message);
+    }
+
+    /// <summary>FH1 (R04): the same read behind a campaign:// resource is mapped by the read-resource filter.</summary>
+    [Fact]
+    public async Task ReadResource_ReadOfADamagedCampaignsDatabasePage_FailsWithTheStoresMessage()
+    {
+        var error = await Assert.ThrowsAsync<McpProtocolException>(() =>
+            _damaged.Harness.Client.ReadResourceAsync($"campaign://{DamagedCampaignsDatabaseServer.Slug}/summary").AsTask());
+
+        Assert.Equal(McpErrorCode.InternalError, error.ErrorCode);
+        Assert.Equal("Request failed (remote): " + _damaged.StoreMessage(), error.Message);
+    }
+
+    /// <summary>
+    /// FH1 (R04): another process holds an exclusive lock on campaigns.db past the busy timeout (a sqlite3 shell with
+    /// locking_mode EXCLUSIVE does): a read tool says the file is locked by another process and to try again, as a write
+    /// does, instead of the SDK's bare error after waiting it out.
+    /// </summary>
+    [Fact]
+    public async Task CallTool_ReadWhileAnotherProcessHoldsAnExclusiveLock_SaysTheDatabaseIsLocked()
+    {
+        await using var server = await Campaign.CampaignTestServer.StartAsync();
+        await server.Call("campaign", """{"action": "create", "name": "Probe", "role": "dm", "ruleset": "2014"}""");
+        await server.Call("campaign_write", """{"ops": [{"op": "upsert", "kind": "character", "name": "Old Hero", "summary": "a hero"}]}""");
+        using var holder = new Microsoft.Data.Sqlite.SqliteConnection(
+            new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = server.DatabasePath, Pooling = false }.ToString());
+        holder.Open();
+        using (var command = holder.CreateCommand())
+        {
+            command.CommandText = "PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; UPDATE campaign SET summary_md = 'held';";
+            command.ExecuteNonQuery();
+        }
+
+        try
+        {
+            var error = await server.Error("campaign_search", """{"query": "hero"}""");
+
+            Assert.StartsWith($"An error occurred invoking 'campaign_search': campaigns.db at {server.DatabasePath} is locked by another dnd-mcp process", error,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            using var rollback = holder.CreateCommand();
+            rollback.CommandText = "ROLLBACK";
+            rollback.ExecuteNonQuery();
+        }
     }
 
     [Fact]

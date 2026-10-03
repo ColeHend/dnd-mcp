@@ -20,8 +20,15 @@ namespace DndMcp.Domain.Features;
 /// <see cref="System.Text.Json.JsonElement"/>, as <c>encounter_difficulty</c>'s <c>cr</c> does, and
 /// <see cref="LevelValue"/> parses them.
 /// </para>
+/// <para>
+/// <b>A record, for <c>with</c> only.</b> The host copies a build to fill in the active campaign's ruleset when the call
+/// names no edition (<c>build with { Edition = "2014" }</c>), so a new property can never be forgotten by a hand-written
+/// copy. Records add no public property (their <c>EqualityContract</c> is private in a sealed record), so the published
+/// schema is unchanged; <c>ServerSurfaceTests</c>/<c>CampaignDefaultsToolTests</c> pin the property list. Value equality
+/// is a side effect nothing relies on: no build is a dictionary key or compared by reference.
+/// </para>
 /// </summary>
-public sealed class BuildSpec
+public sealed record BuildSpec
 {
     [Description("Required. A label for the build, one line, at most 80 characters, e.g. \"L5 Fighter, GWM\".")]
     public string? Name { get; init; }
@@ -31,7 +38,7 @@ public sealed class BuildSpec
         "Blast + Hex, Cha 16/18/20). With a preset give only name, edition and level.")]
     public string? Preset { get; init; }
 
-    [Description("\"2024\" (default) or \"2014\": the rules the build follows (fighting style sugar, notes).")]
+    [Description("\"2014\" or \"2024\": the rules the build follows (fighting style sugar, notes). Default: the active campaign's ruleset, else 2024.")]
     public string? Edition { get; init; }
 
     [Description("Required. The character level the build describes, 1-20; step values are read at each level evaluated.")]

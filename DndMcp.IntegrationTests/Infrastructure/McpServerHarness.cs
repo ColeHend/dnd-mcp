@@ -38,9 +38,12 @@ namespace DndMcp.IntegrationTests.Infrastructure;
 /// per test run rather than once per test class. It is emptied before its first use in each run, because srd.db's
 /// staleness key covers the content and the schema version but not the importer's code: a srd.db an earlier run left
 /// behind would hide a pairing, alias or search-text change from every tool-level test.
-/// <see cref="WithOptions"/> points a harness elsewhere (broken content, an unwritable cache). The data directory (Phase
-/// 6's campaigns.db) is <see cref="DataDirectory"/>, under the test output too, so a harness can never open the user's
-/// real campaigns. <see cref="BuiltServerProcess"/> isolates the child process's paths through its environment.
+/// <see cref="WithOptions"/> points a harness elsewhere (broken content, an unwritable cache). The data directory
+/// (campaigns.db and its backups) is <see cref="DataDirectory"/>: a fresh directory per harness under
+/// <see cref="DataRoot"/>, never the user's <c>~/.local/share/dnd-mcp</c>, and never shared between harnesses. Shared, one
+/// test class making a campaign active would flip the edition every other parallel test class defaults to (the rules and
+/// balance tools default to the active campaign's ruleset), and test order would decide results.
+/// <see cref="BuiltServerProcess"/> isolates the child process's paths through its environment.
 /// </para>
 /// </summary>
 public sealed class McpServerHarness : IAsyncLifetime
@@ -102,12 +105,27 @@ public sealed class McpServerHarness : IAsyncLifetime
     /// </summary>
     public static string SharedCacheDirectory => SharedCache.Value;
 
+    // Emptied on first use in each test process, like the cache: a campaigns.db an earlier run left behind (a harness
+    // whose dispose was skipped by a crashed run) must not reach this run.
+    private static readonly Lazy<string> SharedDataRoot = new(() =>
+    {
+        var directory = Path.Combine(AppContext.BaseDirectory, "test-data");
+        if (Directory.Exists(directory))
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+
+        return directory;
+    });
+
+    /// <summary>The directory every harness's own data directory lives under: the test output, never the user's data.</summary>
+    public static string DataRoot => SharedDataRoot.Value;
+
     /// <summary>
-    /// The data directory every harness gives the server (<see cref="DndMcpServerOptions.DataDirectory"/>): under the test
-    /// output, never <c>~/.local/share/dnd-mcp</c>, where the user's campaigns will live. Not created until something
-    /// writes there.
+    /// This harness's data directory (<see cref="DndMcpServerOptions.DataDirectory"/>): a fresh directory under
+    /// <see cref="DataRoot"/>, deleted when the harness is disposed. Not created until something writes there.
     /// </summary>
-    public static string DataDirectory { get; } = Path.Combine(AppContext.BaseDirectory, "test-data");
+    public string DataDirectory { get; } = Path.Combine(DataRoot, Guid.NewGuid().ToString("N"));
 
     /// <summary>
     /// The production registrations plus whatever <paramref name="configureServer"/> adds, typically
@@ -210,11 +228,31 @@ public sealed class McpServerHarness : IAsyncLifetime
             }
 
             _serverCts.Dispose();
+            DeleteDataDirectory();
         }
 
         if (!stoppedOnEof)
         {
             throw new TimeoutException($"The MCP server did not stop within {ShutdownTimeout.TotalSeconds}s of its input closing.");
+        }
+    }
+
+    // Best effort: every campaigns.db connection is opened with Pooling=false and closed after use, so nothing should hold
+    // a file here once the server has stopped; a leftover directory is emptied with the rest of DataRoot next run.
+    private void DeleteDataDirectory()
+    {
+        try
+        {
+            if (Directory.Exists(DataDirectory))
+            {
+                Directory.Delete(DataDirectory, recursive: true);
+            }
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
         }
     }
 

@@ -25,9 +25,14 @@ namespace DndMcp.Repository.Sqlite;
 /// because WAL also depends on the file system under it (network file systems cannot share its memory map).
 /// </para>
 /// <para>
-/// Intended use (the host wiring is a later phase): log this record to stderr at startup, then call
-/// <see cref="EnsureSupported"/>, so a bad library fails the process once, with the full list, before any
-/// tool touches a database.
+/// <b>Who calls it.</b> The host, once at startup: DndMcp's <c>SqliteCapabilityCheck</c> (the first hosted service, so it
+/// runs before the rules index warms up and before <c>initialize</c> is answered) probes in the data directory, logs this
+/// record to stderr and calls <see cref="EnsureSupported"/>, so a bad library fails the process once, with the full list,
+/// before any tool touches a database. WAL is judged on campaigns.db's own file instead (the migrator warns and carries
+/// on in rollback-journal mode), so both callers check every other flag with <see cref="WalJournalMode"/> forced true.
+/// The other caller is <c>CampaignDatabase</c>, once per process before it first opens campaigns.db: the in-memory test
+/// host runs no hosted services, and the startup probe only warns when the data directory cannot be written. Dropping
+/// either call means the first symptom of a changed library is a half-applied migration again.
 /// </para>
 /// </summary>
 public sealed record SqliteCapabilities(
@@ -54,6 +59,16 @@ public sealed record SqliteCapabilities(
     /// </summary>
     public const string MinimumVersion = "3.37.0";
 
+    /// <summary>The name of every probe's scratch directory, before its 32 hex digits.</summary>
+    internal const string ScratchPrefix = "dnd-mcp-sqlite-probe-";
+
+    /// <summary>
+    /// How old (by its last write) another probe's scratch directory must be before a probe deletes it: a probe takes
+    /// milliseconds, so one that old was left by a process killed mid-probe, while a younger one may be another server's
+    /// probe running right now (two Claude sessions often start together).
+    /// </summary>
+    internal static readonly TimeSpan StaleScratchAge = TimeSpan.FromMinutes(1);
+
     private const int SqliteConstraint = 19;
 
     /// <summary>
@@ -68,10 +83,19 @@ public sealed record SqliteCapabilities(
     /// Probes in a fresh subdirectory of <paramref name="scratchParentDirectory"/> and deletes it afterwards.
     /// The probe never opens campaigns.db or srd.db: checking WAL there would change the real file's journal
     /// mode, and a probe must not mutate what it measures.
+    ///
+    /// <para>
+    /// First it deletes the scratch directories earlier probes left there (<see cref="StaleScratchAge"/> or older).
+    /// The finally below cannot run when a process is killed mid-probe (SIGKILL: Claude Code closing a session that is
+    /// just starting), and the host probes in the data directory, beside campaigns.db, so without this an empty
+    /// <c>dnd-mcp-sqlite-probe-*</c> directory would now and then be left there for good. Only directories named exactly
+    /// like a probe's are touched.
+    /// </para>
     /// </summary>
     public static SqliteCapabilities Probe(string scratchParentDirectory)
     {
-        var scratch = Path.Combine(scratchParentDirectory, "dnd-mcp-sqlite-probe-" + Guid.NewGuid().ToString("N"));
+        DeleteStaleScratch(scratchParentDirectory);
+        var scratch = Path.Combine(scratchParentDirectory, ScratchPrefix + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(scratch);
         try
         {
@@ -410,6 +434,46 @@ public sealed record SqliteCapabilities(
         }
         catch (UnauthorizedAccessException)
         {
+        }
+    }
+
+    /// <summary>
+    /// Deletes earlier probes' scratch directories (<see cref="Probe(string)"/>'s summary). Their age is their last
+    /// write against the system clock, which is what stamped it. A parent that does not exist or cannot be listed has
+    /// nothing to clean, and a directory that cannot be deleted is left: as in <see cref="DeleteScratch"/>, litter must
+    /// never stop a start.
+    /// </summary>
+    private static void DeleteStaleScratch(string scratchParentDirectory)
+    {
+        IEnumerable<string> directories;
+        try
+        {
+            directories = Directory.EnumerateDirectories(scratchParentDirectory, ScratchPrefix + "*").ToList();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        var staleBefore = DateTime.UtcNow - StaleScratchAge;
+        foreach (var directory in directories)
+        {
+            var name = Path.GetFileName(directory);
+            if (name.Length != ScratchPrefix.Length + 32 || !name[ScratchPrefix.Length..].All(char.IsAsciiHexDigitLower))
+            {
+                continue;
+            }
+
+            try
+            {
+                if (Directory.GetLastWriteTimeUtc(directory) < staleBefore)
+                {
+                    DeleteScratch(directory);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+            }
         }
     }
 }

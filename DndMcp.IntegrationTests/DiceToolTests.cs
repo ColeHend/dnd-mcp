@@ -1,7 +1,16 @@
 using System.Globalization;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using DndMcp.Domain.Dice;
+using DndMcp.Hosting;
 using DndMcp.IntegrationTests.Infrastructure;
+using DndMcp.Repository.Campaign;
+using DndMcp.Repository.Campaign.Write;
+using DndMcp.Tools;
+using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
 namespace DndMcp.IntegrationTests;
@@ -29,11 +38,11 @@ public sealed partial class DiceToolTests : IClassFixture<McpServerHarness>
 
     // "**12**  (2d6+3 → [6, 3] + 3)", optionally followed by " · ≥ 15? **yes**".
     [GeneratedRegex(@"^\*\*(?<total>-?\d+)\*\*  \((?<expr>.+?) → (?<breakdown>.+)\)(?: · (?<cmp>[<>=≤≥]+) (?<target>-?\d+)\? \*\*(?<verdict>yes|no)\*\*)?$")]
-    private static partial Regex SingleRollRegex();
+    internal static partial Regex SingleRollRegex();
 
     // "#2: **12**  ([6, 3] + 3)"; the breakdown is left out when the output budget runs short.
     [GeneratedRegex(@"^#(?<n>\d+): \*\*(?<total>-?\d+)\*\*(?:  \((?<breakdown>.+)\))?(?: · .+)?$")]
-    private static partial Regex NumberedRollRegex();
+    internal static partial Regex NumberedRollRegex();
 
     // A label, shown in italics after its term.
     [GeneratedRegex(@" _[^_]+_")]
@@ -331,7 +340,7 @@ public sealed partial class DiceToolTests : IClassFixture<McpServerHarness>
     /// counted faces (or its stated "= n"), struck faces count nothing, and what remains is plain arithmetic with
     /// floor division.
     /// </summary>
-    private static long Audit(string breakdown)
+    internal static long Audit(string breakdown)
     {
         var arithmetic = GroupRegex().Replace(LabelRegex().Replace(breakdown, string.Empty), m => GroupValue(m.Groups["faces"].Value).ToString(CultureInfo.InvariantCulture));
         return new Arithmetic(arithmetic).Evaluate();
@@ -439,5 +448,688 @@ public sealed partial class DiceToolTests : IClassFixture<McpServerHarness>
 
             return long.Parse(_text[start.._pos], CultureInfo.InvariantCulture);
         }
+    }
+}
+
+/// <summary>
+/// Invariant: a <c>dice_roll</c> made while the resolved campaign has a live session is logged there, one
+/// <c>dice_roll</c> row per roll with its expression as typed, label, total, comparison outcome, detail (every face up to
+/// 1,000 per roll) and secret flag, and the result's last line says where; a seeded roll, a roll with nothing live and a
+/// roll the store could not take are not logged, and the result says so whenever the caller could expect otherwise. The
+/// dice are shown either way: a log problem is never an error.
+///
+/// <para>
+/// Why it fails silently: a roll that was not logged looks exactly like one that was unless the result says so, and the
+/// DM finds the gap in the session log weeks later; a roll logged twice, or a seeded replay logged as a table roll, puts
+/// dice in the history that nobody rolled; and a log failure reported as an error reads as "the roll failed", so the
+/// model rolls again and the table sees two results. Each test reads campaigns.db itself rather than trusting the note.
+/// </para>
+/// </summary>
+public sealed class DiceRollLoggingTests : IAsyncLifetime
+{
+    private const string Randomness = "_Randomness: cryptographic (OS CSPRNG)._";
+
+    private McpServerHarness _server = null!;
+
+    private CampaignService Campaigns => _server.Services.GetRequiredService<CampaignService>();
+
+    public async Task InitializeAsync()
+    {
+        _server = new McpServerHarness();
+        await _server.InitializeAsync();
+    }
+
+    public Task DisposeAsync() => _server.DisposeAsync();
+
+    /// <summary>
+    /// Creates a campaign, makes it this process's and the persisted active one when <paramref name="use"/>, and starts
+    /// session 1 when <paramref name="live"/>.
+    /// </summary>
+    private CampaignRow Campaign(string name = "Belmakor", bool live = true, bool use = true)
+    {
+        var campaign = Campaigns.Store.Create(name, "dm", "2024").Campaign;
+        if (use)
+        {
+            Campaigns.Use(campaign.Slug);
+        }
+
+        if (live)
+        {
+            new SessionWriter(Campaigns.Database).Start(campaign);
+        }
+
+        return campaign;
+    }
+
+    private async Task<string[]> RollAsync(string arguments) =>
+        _server.SuccessText(await _server.CallToolJsonAsync("dice_roll", arguments)).Split('\n');
+
+    private sealed record LoggedRow(string Expression, string? Label, long Total, long? Outcome, string Detail, long Secret, long? Session, string Campaign);
+
+    private List<LoggedRow> Rows()
+    {
+        var path = Campaigns.Database.Path;
+        if (!File.Exists(path))
+        {
+            return [];
+        }
+
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT d.expression, d.label, d.total, d.outcome, d.detail, d.secret, s.number, c.slug FROM dice_roll d " +
+            "LEFT JOIN session s ON s.entity_id = d.session_id JOIN campaign c ON c.id = d.campaign_id ORDER BY d.seq";
+        using var reader = command.ExecuteReader();
+        var rows = new List<LoggedRow>();
+        while (reader.Read())
+        {
+            rows.Add(new LoggedRow(
+                reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1), reader.GetInt64(2),
+                reader.IsDBNull(3) ? null : reader.GetInt64(3), reader.GetString(4), reader.GetInt64(5), reader.IsDBNull(6) ? null : reader.GetInt64(6),
+                reader.GetString(7)));
+        }
+
+        return rows;
+    }
+
+    [Fact]
+    public async Task CallTool_LiveSession_LogsOneRowPerRollAndSaysWhereOnTheLastLine()
+    {
+        Campaign();
+
+        var lines = await RollAsync("""{"expression": "1d20+5>=10", "times": 3, "label": "Stealth"}""");
+
+        Assert.Equal("Logged to belmakor, session 1.", lines[^1]);
+        Assert.Equal(Randomness, lines[^2]);
+        var rows = Rows();
+        Assert.Equal(3, rows.Count);
+        for (var i = 0; i < 3; i++)
+        {
+            var shown = DiceToolTests.NumberedRollRegex().Match(lines[i + 1]);
+            Assert.Equal(long.Parse(shown.Groups["total"].Value, CultureInfo.InvariantCulture), rows[i].Total);
+            Assert.Equal("1d20+5>=10", rows[i].Expression);
+            Assert.Equal("Stealth", rows[i].Label);
+            Assert.Equal(rows[i].Total >= 10 ? 1L : 0L, rows[i].Outcome);
+            Assert.Equal(0L, rows[i].Secret);
+            Assert.Equal(1L, rows[i].Session);
+            using var detail = JsonDocument.Parse(rows[i].Detail);
+            Assert.Equal(i + 1, detail.RootElement.GetProperty("call").GetProperty("roll").GetInt32());
+            Assert.Equal(3, detail.RootElement.GetProperty("call").GetProperty("of").GetInt32());
+        }
+    }
+
+    [Fact]
+    public async Task CallTool_Secret_IsLoggedAsSecretAndSaysSo()
+    {
+        Campaign();
+
+        var lines = await RollAsync("""{"expression": "1d20", "secret": true}""");
+
+        Assert.Equal("Logged to belmakor, session 1 (secret).", lines[^1]);
+        var row = Assert.Single(Rows());
+        Assert.Equal(1L, row.Secret);
+        Assert.Null(row.Outcome);
+        Assert.Null(row.Label);
+    }
+
+    [Theory]
+    [InlineData("""{"expression": "2d6+3"}""")]
+    [InlineData("""{"expression": "2d6+3", "secret": false}""")]
+    [InlineData("""{"expression": "2d6+3", "secret": null}""")]
+    public async Task CallTool_NoLiveSessionAndNoSecret_LogsNothingAndAddsNoLine(string arguments)
+    {
+        Campaign(live: false);
+
+        var lines = await RollAsync(arguments);
+
+        Assert.Equal(Randomness, lines[^1]);
+        Assert.Equal(2, lines.Length);
+        Assert.Empty(Rows());
+    }
+
+    [Fact]
+    public async Task CallTool_SecretWithNothingLive_SaysNotLogged()
+    {
+        Campaign(live: false);
+
+        var lines = await RollAsync("""{"expression": "1d20", "secret": true}""");
+
+        Assert.Equal("Not logged: no session is live.", lines[^1]);
+        Assert.Equal(Randomness, lines[^2]);
+        Assert.Empty(Rows());
+    }
+
+    [Theory]
+    [InlineData("""{"expression": "1d20", "secret": true}""", "Not logged: no session is live.")]
+    [InlineData("""{"expression": "1d20"}""", null)]
+    public async Task CallTool_NoCampaignsDatabase_CreatesNoneAndSaysSoOnlyForSecret(string arguments, string? note)
+    {
+        var lines = await RollAsync(arguments);
+
+        Assert.Equal(note ?? Randomness, lines[^1]);
+        Assert.False(File.Exists(Campaigns.Database.Path), "A dice roll created campaigns.db.");
+    }
+
+    /// <summary>
+    /// Kills H01 (FH10, M22): campaigns.db exists but holds no campaign (the only one's creation was undone): a secret roll
+    /// says no session is live. Treated like "several campaigns, none chosen", it said "no campaign is chosen" and offered a
+    /// use call that cannot work.
+    /// </summary>
+    [Fact]
+    public async Task CallTool_SecretWithACampaignsDatabaseHoldingNoCampaign_SaysNoSessionIsLive()
+    {
+        var created = _server.SuccessText(await _server.CallToolJsonAsync("campaign", """{"action": "create", "name": "Gone", "role": "dm", "ruleset": "2024"}"""));
+        var batch = Regex.Match(created, "Batch `([0-9a-f-]{36})`").Groups[1].Value;
+        _server.SuccessText(await _server.CallToolJsonAsync("campaign_history", $$"""{"action": "undo", "batch_id": "{{batch}}", "campaign": "gone"}"""));
+        Assert.True(File.Exists(Campaigns.Database.Path));
+
+        var lines = await RollAsync("""{"expression": "1d20", "secret": true}""");
+
+        Assert.Equal("Not logged: no session is live.", lines[^1]);
+    }
+
+    /// <summary>
+    /// Kills H06 (FH10, M03): with no path for campaigns.db (no home directory, no DND_MCP_DATA_DIR or DND_MCP_DB) there is
+    /// no campaign to log to, so a roll is still a roll and a secret one says it was not logged. The environment is a
+    /// stand-in with no home, so nothing reaches the user's files.
+    /// </summary>
+    [Fact]
+    public void Roll_NoPathForCampaignsDb_RollsAndSaysNotLogged()
+    {
+        using var service = new CampaignService(new DndMcpServerOptions { Paths = () => new Repository.DndMcpPaths(_ => null, homeDirectory: null) },
+            NullLogger<CampaignService>.Instance, NullLogger<CampaignDatabase>.Instance);
+        var dice = new DiceTools(new SeededDiceRoller(7), service, NullLogger<DiceTools>.Instance);
+
+        var plain = dice.Roll("1d20");
+        var secret = dice.Roll("1d20", secret: true);
+
+        Assert.DoesNotContain("Not logged", plain, StringComparison.Ordinal);
+        Assert.EndsWith("Not logged: no session is live.", secret.TrimEnd(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task CallTool_SeedDuringALiveSession_IsNotLoggedAndSaysWhy(bool secret)
+    {
+        Campaign();
+
+        var lines = await RollAsync($$"""{"expression": "4d6kh3", "seed": 42, "secret": {{(secret ? "true" : "false")}}}""");
+
+        Assert.Equal("Not logged: a seeded roll is a replay, not a table roll.", lines[^1]);
+        Assert.Equal("_Randomness: pseudo-random, reproducible (xoshiro256**, seed 42)._", lines[^2]);
+        Assert.Empty(Rows());
+    }
+
+    [Theory]
+    [InlineData("""{"expression": "1d20", "secret": true}""")]
+    [InlineData("""{"expression": "1d20"}""")]
+    public async Task CallTool_SeveralCampaignsNoneChosenOneLive_LogsNothingAndSaysWhy(string arguments)
+    {
+        // Another process's view: two campaigns, a live session in one, but nothing chosen for this process or persisted.
+        // The DM running that session expects the table's rolls in its log, so even a plain roll says why it is not there,
+        // and the use call it prints names the live one (use refuses a call without campaign).
+        var live = Campaign(use: false);
+        Campaign("One Piece", live: false, use: false);
+
+        var lines = await RollAsync(arguments);
+
+        Assert.Equal($"Not logged: no campaign is chosen (campaign {{\"action\": \"use\", \"campaign\": \"{live.Slug}\"}} chooses one).", lines[^1]);
+        Assert.Equal(Randomness, lines[^2]);
+        Assert.Empty(Rows());
+    }
+
+    /// <summary>
+    /// The use call the note prints works sent exactly as printed: it chooses the campaign with the live session, and the
+    /// next roll is logged to that session. Printed without campaign, use refused it.
+    /// </summary>
+    [Fact]
+    public async Task CallTool_SeveralCampaignsNoneChosenOneLive_TheUseCallAsPrintedMakesTheNextRollLogThere()
+    {
+        var live = Campaign(use: false);
+        Campaign("One Piece", live: false, use: false);
+        var note = (await RollAsync("""{"expression": "1d20"}"""))[^1];
+
+        var call = Regex.Match(note, "campaign (\\{[^}]*\\}) chooses one").Groups[1].Value;
+        _server.SuccessText(await _server.CallToolJsonAsync("campaign", call));
+        var logged = await RollAsync("""{"expression": "1d20"}""");
+
+        Assert.Equal($"Logged to {live.Slug}, session 1.", logged[^1]);
+        Assert.Equal(live.Slug, Assert.Single(Rows()).Campaign);
+    }
+
+    /// <summary>
+    /// FH3 (U12): the current campaign has nothing live but another campaign's session is live (started in another Claude
+    /// session, or named explicitly in a start here before this fix): every roll says so, naming the live campaign and the
+    /// use call that sends the next roll there. Nothing said for a plain roll left the night's rolls out of the live log
+    /// silently, and "no session is live" for a secret roll was false.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"expression": "1d20+5", "label": "Perception"}""")]
+    [InlineData("""{"expression": "1d20+3", "label": "Stealth", "secret": true}""")]
+    public async Task CallTool_CurrentCampaignHasNothingLiveButAnotherHas_EveryRollNamesTheLiveOne(string arguments)
+    {
+        var belmakor = Campaign();
+        var onePiece = Campaign("One Piece", live: false);
+
+        var lines = await RollAsync(arguments);
+
+        Assert.Equal(
+            $"Not logged: {belmakor.Slug} has a live session but {onePiece.Slug} is the current campaign: campaign {{\"action\": \"use\", " +
+            $"\"campaign\": \"{belmakor.Slug}\"}}.", lines[^1]);
+        Assert.Equal(Randomness, lines[^2]);
+        Assert.Empty(Rows());
+    }
+
+    /// <summary>The use call that note prints works as printed: the next roll is logged to the live session.</summary>
+    [Fact]
+    public async Task CallTool_CurrentCampaignHasNothingLiveButAnotherHas_TheUseCallAsPrintedMakesTheNextRollLogThere()
+    {
+        var belmakor = Campaign();
+        Campaign("One Piece", live: false);
+        var note = (await RollAsync("""{"expression": "1d20"}"""))[^1];
+
+        _server.SuccessText(await _server.CallToolJsonAsync("campaign", Regex.Match(note, "campaign (\\{[^}]*\\})\\.$").Groups[1].Value));
+        var logged = await RollAsync("""{"expression": "1d20"}""");
+
+        Assert.Equal($"Logged to {belmakor.Slug}, session 1.", logged[^1]);
+        Assert.Equal(belmakor.Slug, Assert.Single(Rows()).Campaign);
+    }
+
+    /// <summary>
+    /// Several campaigns live but not the current one: the note names them all, and the use call leaves the slug to fill.
+    /// A seeded roll is never a table roll, so it says that instead.
+    /// </summary>
+    [Fact]
+    public async Task CallTool_CurrentCampaignHasNothingLiveButTwoOthersHave_NamesBothAndASeededRollSaysItIsAReplay()
+    {
+        Campaign("Alpha");
+        Campaign("Beta");
+        Campaign("Gamma", live: false);
+
+        var plain = await RollAsync("""{"expression": "1d20"}""");
+        var seeded = await RollAsync("""{"expression": "1d20", "seed": 7}""");
+
+        Assert.Equal("Not logged: alpha and beta have live sessions but gamma is the current campaign: campaign {\"action\": \"use\", " +
+                     "\"campaign\": \"<slug>\"}.", plain[^1]);
+        Assert.Equal("Not logged: a seeded roll is a replay, not a table roll.", seeded[^1]);
+        Assert.Empty(Rows());
+    }
+
+    /// <summary>
+    /// FH9 (L09): an open roll's label is printed in every player view of the session's dice (a secret roll's is not), so
+    /// the label's description says so: a DM labelling an NPC's roll with a true name the party does not know would
+    /// otherwise publish it to the players.
+    /// </summary>
+    [Fact]
+    public async Task ToolSchema_Label_SaysAnOpenRollsLabelIsShownToThePlayersViews()
+    {
+        var tool = Assert.Single(await _server.Client.ListToolsAsync(), t => t.Name == "dice_roll");
+
+        var label = tool.JsonSchema.GetProperty("properties").GetProperty("label").GetProperty("description").GetString()!;
+
+        Assert.Contains("an open roll's label is shown to the players' views of that session", label, StringComparison.Ordinal);
+        Assert.Contains("or roll secret", label, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_SeveralCampaignsNoneChosenNoneLive_SaysWhyOnlyForSecret()
+    {
+        Campaign(live: false, use: false);
+        Campaign("One Piece", live: false, use: false);
+
+        var secret = await RollAsync("""{"expression": "1d20", "secret": true}""");
+        var plain = await RollAsync("""{"expression": "1d20"}""");
+
+        // No campaign is live, so none can be named: the call says where the slug goes.
+        Assert.Equal("Not logged: no campaign is chosen (campaign {\"action\": \"use\", \"campaign\": \"<slug>\"} chooses one).", secret[^1]);
+        Assert.Equal(Randomness, plain[^1]);
+        Assert.Equal(2, plain.Length);
+        Assert.Empty(Rows());
+    }
+
+    [Fact]
+    public async Task CallTool_ProcessCurrentCampaignAndAnotherActive_LogsToTheProcessCurrentOne()
+    {
+        // Contract §3.11: process current, then the persisted active one (which another Claude session may have set),
+        // then the only one. Both campaigns are live, so a roll sent to the wrong one would still be "logged".
+        var belmakor = Campaign();
+        var onePiece = Campaign("One Piece");
+        Campaigns.Use(belmakor.Slug);
+        Campaigns.SetCurrent(onePiece.Id);
+
+        var lines = await RollAsync("""{"expression": "1d20"}""");
+
+        Assert.Equal("Logged to one-piece, session 1.", lines[^1]);
+        Assert.Equal("one-piece", Assert.Single(Rows()).Campaign);
+    }
+
+    [Fact]
+    public async Task CallTool_OnlyCampaignNotChosen_IsResolvedAndLogged()
+    {
+        // Resolution is process current, else active, else the only campaign (contract §3.11).
+        var campaign = Campaigns.Store.Create("Belmakor", "dm", "2024").Campaign;
+        new SessionWriter(Campaigns.Database).Start(campaign);
+
+        var lines = await RollAsync("""{"expression": "1d20"}""");
+
+        Assert.Equal("Logged to belmakor, session 1.", lines[^1]);
+        Assert.Single(Rows());
+    }
+
+    [Fact]
+    public async Task CallTool_WriteLockedByAnotherProcess_ShowsTheDiceAndSaysNotLoggedWithoutAnError()
+    {
+        Campaign();
+        using var other = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Campaigns.Database.Path, Pooling = false }.ToString());
+        other.Open();
+        using (var begin = other.CreateCommand())
+        {
+            begin.CommandText = "BEGIN IMMEDIATE";
+            begin.ExecuteNonQuery();
+        }
+
+        // The write waits out busy_timeout (5 s), then gives up: the roll is still the answer.
+        var result = await _server.CallToolJsonAsync("dice_roll", """{"expression": "2d6+3"}""");
+
+        var lines = _server.SuccessText(result).Split('\n');
+        Assert.Equal("Not logged: the campaign database could not be written; this roll stands.", lines[^1]);
+        Assert.Equal(Randomness, lines[^2]);
+        var roll = DiceToolTests.SingleRollRegex().Match(lines[0]);
+        Assert.Equal(long.Parse(roll.Groups["total"].Value, CultureInfo.InvariantCulture), DiceToolTests.Audit(roll.Groups["breakdown"].Value));
+        Assert.Contains(_server.ServerLog.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("not logged", StringComparison.Ordinal));
+        using (var rollback = other.CreateCommand())
+        {
+            rollback.CommandText = "ROLLBACK";
+            rollback.ExecuteNonQuery();
+        }
+
+        Assert.Empty(Rows());
+    }
+
+    [Fact]
+    public async Task CallTool_DamagedCampaignsDatabase_ShowsTheDiceAndSaysNotLogged()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(Campaigns.Database.Path)!);
+        await File.WriteAllTextAsync(Campaigns.Database.Path, "this is not a SQLite database, just some bytes");
+
+        var lines = await RollAsync("""{"expression": "1d20"}""");
+
+        // The store's own first sentence (written for the user: which file, what is wrong), then that the roll stands.
+        Assert.Equal(
+            $"Not logged: campaigns.db at {Campaigns.Database.Path} is damaged or is not a dnd-mcp database, so campaign tools " +
+            "cannot use it; this roll stands.",
+            lines[^1]);
+        Assert.Matches(@"^\*\*\d+\*\*  \(1d20 → \[\d+\]\)$", lines[0]);
+    }
+
+    [Fact]
+    public async Task CallTool_CampaignsDatabaseFromANewerVersion_SaysSoAndTheRollStands()
+    {
+        // The reason a user can act on (update dnd-mcp) is in the line, not only in a server log nobody reads.
+        Directory.CreateDirectory(Path.GetDirectoryName(Campaigns.Database.Path)!);
+        using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Campaigns.Database.Path, Pooling = false }.ToString()))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA user_version = 99";
+            command.ExecuteNonQuery();
+        }
+
+        var lines = await RollAsync("""{"expression": "1d20", "secret": true}""");
+
+        Assert.StartsWith($"Not logged: campaigns.db at {Campaigns.Database.Path} was written by a newer version of dnd-mcp (schema version 99;", lines[^1], StringComparison.Ordinal);
+        Assert.EndsWith("so this version will not read or change it; this roll stands.", lines[^1], StringComparison.Ordinal);
+        Assert.DoesNotContain("Update dnd-mcp", lines[^1], StringComparison.Ordinal);
+        Assert.Equal(Randomness, lines[^2]);
+        Assert.Contains(_server.ServerLog.Entries, e => e.Level == LogLevel.Warning && e.Category == typeof(DiceTools).FullName);
+    }
+
+    [Fact]
+    public async Task CallTool_MigrationWaitsOnAnotherProcessesLock_SaysCouldNotBeReadNotTheStoresTryAgain()
+    {
+        // The store's lock message says "this call did nothing. Try again": beside a roll that stands, that reads as "roll
+        // again", so the lock keeps the fixed wording. An empty campaigns.db needs its first migration, whose BEGIN
+        // IMMEDIATE waits out busy_timeout (5 s) behind the other connection's write lock.
+        Directory.CreateDirectory(Path.GetDirectoryName(Campaigns.Database.Path)!);
+        await File.WriteAllBytesAsync(Campaigns.Database.Path, []);
+        using var other = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Campaigns.Database.Path, Pooling = false }.ToString());
+        other.Open();
+        using (var begin = other.CreateCommand())
+        {
+            begin.CommandText = "BEGIN IMMEDIATE";
+            begin.ExecuteNonQuery();
+        }
+
+        var lines = await RollAsync("""{"expression": "1d20", "secret": true}""");
+
+        Assert.Equal("Not logged: the campaign database could not be read; this roll stands.", lines[^1]);
+        using (var rollback = other.CreateCommand())
+        {
+            rollback.CommandText = "ROLLBACK";
+            rollback.ExecuteNonQuery();
+        }
+    }
+
+    [Fact]
+    public async Task CallTool_SessionTableUnreadable_ShowsTheDiceAndSaysNotLogged()
+    {
+        // A raw SQLite error after the open (a damaged table): the dice still stand, with the fixed wording (SQLite's own
+        // text is not the user's), never the SDK's "An error occurred invoking 'dice_roll'".
+        Campaign();
+        using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Campaigns.Database.Path, Pooling = false }.ToString()))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA foreign_keys=OFF; PRAGMA legacy_alter_table=ON; ALTER TABLE session RENAME TO session_gone;";
+            command.ExecuteNonQuery();
+        }
+
+        var lines = await RollAsync("""{"expression": "1d20"}""");
+
+        Assert.Equal("Not logged: the campaign database could not be read; this roll stands.", lines[^1]);
+        Assert.Matches(@"^\*\*\d+\*\*  \(1d20 → \[\d+\]\)$", lines[0]);
+    }
+
+    [Fact]
+    public async Task CallTool_OpeningCampaignsDatabaseThrowsInvalidOperation_ShowsTheDiceAndSaysNotLogged()
+    {
+        // CampaignDatabase's own SQLite check throws InvalidOperationException, and so does a database already disposed (a
+        // roll racing the server's shutdown, reproduced here): both are the store's failure at the open, not a bug.
+        Campaign();
+        Campaigns.Database.Dispose();
+
+        var lines = await RollAsync("""{"expression": "1d20"}""");
+
+        Assert.Equal("Not logged: the campaign database could not be read; this roll stands.", lines[^1]);
+        Assert.Matches(@"^\*\*\d+\*\*  \(1d20 → \[\d+\]\)$", lines[0]);
+    }
+
+    [Fact]
+    public async Task CallTool_KeepHighest_DetailHoldsEveryFaceAndTheDroppedDie()
+    {
+        Campaign();
+
+        await RollAsync("""{"expression": "4d6kh3+2[str]"}""");
+
+        var row = Assert.Single(Rows());
+        using var detail = JsonDocument.Parse(row.Detail);
+        var root = detail.RootElement;
+        Assert.Equal(1, root.GetProperty("v").GetInt32());
+        Assert.Equal("cryptographic (OS CSPRNG)", root.GetProperty("source").GetString());
+        Assert.False(root.TryGetProperty("faces_omitted", out _));
+        var group = Assert.Single(root.GetProperty("groups").EnumerateArray());
+        Assert.Equal("4d6kh3", group.GetProperty("term").GetString());
+        Assert.Equal(JsonValueKind.Null, group.GetProperty("label").ValueKind);
+        var dice = group.GetProperty("dice").EnumerateArray().ToList();
+        Assert.Equal(4, dice.Count);
+        Assert.Single(dice, d => d.TryGetProperty("dropped", out var dropped) && dropped.GetBoolean());
+        Assert.All(dice, d => Assert.Equal(d.GetProperty("value").GetInt64(), Assert.Single(d.GetProperty("faces").EnumerateArray()).GetProperty("face").GetInt64()));
+        var kept = dice.Where(d => !d.TryGetProperty("dropped", out _)).Sum(d => d.GetProperty("value").GetInt64());
+        Assert.Equal(kept, group.GetProperty("value").GetInt64());
+        Assert.Equal(kept + 2, row.Total);
+    }
+
+    [Fact]
+    public async Task CallTool_RerollsExplosionsAndLabels_AreStoredAsFactsNotEnums()
+    {
+        // Unseeded (a seeded roll is never logged), so every assertion holds for any faces the dice show. Enough dice that
+        // a reroll (all but 6^-10) and an explosion (all but 0.75^40) are all but certain to be there to check.
+        Campaign();
+
+        await RollAsync("""{"expression": "10d6ro<=5[fire]+40d4!"}""");
+
+        var row = Assert.Single(Rows());
+        using var detail = JsonDocument.Parse(row.Detail);
+        var groups = detail.RootElement.GetProperty("groups").EnumerateArray().ToList();
+        Assert.Equal(["10d6ro<=5", "40d4!"], groups.Select(g => g.GetProperty("term").GetString()));
+        Assert.Equal("fire", groups[0].GetProperty("label").GetString());
+        Assert.Equal(JsonValueKind.Null, groups[1].GetProperty("label").ValueKind);
+
+        // ro<=5 rerolls a die once when it shows 5 or less: the face rerolled away comes first, marked, and the last face
+        // is the one that counts.
+        Assert.All(groups[0].GetProperty("dice").EnumerateArray(), d =>
+        {
+            var faces = d.GetProperty("faces").EnumerateArray().ToList();
+            Assert.InRange(faces.Count, 1, 2);
+            if (faces.Count == 2)
+            {
+                Assert.True(faces[0].GetProperty("rerolled").GetBoolean());
+                Assert.InRange(faces[0].GetProperty("face").GetInt32(), 1, 5);
+            }
+            else
+            {
+                Assert.Equal(6, faces[0].GetProperty("face").GetInt32());
+            }
+
+            Assert.False(faces[^1].TryGetProperty("rerolled", out _));
+            Assert.Equal(faces[^1].GetProperty("face").GetInt64(), d.GetProperty("value").GetInt64());
+        });
+
+        // 40d4! adds a pool die for every 4 rolled: exactly the dice showing 4 are marked exploded, one added die each.
+        var exploding = groups[1].GetProperty("dice").EnumerateArray().ToList();
+        Assert.All(exploding, d => Assert.Equal(
+            d.GetProperty("value").GetInt64() == 4,
+            d.TryGetProperty("exploded", out var exploded) && exploded.GetBoolean()));
+        Assert.Equal(40 + exploding.Count(d => d.TryGetProperty("exploded", out _)), exploding.Count);
+        Assert.Equal(exploding.Sum(d => d.GetProperty("value").GetInt64()), groups[1].GetProperty("value").GetInt64());
+        Assert.Equal(groups.Sum(g => g.GetProperty("value").GetInt64()), row.Total);
+
+        // The rules come back from the expression text: no rule, operator or comparison is stored as a field or a number.
+        foreach (var field in new[] { "\"keep\"", "\"reroll\"", "\"explode\"", "\"comparison\"", "\"kind\"", "\"sides\"" })
+        {
+            Assert.DoesNotContain(field, row.Detail, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData("1000d6", false)]
+    [InlineData("1000d6!", true)]
+    [InlineData("1000d6ro<=5", true)]
+    [InlineData("1000d6!!", true)]
+    public async Task CallTool_ManyFaces_StoresFacesUpTo1000PerRollThenOnlyGroupValues(string expression, bool omitted)
+    {
+        // 1000d6 is exactly 1,000 faces; 1000d6! explodes on about one die in six, so it passes 1,000 all but always. The
+        // cap counts physical faces, not dice: 1000d6ro<=5 and 1000d6!! keep 1,000 dice but roll far more faces.
+        Campaign();
+
+        await RollAsync($$"""{"expression": "{{expression}}"}""");
+
+        var row = Assert.Single(Rows());
+        using var detail = JsonDocument.Parse(row.Detail);
+        var root = detail.RootElement;
+        var group = Assert.Single(root.GetProperty("groups").EnumerateArray());
+        Assert.Equal(row.Total, group.GetProperty("value").GetInt64());
+        Assert.Equal(omitted, root.TryGetProperty("faces_omitted", out var count));
+        Assert.Equal(!omitted, group.TryGetProperty("dice", out _));
+        if (omitted)
+        {
+            Assert.True(count.GetInt64() > DiceLogDetail.MaxFacesStored, $"faces_omitted {count.GetInt64()}");
+        }
+        else
+        {
+            Assert.Equal(1000, group.GetProperty("dice").GetArrayLength());
+        }
+    }
+
+    [Theory]
+    [InlineData("40d10cs>=8", false)]
+    [InlineData("40d10cs>=8cf=1", true)]
+    public async Task CallTool_SuccessCounting_DetailHoldsEachDiesScore(string expression, bool failures)
+    {
+        // Success counting sums scores, not values: without each die's score a re-render loses its ✓/✗ and the group
+        // value cannot be checked. 40 dice: a success (and with cf=1 a failure) is all but certain to be there.
+        Campaign();
+
+        await RollAsync($$"""{"expression": "{{expression}}"}""");
+
+        var row = Assert.Single(Rows());
+        using var detail = JsonDocument.Parse(row.Detail);
+        var group = Assert.Single(detail.RootElement.GetProperty("groups").EnumerateArray());
+        var dice = group.GetProperty("dice").EnumerateArray().ToList();
+        static int Score(JsonElement die) => die.TryGetProperty("score", out var score) ? score.GetInt32() : 0;
+        Assert.All(dice, d =>
+        {
+            var value = d.GetProperty("value").GetInt64();
+            Assert.Equal(value >= 8 ? 1 : failures && value == 1 ? -1 : 0, Score(d));
+        });
+        Assert.Contains(dice, d => Score(d) == 1);
+        Assert.Equal(dice.Sum(Score), group.GetProperty("value").GetInt64());
+        Assert.Equal(row.Total, group.GetProperty("value").GetInt64());
+    }
+
+    [Fact]
+    public async Task CallTool_Penetrating_DetailMarksEveryAddedDie()
+    {
+        // !p adds a die per explosion that counts one less than its face: the flag is what makes raw = face - 1 readable.
+        Campaign();
+
+        await RollAsync("""{"expression": "40d6!p"}""");
+
+        var row = Assert.Single(Rows());
+        using var detail = JsonDocument.Parse(row.Detail);
+        var dice = Assert.Single(detail.RootElement.GetProperty("groups").EnumerateArray()).GetProperty("dice").EnumerateArray().ToList();
+        static bool Flag(JsonElement die, string name) => die.TryGetProperty(name, out var flag) && flag.GetBoolean();
+        var penetrated = dice.Where(d => Flag(d, "penetrated")).ToList();
+        Assert.NotEmpty(penetrated);
+        Assert.Equal(dice.Count - 40, penetrated.Count);
+        Assert.Equal(dice.Count(d => Flag(d, "exploded")), penetrated.Count);
+        Assert.All(penetrated, d => Assert.Equal(
+            Assert.Single(d.GetProperty("faces").EnumerateArray()).GetProperty("face").GetInt64() - 1, d.GetProperty("raw").GetInt64()));
+    }
+
+    [Fact]
+    public async Task CallTool_Compounding_DetailMarksEveryExplodedFaceOfAChain()
+    {
+        // !! keeps one die per chain (6!+6!+2): the face-level flag is how a re-render shows which faces exploded.
+        Campaign();
+
+        await RollAsync("""{"expression": "40d6!!"}""");
+
+        var row = Assert.Single(Rows());
+        using var detail = JsonDocument.Parse(row.Detail);
+        var dice = Assert.Single(detail.RootElement.GetProperty("groups").EnumerateArray()).GetProperty("dice").EnumerateArray().ToList();
+        Assert.Equal(40, dice.Count);
+        Assert.Contains(dice, d => d.GetProperty("faces").GetArrayLength() > 1);
+        Assert.All(dice, d =>
+        {
+            var faces = d.GetProperty("faces").EnumerateArray().ToList();
+            Assert.All(faces.SkipLast(1), f => Assert.True(f.TryGetProperty("exploded", out var e) && e.GetBoolean(), f.GetRawText()));
+            Assert.False(faces[^1].TryGetProperty("exploded", out _), faces[^1].GetRawText());
+            Assert.Equal(faces.Sum(f => f.GetProperty("face").GetInt64()), d.GetProperty("value").GetInt64());
+        });
+    }
+
+    [Fact]
+    public async Task CallTool_LargestLoggedRoll_StaysUnderTheOutputCeiling()
+    {
+        Campaign();
+
+        var text = _server.SuccessText(await _server.CallToolJsonAsync("dice_roll", """{"expression": "1000d1000", "times": 100, "secret": true}"""));
+
+        Assert.True(text.Length < 16_000, $"dice_roll returned {text.Length} characters.");
+        Assert.EndsWith("\nLogged to belmakor, session 1 (secret).", text, StringComparison.Ordinal);
+        Assert.Equal(100, Rows().Count);
     }
 }

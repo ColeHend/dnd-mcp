@@ -22,7 +22,13 @@ public static class DslValues
         public const string E2014 = "2014";
         public const string E2024 = "2024";
 
-        /// <summary>The default when a build names none, matching the rules tools' default.</summary>
+        /// <summary>
+        /// The edition when a build (or an archetype entry) names none and nothing else chose one: the last resort, as 2024
+        /// is for the rules tools. It is not "the" default any more: with a campaign active the host gives a spec that names
+        /// no edition the campaign's ruleset (or the call's own edition) before the Domain sees it (the host's
+        /// <c>CampaignEditionFill</c>), as the rules tools resolve explicit, else the campaign's, else this. So a 2014
+        /// campaign never lands here, and changing this value changes only calls made with no campaign active.
+        /// </summary>
         public const string Default = E2024;
 
         public static readonly DslValueSet Set = new("edition", [E2014, E2024]);

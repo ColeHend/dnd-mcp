@@ -373,8 +373,8 @@ public sealed class RulesGetToolTests : IClassFixture<McpServerHarness>
     [InlineData("2014/race/elf", "2024", "2024/species/elf")]
     public async Task CallTool_RefFromOneEditionWithTheOtherEdition_OffersARefThatResolves(string reference, string edition, string offered)
     {
-        // A model helping with a 2014 game copies a 2024 ref out of rules_search (which defaults to 2024) and asks for
-        // edition 2014. The advice must be a ref that exists; following a made-up one costs a call and a second error.
+        // A model helping with a 2014 game copies a 2024 ref out of rules_search (a 2024 search: no campaign, or a 2024
+        // one) and asks for edition 2014. The advice must be a ref that exists; following a made-up one costs a call and a second error.
         var error = await GetErrorAsync($$"""{"ref":"{{reference}}","edition":"{{edition}}"}""");
 
         Assert.EndsWith($", or use the ref {offered}.", error, StringComparison.Ordinal);

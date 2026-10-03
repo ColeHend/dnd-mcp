@@ -300,7 +300,10 @@ public sealed class ArchetypeCatalogTests
     {
         var ex = Assert.Throws<DndInputException>(() => ArchetypeCatalog.Build("fighter", 5, edition));
 
-        Assert.Equal($"edition \"{edition}\" is not an edition; give \"2014\" or \"2024\" (default \"2024\").", ex.Message);
+        // What leaving it out means, in the order balance_simulate applies it: never a bare "(default 2024)", which a 2014
+        // campaign would contradict.
+        Assert.Equal($"edition \"{edition}\" is not an edition; give \"2014\" or \"2024\" (left out: the fight's edition; else, with a 2014 " +
+                     "or 2024 campaign active, the first party entry's, else the campaign's; else \"2024\").", ex.Message);
     }
 
     [Fact]

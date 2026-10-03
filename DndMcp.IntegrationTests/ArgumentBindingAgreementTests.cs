@@ -21,8 +21,13 @@ namespace DndMcp.IntegrationTests;
 /// <c>kinds: ["spell", 3]</c> fails inside it exactly like a wrong top-level type. rules_search's <c>kinds</c> is the
 /// first array parameter, and the fixture's server includes the production tools, so it is pinned here directly.
 /// </para>
+/// <para>
+/// The campaign tools have the most optional arguments of any (campaign_session has 20), and each action uses a few:
+/// a model fills the rest with null. Their rows run against <see cref="OneCampaignServer"/>, whose campaign lets every
+/// tool get past campaign resolution to the argument handling under test.
+/// </para>
 /// </summary>
-public sealed class ArgumentBindingAgreementTests : IClassFixture<TestOnlyToolsServer>
+public sealed class ArgumentBindingAgreementTests : IClassFixture<TestOnlyToolsServer>, IClassFixture<OneCampaignServer>
 {
     private const string Prefix = "An error occurred invoking 'echo_numbers': ";
 
@@ -34,10 +39,12 @@ public sealed class ArgumentBindingAgreementTests : IClassFixture<TestOnlyToolsS
         "rules_search accepts: query (string, required), edition (string, optional), kinds (array of string, optional), limit (integer, optional).";
 
     private readonly McpServerHarness _server;
+    private readonly McpServerHarness _campaign;
 
-    public ArgumentBindingAgreementTests(TestOnlyToolsServer fixture)
+    public ArgumentBindingAgreementTests(TestOnlyToolsServer fixture, OneCampaignServer campaign)
     {
         _server = fixture.Harness;
+        _campaign = campaign.Harness;
     }
 
     [Theory]
@@ -279,5 +286,102 @@ public sealed class ArgumentBindingAgreementTests : IClassFixture<TestOnlyToolsS
 
         Assert.Contains("at level 5 against AC 15 — a 3-round fight (the mean per round)", text, StringComparison.Ordinal);
         Assert.Contains("2014 DMG: 6–8 encounters, 2 short rests", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("campaign", "\"action\":\"list\"", "campaign", "name", "role", "ruleset", "dm_name", "slug", "settings", "party_name", "my_character",
+        "status", "summary_md", "current_location", "current_ingame", "perspective", "reason", "session", "dry_run")]
+    [InlineData("campaign", "\"action\":\"summary\"", "campaign", "name", "role", "ruleset", "dm_name", "slug", "settings", "party_name", "my_character",
+        "status", "summary_md", "current_location", "current_ingame", "perspective", "reason", "session", "dry_run")]
+    [InlineData("campaign_search", "", "query", "kinds", "statuses", "tags", "perspective", "include_facts", "as_of_session", "limit", "cursor", "campaign")]
+    [InlineData("campaign_get", "\"refs\":[\"character:iron-guts\"]", "include", "detail", "perspective", "as_of_session", "campaign")]
+    [InlineData("campaign_knowledge", "\"action\":\"check\",\"text\":\"Iron Guts owes us a favour.\"", "campaign", "targets", "knowers", "facts", "secret",
+        "handout", "to", "how", "who", "perspective", "diegetic", "audience", "about", "perspectives", "as_of_session", "session", "reason", "dry_run")]
+    [InlineData("campaign_knowledge", "\"action\":\"ledger\",\"about\":[\"character:iron-guts\"]", "campaign", "targets", "knowers", "facts", "secret",
+        "handout", "to", "how", "who", "text", "perspective", "diegetic", "audience", "perspectives", "as_of_session", "session", "reason", "dry_run")]
+    [InlineData("campaign_session", "\"action\":\"list\"", "campaign", "session", "title", "arc", "prep_md", "played_on", "precision", "attendance", "ingame",
+        "ingame_end", "notes", "recap_md", "next_hooks", "confidence", "status", "limit", "cursor", "perspective", "reason", "dry_run")]
+    [InlineData("campaign_history", "\"action\":\"since\"", "since", "session", "targets", "ref", "refs", "detail", "batch_id", "dry_run", "reason", "limit",
+        "cursor", "campaign")]
+    public async Task CallTool_CampaignToolNullForEveryOptionalArgument_MeansTheDefault(string tool, string given, params string[] optional)
+    {
+        // Models send null for "use the default" and for every argument the action does not use. The binder makes null and
+        // "left out" the same C# null, so what breaks is the published schema: a parameter declared non-nullable (a
+        // `string perspective = "author"` default, a non-nullable dictionary) is published without null, and the argument
+        // guard then refuses a correct call ("should be string but was null") at the cost of a retry. The row must name
+        // every optional argument the schema has, so a new one cannot skip this check.
+        var schema = (await _campaign.Client.ListToolsAsync()).Single(t => t.Name == tool).JsonSchema;
+        var plain = "{" + given + "}";
+        var withNulls = "{" + string.Join(",", new[] { given }.Where(g => g.Length > 0).Concat(optional.Select(o => $"\"{o}\":null"))) + "}";
+        using (var givenNames = JsonDocument.Parse(plain))
+        {
+            Assert.Equal(
+                schema.GetProperty("properties").EnumerateObject().Select(p => p.Name).Except(givenNames.RootElement.EnumerateObject().Select(p => p.Name))
+                    .Order(StringComparer.Ordinal),
+                optional.Order(StringComparer.Ordinal));
+        }
+
+        var defaulted = _campaign.SuccessText(await _campaign.CallToolJsonAsync(tool, plain));
+        var nulls = _campaign.SuccessText(await _campaign.CallToolJsonAsync(tool, withNulls));
+
+        Assert.Equal(defaulted, nulls);
+    }
+
+    [Fact]
+    public async Task CallTool_CampaignWriteNullOptionalArgumentsAndNullOpFields_WriteTheOpForReal()
+    {
+        // dry_run null must mean false (read as a preview, the batch the model reports was never written) and campaign null
+        // the current campaign. A null field inside an op must pass the published item schema and count as not given: the
+        // Domain validator refuses a field the op does not take, so a null statement or gate counted as given would refuse
+        // an upsert models routinely send that way.
+        var name = "Null Harbour " + Guid.NewGuid().ToString("N")[..8];
+        var text = _campaign.SuccessText(await _campaign.CallToolJsonAsync("campaign_write",
+            $$"""
+            {"ops":[{"op":"upsert","kind":"location","name":"{{name}}","ref":null,"statement":null,"gate":null,"known_by":null,"data":null,"clock":null,"aliases":null,
+                     "tags":null,"sort_key":null,"attitude":null,"symmetric":null,"amount":null,"introduced_session":null,"established_session":null}],
+             "campaign":null,"session":null,"reason":null,"dry_run":null}
+            """));
+
+        Assert.StartsWith($"# campaign_write: 1 op applied ({OneCampaignServer.Slug})", text, StringComparison.Ordinal);
+        Assert.Contains("Batch `", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Dry run", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    // Dry runs, so each pair reads the same campaign: a knower, an attendance entry and an alias with every optional field
+    // null, against the same item with those fields left out.
+    [InlineData("campaign_knowledge",
+        """{"action":"record","targets":["character:iron-guts"],"knowers":[{"who":"character:aria-vale","state":null,"known_as":null,"how":null,"via":null,"session":null,"note":null}],"dry_run":true}""",
+        """{"action":"record","targets":["character:iron-guts"],"knowers":[{"who":"character:aria-vale"}],"dry_run":true}""")]
+    [InlineData("campaign_session",
+        """{"action":"start","attendance":[{"character":"character:aria-vale","present":null,"note":null}],"dry_run":true}""",
+        """{"action":"start","attendance":[{"character":"character:aria-vale"}],"dry_run":true}""")]
+    [InlineData("campaign_write",
+        """{"ops":[{"op":"upsert","ref":"character:iron-guts","aliases":[{"alias":"Old Guts","visibility":null}]}],"dry_run":true}""",
+        """{"ops":[{"op":"upsert","ref":"character:iron-guts","aliases":[{"alias":"Old Guts"}]}],"dry_run":true}""")]
+    public async Task CallTool_CampaignItemWithNullFields_MeansItsDefaults(string tool, string withNulls, string without)
+    {
+        // The same rule one level down, where the schema comes from the spec classes (KnowerSpec, AttendanceSpec, AliasSpec):
+        // a field declared non-nullable there is published without null and the guard refuses the whole item. A knower's
+        // state null is "knows", an attendee's present null is "present", an alias's visibility null is the default.
+        var defaulted = _campaign.SuccessText(await _campaign.CallToolJsonAsync(tool, without));
+        var nulls = _campaign.SuccessText(await _campaign.CallToolJsonAsync(tool, withNulls));
+
+        Assert.Equal(defaulted, nulls);
+    }
+
+    [Theory]
+    // Quoted integers bind as their numbers (AllowReadingFromString), as they do for every other tool.
+    [InlineData("campaign_search", """{"limit":"1"}""", """{"limit":1}""")]
+    [InlineData("campaign_session", """{"action":"list","limit":"1"}""", """{"action":"list","limit":1}""")]
+    [InlineData("campaign_history", """{"action":"since","limit":"1"}""", """{"action":"since","limit":1}""")]
+    // An empty filter list is no filter: models send [] for "none".
+    [InlineData("campaign_search", """{"kinds":[],"statuses":[],"tags":[]}""", "{}")]
+    public async Task CallTool_CampaignToolArgumentsTheBinderReadsAlike_GiveTheSameResult(string tool, string oneForm, string otherForm)
+    {
+        var first = _campaign.SuccessText(await _campaign.CallToolJsonAsync(tool, oneForm));
+        var second = _campaign.SuccessText(await _campaign.CallToolJsonAsync(tool, otherForm));
+
+        Assert.Equal(second, first);
     }
 }

@@ -149,6 +149,104 @@ public sealed class DndMcpPathsTests
     }
 
     [Fact]
+    public void CampaignDatabasePath_NoVariable_IsCampaignsDbInTheDataDirectory()
+    {
+        var paths = new DndMcpPaths(Environment(("DND_MCP_DATA_DIR", Path.Combine(Root, "my-data"))), Home);
+
+        Assert.Equal(Path.Combine(Root, "my-data", "campaigns.db"), paths.CampaignDatabasePath);
+        Assert.Equal("campaigns.db", DndMcpPaths.CampaignDatabaseFileName);
+    }
+
+    /// <summary>
+    /// DND_MCP_DB names the campaigns.db file itself (a synced folder, say) and wins over the data directory for it,
+    /// leaving the data directory alone for everything else.
+    /// </summary>
+    [Fact]
+    public void CampaignDatabasePath_AbsoluteDndMcpDb_WinsOverTheDataDirectory()
+    {
+        var file = Path.Combine(Root, "sync", "dnd.sqlite");
+        var data = Path.Combine(Root, "my-data");
+
+        var paths = new DndMcpPaths(Environment(("DND_MCP_DB", file), ("DND_MCP_DATA_DIR", data)), Home);
+
+        Assert.Equal(file, paths.CampaignDatabasePath);
+        Assert.Equal(data, paths.DataDirectory);
+        Assert.Empty(paths.Warnings);
+    }
+
+    [Theory]
+    [InlineData("~/dnd/campaigns.db", "dnd/campaigns.db")]
+    [InlineData("~/campaigns.db", "campaigns.db")]
+    public void CampaignDatabasePath_DndMcpDbWithLeadingTilde_IsUnderTheHomeDirectory(string value, string underHome)
+    {
+        var paths = new DndMcpPaths(Environment(("DND_MCP_DB", value)), Home);
+
+        Assert.Equal(Path.GetFullPath(Path.Combine(Home, underHome.Replace('/', Path.DirectorySeparatorChar))), paths.CampaignDatabasePath);
+        Assert.Empty(paths.Warnings);
+    }
+
+    /// <summary>With DND_MCP_DB set, campaigns work without a home directory, as the cache does with its override.</summary>
+    [Fact]
+    public void CampaignDatabasePath_AbsoluteDndMcpDbWithoutAHome_NeedsNoHome()
+    {
+        var file = Path.Combine(Root, "campaigns.db");
+
+        var paths = new DndMcpPaths(Environment(("DND_MCP_DB", file)), homeDirectory: null);
+
+        Assert.Equal(file, paths.CampaignDatabasePath);
+        Assert.Throws<InvalidOperationException>(() => paths.DataDirectory);
+    }
+
+    [Theory]
+    [InlineData("campaigns.db")]
+    [InlineData("./data/campaigns.db")]
+    [InlineData("~user/campaigns.db")]
+    public void CampaignDatabasePath_RelativeDndMcpDb_IsIgnoredWithAWarning(string value)
+    {
+        var paths = new DndMcpPaths(Environment(("DND_MCP_DB", value)), Home);
+
+        Assert.Equal(Path.Combine(Home, ".local", "share", "dnd-mcp", "campaigns.db"), paths.CampaignDatabasePath);
+        var warning = Assert.Single(paths.Warnings);
+        Assert.StartsWith($"DND_MCP_DB is \"{value}\", which is not an absolute path, so it is ignored", warning, StringComparison.Ordinal);
+    }
+
+    /// <summary>DND_MCP_DB names a file: a directory-looking value would otherwise open a database named after the directory.</summary>
+    [Theory]
+    [InlineData("~")]
+    [InlineData("~/")]
+    [InlineData("~/dnd/")]
+    public void CampaignDatabasePath_DndMcpDbNamingADirectory_IsIgnoredWithAWarning(string value)
+    {
+        var paths = new DndMcpPaths(Environment(("DND_MCP_DB", value)), Home);
+
+        Assert.Equal(Path.Combine(Home, ".local", "share", "dnd-mcp", "campaigns.db"), paths.CampaignDatabasePath);
+        Assert.Equal(
+            $"DND_MCP_DB is \"{value}\", which names a directory, so it is ignored: it names the campaigns database file, " +
+            "e.g. \"~/dnd/campaigns.db\". To move every data file, set DND_MCP_DATA_DIR instead.",
+            Assert.Single(paths.Warnings));
+    }
+
+    [Fact]
+    public void CampaignDatabasePath_AbsoluteDirectoryWithTrailingSeparator_IsIgnoredWithAWarning()
+    {
+        var value = Path.Combine(Root, "dnd") + Path.DirectorySeparatorChar;
+
+        var paths = new DndMcpPaths(Environment(("DND_MCP_DB", value)), Home);
+
+        Assert.Equal(Path.Combine(Home, ".local", "share", "dnd-mcp", "campaigns.db"), paths.CampaignDatabasePath);
+        Assert.Contains("names a directory", Assert.Single(paths.Warnings), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CampaignDatabasePath_TildeWithoutAHome_IsIgnoredWithAWarning()
+    {
+        var paths = new DndMcpPaths(Environment(("DND_MCP_DB", "~/campaigns.db"), ("DND_MCP_DATA_DIR", Path.Combine(Root, "d"))), homeDirectory: null);
+
+        Assert.Equal(Path.Combine(Root, "d", "campaigns.db"), paths.CampaignDatabasePath);
+        Assert.Contains("no home directory to expand ~ against", Assert.Single(paths.Warnings), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FromEnvironment_RealEnvironment_ResolvesToAbsolutePaths()
     {
         var paths = DndMcpPaths.FromEnvironment();

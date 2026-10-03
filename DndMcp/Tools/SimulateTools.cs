@@ -30,8 +30,17 @@ namespace DndMcp.Tools;
 /// </para>
 /// <para>
 /// <b>Which edition's stat block.</b> A monster is looked up in its entry's <c>edition</c>, else the fight's
-/// <c>edition</c>, else the party's (the first party entry's build or entry edition), else 2024: a party of 2014 builds
-/// fights 2014 ogres unless told otherwise, as the fight itself follows the party's rules.
+/// <c>edition</c>, else the party's (the first party entry's build or entry edition), else the active campaign's ruleset,
+/// else 2024: a party of 2014 builds fights 2014 ogres unless told otherwise, as the fight itself follows the party's rules.
+/// </para>
+/// <para>
+/// <b>The campaign's ruleset</b> (contract §9): with a campaign active, every build and archetype entry that names no
+/// edition is given one before the Domain sees it (<see cref="CampaignEditionFill"/>): the call's fight <c>edition</c>,
+/// else the first party entry's, else the campaign's ruleset, and the result's notes say so when the campaign decided.
+/// The fight's own edition then follows the party as always. The call's editions come first so a campaign never mixes
+/// editions the call did not: without it, in a 2014 campaign, <c>"edition": "2014"</c> would leave a build that names none
+/// on 2024 rules (the Domain's build default ignores the fight edition) while omitting the edition gave 2014. With no
+/// campaign active nothing is filled, so that pre-campaign behaviour (and every answer) is unchanged.
 /// </para>
 /// <para>
 /// <b>Not idempotent, deliberately.</b> Without a seed each call draws a fresh 64-bit seed from the OS
@@ -111,16 +120,20 @@ public sealed class SimulateTools
 
     private readonly ITransport? _transport;
 
+    private readonly CampaignService _campaigns;
+
     /// <param name="statBlocks">The SRD stat blocks, resolved and cached once per process.</param>
     /// <param name="logger">Notes a run stopped because the session ended (<see cref="SessionEndedText"/>).</param>
+    /// <param name="campaigns">The active campaign, whose ruleset fills the editions the call leaves out.</param>
     /// <param name="transport">
     /// The session's transport, which the SDK registers for the stdio (and stream) transport; absent, only the request's
     /// own token stops the fights. See <see cref="SessionEnded"/>.
     /// </param>
-    public SimulateTools(StatBlockService statBlocks, ILogger<SimulateTools> logger, ITransport? transport = null)
+    public SimulateTools(StatBlockService statBlocks, ILogger<SimulateTools> logger, CampaignService campaigns, ITransport? transport = null)
     {
         _statBlocks = statBlocks;
         _logger = logger;
+        _campaigns = campaigns;
         _transport = transport;
     }
 
@@ -149,8 +162,8 @@ public sealed class SimulateTools
         "  Per entry also: count (copies, 1-20), name, hp, ac, saves, initiative_bonus, position (\"front\" or \"back\"), death_saves.\n" +
         "- iterations: default 10,000 (max 100,000); or precision: run until P(win)'s 95% half-width is at most this, e.g. 0.01.\n" +
         "- seed: repeats a result exactly (number or decimal string); without one a random seed is drawn and shown.\n" +
-        "- round_cap (default 20, then a draw), edition (the fight's rules; default the party's), surprise (\"party\" or " +
-        "\"enemies\"), enemy_hp (\"average\" or \"roll\").\n" +
+        "- round_cap (default 20, then a draw), edition (the fight's rules; default the party's, else the campaign's), " +
+        "surprise (\"party\" or \"enemies\"), enemy_hp (\"average\" or \"roll\").\n" +
         "- policies: {party: focus_fire|spread|threat, enemies: spread|focus_fire|threat|healer_first|break_concentration, " +
         "legendary_resistance, healing, finish_downed, pcs_win_ties}.\n" +
         "- replay: one fight's number, shown turn by turn.\n" +
@@ -168,7 +181,7 @@ public sealed class SimulateTools
         [Description("A seed, 0 to 18446744073709551615, as a number or a decimal string, to repeat a result exactly. Default: a random seed, shown in the result.")]
         ulong? seed = null,
         [Description("Rounds before a fight still going is called a draw, 1-100. Default 20.")][AIParameterName("round_cap")] int? roundCap = null,
-        [Description("The fight's rules: \"2014\" or \"2024\" (surprise, exhaustion, concentration). Default: the party's.")] string? edition = null,
+        [Description("The fight's rules: \"2014\" or \"2024\" (surprise, exhaustion, concentration). Default: the party's. With a campaign active, entries naming no edition follow this, else the first party entry's, else the active campaign's ruleset.")] string? edition = null,
         [Description("Who is surprised: \"none\" (default), \"party\" or \"enemies\".")] string? surprise = null,
         [Description("Enemy hit points: \"average\" (default, the stat block's) or \"roll\" (from the hit dice each fight).")]
         [AIParameterName("enemy_hp")] string? enemyHp = null,
@@ -236,6 +249,17 @@ public sealed class SimulateTools
         var partyEntries = party ?? [];
         var enemyEntries = Enemies(enemies);
         var fightEdition = Edition(edition);
+        var campaign = new CampaignEditionFill(_campaigns);
+
+        // With a campaign active, an entry that names no edition takes the call's own first (the fight's, else the first
+        // party entry's) and only then the campaign's ruleset. An edition that is not one is left for the Domain to refuse.
+        if (edition is null || fightEdition is not null)
+        {
+            var given = fightEdition ?? PartyEdition(partyEntries);
+            partyEntries = campaign.Fill(partyEntries, given);
+            enemyEntries = campaign.Fill(enemyEntries, given);
+        }
+
         var partyEdition = PartyEdition(partyEntries);
 
         var sides = new[] { (List: "party", Entries: partyEntries), (List: "enemies", Entries: enemyEntries) };
@@ -254,7 +278,8 @@ public sealed class SimulateTools
                             $"{where}: monster is empty; give an SRD monster's name or ref, e.g. {EntryExample}, or use build or archetype instead.");
                     }
 
-                    var lookupEdition = Edition(entry.Edition) ?? fightEdition ?? partyEdition;
+                    var lookupEdition = Edition(entry.Edition) ?? fightEdition ?? partyEdition ??
+                                        (edition is null ? campaign.MonsterFallback() : DslValues.Editions.Default);
                     requests.Add((side, item, new StatBlockRequest(monster, lookupEdition, Wording(where))));
                 }
             }
@@ -303,7 +328,7 @@ public sealed class SimulateTools
             FightGate.Release();
         }
 
-        return SimulationMarkdown.Format(report, seedGiven, notes.Distinct(StringComparer.Ordinal).ToList());
+        return SimulationMarkdown.Format(report, seedGiven, campaign.WithNote(notes.Distinct(StringComparer.Ordinal).ToList()));
     }
 
     /// <summary>
@@ -405,11 +430,12 @@ public sealed class SimulateTools
     private static string? Edition(string? text) =>
         text is not null && DslValues.Editions.Set.TryMatch(text, out var canonical) ? canonical : null;
 
-    /// <summary>The first party entry's rules: its build's edition, else its own edition, else 2024.</summary>
-    private static string PartyEdition(CombatantSpec[] party) =>
-        party.FirstOrDefault() is { } first
-            ? Edition(first.Build?.Edition) ?? Edition(first.Edition) ?? DslValues.Editions.Default
-            : DslValues.Editions.Default;
+    /// <summary>
+    /// The first party entry's rules: its build's edition, else its own edition; null when it names neither (the caller then
+    /// falls back to the campaign's ruleset, else 2024).
+    /// </summary>
+    private static string? PartyEdition(CombatantSpec[] party) =>
+        party.FirstOrDefault() is { } first ? Edition(first.Build?.Edition) ?? Edition(first.Edition) : null;
 
     /// <summary>
     /// balance_simulate's words around the shared monster lookup: items as the Domain counts them ("enemies item 1

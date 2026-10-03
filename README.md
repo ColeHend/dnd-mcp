@@ -11,7 +11,9 @@ Claude Code and Claude Desktop launch it over stdio.
 | Encounter difficulty (2014 + 2024) | Done (Phase 3): `encounter_difficulty` (2014 DMG thresholds and multipliers, 2024 XP budget, or both side by side; SRD monsters by name or ref, any other by CR; effective-level offset), plus the `rules://tables/*` resources (XP by CR, both editions' encounter tables, DMG monster statistics by CR), also served by `rules_get` |
 | DPR maths + feature deltas for homebrew | Done (Phase 4): `balance_dpr` (exact damage per round of a build in the feature DSL: per-attack and per-rider breakdown, round-1 damage percentiles, power-attack choices, save effects with kill chances; round 1, fight or adventuring-day horizon; level curves and level × AC grids) and `balance_compare` (a feature's ΔDPR against a baseline, its level-equivalent and balance band, Bonus Action and Reaction collisions), plus the `rules://tables/{dpr-targets-by-level, gwf-expected-values, aoe-targets}` resources |
 | Monte Carlo combat simulation | Done (Phase 5): `balance_simulate` (a party of class archetypes, feature-DSL builds or SRD monsters against SRD monsters or builds, fought 10,000 times with the dice rolled: win, defeat, draw and death odds with 95% intervals, rounds, per-combatant damage and resources, a replay of any fight, a paired comparison with and without a feature, reproducible by seed), `rules_get` format `combatant` (a monster as the simulator reads it), plus the `rules://tables/monster-stats-by-cr-empirical` resource |
-| Campaign tracking (SQLite, knowledge/provenance, markdown export) | Phases 6–8 |
+| Campaign tracking (SQLite: who knows what, sessions, undo) | Done (Phase 6): `campaign`, `campaign_search`, `campaign_get`, `campaign_write`, `campaign_knowledge`, `campaign_session` and `campaign_history` over one local `campaigns.db` (people, places, quests, secrets and facts with their provenance; what each character, the party and the table know, and under which names; reads from a character's perspective that show only what they know; reveal gates and forbidden words; sessions with a live log and an end-of-session checklist; every write one undoable batch; entries as they stood after any session), six prompts, the `campaign://` resources, `dice_roll` logging to a live session, the rules, encounter and balance tools defaulting to the active campaign's ruleset, and the `backup` and `restore` commands |
+| Character sheets and live combat tracking | Phase 7 |
+| Markdown export and import (an Obsidian vault, a player-safe export, the PWA's campaign bundles) | Phase 8 |
 
 The design, decisions and phase plan are in [PLAN.md](PLAN.md).
 
@@ -21,12 +23,19 @@ The design, decisions and phase plan are in [PLAN.md](PLAN.md).
 |---|---|
 | `rules_search` | Which SRD entries mention these words (2014 SRD 5.1, 2024 SRD 5.2.1, or both). |
 | `rules_get` | One SRD entry in full by ref or name, or both editions side by side; format `combatant` shows a monster as the simulator reads it; also the rules tables and the attribution. |
-| `dice_roll` | A roll made for the user, with every die shown. |
+| `dice_roll` | A roll made for the user, with every die shown. While a campaign session is live the roll is logged to it; `secret` marks a roll behind the DM's screen. |
 | `dice_odds` | Exact probabilities for a dice expression. |
 | `encounter_difficulty` | How hard a fight is for a party, by the 2014 DMG method, the 2024 XP budget, or both. |
 | `balance_dpr` | A build's damage per round, computed exactly over every die outcome (not simulated). |
 | `balance_compare` | What a homebrew feature adds to a baseline build, in damage and in character levels. |
 | `balance_simulate` | Who wins a whole fight, how often, and at what cost: a Monte Carlo simulation of a party against enemies. |
+| `campaign` | Your campaigns: create one (you play in it or you run it; 2014, 2024 or mixed rules), choose the one the other tools use, change its record, or see where things stand. |
+| `campaign_search` | What a campaign holds, found by words or listed by kind, status and tag, as one perspective sees it: a character's view finds only what they know, under the names they know. |
+| `campaign_get` | Up to ten entries in full (people, places, quests, secrets, facts, sessions), with their relations, facts, who knows them and their history. |
+| `campaign_write` | Any change to a campaign, as one batch of ops applied together or not at all: entities, links, facts (who knows them, what they rest on, reveal gates), status, objectives, clocks, answers. `dry_run` previews it; invented material gets a register code (`F7`) to accept or strike. |
+| `campaign_knowledge` | Who knows what: record it, reveal facts at the table (a reveal before its gate is met warns and is applied), check a draft (a lyric, a journal, a line of dialogue) against what its speaker knows, and the ledger of who knows each fact. |
+| `campaign_session` | Sessions: plan one, start it (writes then belong to it), log notes, end it with the recap and a checklist of loose ends, record one played earlier, read them back. |
+| `campaign_history` | What changed and when, entries as they stood after a given session, and undo of one batch (an undo is itself a batch, so it can be undone). |
 
 **The balance tools.** A build is written in a small JSON feature DSL: attacks (dice, damage type, to-hit, properties,
 weapon mastery, cantrip scaling) and modifiers (`to_hit`, `extra_damage` for smites and Sneak Attack, `bonus_damage`,
@@ -91,6 +100,56 @@ reproduces a result exactly (without one, a random seed is drawn and shown); `re
 `precision` runs until P(win) is known to a chosen half-width; `compare` runs the same fights with and without a feature
 and reports the paired difference, which resolves far smaller changes than two separate runs.
 
+**Campaigns.** One `campaigns.db` holds every campaign, each a player campaign (you play one character in it) or a DM
+campaign (you run it). Every campaign tool takes `campaign` (a slug); left out, it is the one chosen in this session
+(with `campaign` `use` or `create`, or a `campaign_session` `start` or `end` that names its campaign), else the last one
+chosen with `use` or `create`, else the only one. `campaign` `list` shows each player campaign's character handle (the
+`character:<slug>` its perspective takes). A campaign holds entities (characters,
+locations, factions, items, quests, threads, questions, secrets, beats, clocks, sessions and more), the relations between
+them, and facts, each with who knows it and how (knows, suspects, believes, heard, met, unaware, …), the session they
+learned it in and the name they know a thing by.
+
+- **Perspectives.** `campaign_search`, `campaign_get` and the knowledge resource read as `author` (the default:
+  everything), `dm`, `table`, `party`, `public` or `character:<slug>`. Every view but the author's sees only what it
+  knows, under the names it knows: no secret text, no author-only names, not even a count of what is hidden. A party
+  that knows a villain only as "the old king" gets "the old king" and a neutral ref (`e:12`), never his true name, even
+  by searching for it.
+- **Reveal gates and forbidden words.** A fact can be gated (not before these facts, together with those, or once enough
+  clues of a route are known) and carry words no player-facing text may use until it is revealed. `campaign_knowledge`
+  `check` runs a draft (a song, a journal entry, an NPC's line) against its speaker's knowledge, those words and its
+  audience. A write is applied with a warning, never refused, when it reveals a fact before its gate is met or when text
+  players can read uses a forbidden word or a name they do not use: what happened at the table stands.
+- **Sessions.** `campaign_session start` makes a session live: until `end`, writes without a session belong to it and
+  `dice_roll` logs every roll to it. A `start` that names its campaign makes that campaign the current one, so the
+  night's rolls and writes go there; a roll made while another campaign is current says which campaign's session is
+  live. `end` stores the recap and returns a checklist of loose ends (names in the recap that match nothing, clocks not
+  ticked, facts nobody learned, inventions to accept or strike). An open roll's label is shown with it in the players'
+  views of the session; roll `secret` for one they must not see.
+- **History and undo.** Every call that writes is one batch, and its id is printed with the call that reverses it:
+  `campaign_history` `undo` reverses exactly one batch, and refuses (naming the later batches in the way) when later
+  changes build on it. `as_of` shows entries as they stood at the end of a session.
+- **Defaults for the other tools.** With a campaign chosen, `rules_search`, `rules_get`, `encounter_difficulty` and the
+  balance tools use its ruleset when a call names no edition (and say so), and `encounter_difficulty` takes its
+  `effective_level_offset` setting.
+
+**Prompts.** In Claude Code each is a command, `/mcp__dnd__<name>` for the server registered as `dnd`; its arguments
+are single words, and the draft or notes it works on come from the conversation.
+
+| Command | What it does |
+|---|---|
+| `/mcp__dnd__session_recap [campaign] [session]` | Records a played session from your account of it: facts and who learned them, progress, new people and places, inventions to accept or strike, as dry runs you approve. |
+| `/mcp__dnd__session_prep [campaign] [session]` | Prepares the next session as a run-sheet: reachable beats, clocks, what the NPCs want, open questions and gates, each fight's difficulty; saved as the session's prep once you approve. |
+| `/mcp__dnd__knowledge_check <character> [campaign]` | Checks the latest draft against what that character knows: names they would not use, things they cannot know, forbidden words, secrets a song would reveal. |
+| `/mcp__dnd__continuity_check [campaign]` | The DM's five-step continuity pass over a draft: its canon objects, what was played, who could know it, gates and forbidden words. Flags, never fixes. |
+| `/mcp__dnd__in_character <character> [campaign]` | Writes the piece you ask for in a character's voice from only what they know, and checks it before showing it. |
+| `/mcp__dnd__homebrew_review [campaign]` | Measures homebrew with `balance_compare` against the official option it replaces and reports its balance band, with the smallest fix. |
+
+**Resources.** `campaign://list` (every campaign and its resources) and, per campaign, `campaign://<slug>/summary` and
+`campaign://<slug>/threads`: in Claude Code, `@dnd:` mentions. Readable by URI though not listed:
+`campaign://<slug>/entity/<ref>`, `campaign://<slug>/session/<n>` (or `live`, `last`) and
+`campaign://<slug>/knowledge/<perspective>`, everything one view knows (e.g. `knowledge/character:belmakor`). The
+tools reach everything the resources show.
+
 ## Install for Claude Code
 
 ```bash
@@ -120,14 +179,42 @@ server expands a leading `~/` itself and ignores any other relative value. The s
 (about a second) whenever the content, the curated corrections or the importer changes; `srd-build --force` rebuilds it
 on demand. Deleting it is always safe, even while a session is running: the next rules call reopens or rebuilds it.
 
-For development against a local build, give the dev server its own cache, so it and the installed server never replace
-each other's `srd.db` when their content differs:
+The campaigns (`campaigns.db`) are your data, not a cache. The file is `$DND_MCP_DB` when that is set (the file itself,
+absolute or starting `~/`), else `campaigns.db` in the data directory: `$DND_MCP_DATA_DIR`, else `$XDG_DATA_HOME/dnd-mcp`,
+else `~/.local/share/dnd-mcp`. The first campaign write creates it, never the server's start, so a server used only for
+dice and rules never makes one. Several Claude sessions can use it at once, each with its own current campaign. The
+server backs it up by itself into `backups/` beside it: before the first write of each UTC day, at the end of every
+session, and before every schema migration and every restore. It keeps every pre-migration backup, the newest 10 of the
+others, and the newest of each day for the last 30 days. By hand:
+
+```bash
+~/.local/share/dnd-mcp/bin/DndMcp backup                 # a backup now; prints its path (--reason names it: manual by default)
+~/.local/share/dnd-mcp/bin/DndMcp restore <backup file>  # replace campaigns.db with a backup
+```
+
+`restore` is a command only, never a tool: other Claude sessions' servers may have campaigns.db open, so no model can
+replace it in the middle of a conversation. It checks the backup first, saves the current campaigns.db as a
+`pre-restore` backup (restore that file to undo the restore) and prints where; restart any running dnd-mcp servers
+afterwards so they read the restored file.
+
+For development against a local build, give the dev server its own cache and data, so it and the installed server never
+replace each other's `srd.db` when their content differs, and a development build's schema migration never reaches the
+campaigns the installed server uses (an older build refuses a campaigns.db a newer one has migrated). Set `DND_MCP_DB`
+for it as well: it outranks the data directory, so a `DND_MCP_DB` you export for daily use would otherwise point the dev
+server at your real campaigns.db:
 
 ```bash
 dotnet build DndMcp.sln
-claude mcp add --transport stdio --scope local --env DND_MCP_CACHE_DIR="$HOME/.cache/dnd-mcp-dev" dnd-dev \
+claude mcp add --transport stdio --scope local --env DND_MCP_CACHE_DIR="$HOME/.cache/dnd-mcp-dev" \
+  --env DND_MCP_DATA_DIR="$HOME/.local/share/dnd-mcp-dev" \
+  --env DND_MCP_DB="$HOME/.local/share/dnd-mcp-dev/campaigns.db" dnd-dev \
   -- dotnet run --project DndMcp --no-build --no-launch-profile
 ```
+
+The dev server's prompts are `/mcp__dnd-dev__<name>`. A prompt names its tools without a server prefix (the server
+cannot know the name it was registered under) and tells the model they are the tools of the server the prompt came from,
+so `/mcp__dnd-dev__session_recap` asks for the dev server's tools. With both servers connected the bare names match both,
+and only that sentence steers the model: check which server's tools it calls, or connect one of the two at a time.
 
 Server logs go to stderr; `claude --debug=mcp` captures them.
 

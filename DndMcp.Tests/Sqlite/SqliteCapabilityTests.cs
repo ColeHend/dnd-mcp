@@ -89,6 +89,37 @@ public sealed class SqliteCapabilityTests
     }
 
     /// <summary>
+    /// R10 (contract fix FI8): a server killed mid-probe (SIGKILL skips the finally) leaves its scratch directory where it
+    /// probed, which for the host is the data directory beside campaigns.db. The next probe deletes such directories once
+    /// a minute old. A younger one may be another server's probe running now (two sessions often start together), and a
+    /// directory not named exactly like a probe's (prefix plus 32 lower-case hex digits) is not the probe's to delete.
+    /// </summary>
+    [Fact]
+    public void Probe_ScratchDirectoryLeftByAKilledProbe_IsDeletedButYoungerAndForeignOnesStay()
+    {
+        using var scratch = new SqliteScratch();
+        var stale = Directory.CreateDirectory(scratch.PathOf("dnd-mcp-sqlite-probe-" + Guid.NewGuid().ToString("N"))).FullName;
+        File.WriteAllText(Path.Combine(stale, "probe.db"), "left by a killed probe");
+        var running = Directory.CreateDirectory(scratch.PathOf("dnd-mcp-sqlite-probe-" + Guid.NewGuid().ToString("N"))).FullName;
+        var foreign = new[]
+        {
+            "dnd-mcp-sqlite-probe-notes",
+            "dnd-mcp-sqlite-probe-" + Guid.NewGuid().ToString("N").ToUpperInvariant(),
+            "my-dnd-mcp-sqlite-probe-" + Guid.NewGuid().ToString("N"),
+        }.Select(name => Directory.CreateDirectory(scratch.PathOf(name)).FullName).ToList();
+        foreach (var directory in foreign.Append(stale))
+        {
+            Directory.SetLastWriteTimeUtc(directory, DateTime.UtcNow.AddMinutes(-2));
+        }
+
+        SqliteCapabilities.Probe(scratch.DirectoryPath);
+
+        Assert.False(Directory.Exists(stale));
+        Assert.True(Directory.Exists(running));
+        Assert.All(foreign, directory => Assert.True(Directory.Exists(directory), directory));
+    }
+
+    /// <summary>
     /// The probe must not mutate a database it did not create: checking WAL or VACUUM INTO against
     /// campaigns.db would change the real file. Pin that it works entirely inside its own scratch directory by
     /// giving it a parent that holds a database and checking that database is untouched.

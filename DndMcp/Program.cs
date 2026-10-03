@@ -3,7 +3,6 @@ using DndMcp.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
 
 // A command (`DndMcp srd-build`) runs and exits before any host exists, so it can never start the stdio transport.
 // Claude Code launches the server with no arguments; that path below is unchanged. In command mode stdout is the
@@ -30,12 +29,14 @@ var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
 // stdout carries the MCP JSON-RPC stream and nothing else: a single stray line breaks the session.
 // Every log level therefore goes to stderr (Claude Code captures it with `claude --debug=mcp`), and
 // nothing in this process may use Console.Write*. StdoutPurityTests enforces this against the built binary.
-builder.Logging.ClearProviders();
-builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);
+// A start a service refused (SqliteCapabilityCheck) is logged by that service and summarised in one line below; the
+// host's own stack-trace repeat of it is dropped, and every other host entry is kept (ReportedStartFailureLogFilter).
+DndMcpCli.AddServerLogging(builder.Logging);
 
 builder.Services
     .AddDndMcpServer()
     .WithStdioServerTransport();
 
-await builder.Build().RunAsync();
-return DndMcpCli.ExitOk;
+// A start that fails (a SQLite library missing what the databases need) exits 1 with one line on stderr instead of an
+// unhandled-exception dump; the failing service has logged the detail above it.
+return await DndMcpCli.RunServerAsync(builder.Build(), Console.Error);

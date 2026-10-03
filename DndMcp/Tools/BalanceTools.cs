@@ -37,10 +37,20 @@ namespace DndMcp.Tools;
 /// (<see cref="StatBlockService"/>, with <c>encounter_difficulty</c>'s resolution: refs, names, a shapechanger's forms, the
 /// other edition's counterpart, close names when nothing matches) and pass it to the Domain as
 /// <see cref="DprRequest.TargetMonster"/>. A bare name is looked up in the build's edition (the baseline's for
-/// balance_compare), so a 2014 build fights the 2014 ogre; a ref is used as given, its own edition winning, with a note.
+/// balance_compare; 2024 when neither the build nor the campaign names one), so a 2014 build fights the 2014 ogre; a ref is
+/// used as given, its own edition winning, with a note.
 /// The target's fields are validated first, so "monster and cr" or a blank monster is the Domain's message, not an index
 /// wait followed by a lookup error. The lookup's notes (a form chosen, another edition's stat block used) are rendered at
 /// the head of the result's notes: they are about which creature the numbers are for, which the Domain cannot know.
+/// </para>
+/// <para>
+/// <b>The campaign's ruleset</b> (contract §9): a build that names no edition is given the active campaign's ruleset
+/// (2014 or 2024) before the Domain sees it, baseline and variant alike, with a note naming the campaign. It is filled in
+/// the spec rather than at the lookup alone because the edition decides more than the target: Great Weapon Fighting's rule,
+/// the notes and the action names follow it, and a 2014 campaign's build computed with 2024 rules against a 2014 ogre would
+/// be wrong twice over. Filling both sides alike keeps a comparison from reporting the edition change as the feature's
+/// worth; for the same reason a variant that names no edition follows a baseline that names one before the campaign. An
+/// explicit edition always wins; with no campaign active the spec reaches the Domain untouched (2024 there).
 /// </para>
 /// <para>
 /// Async only for that lookup (it may wait for the rules index, reporting progress like every rules tool). The analysis
@@ -58,10 +68,12 @@ public sealed class BalanceTools
     private const string FeatureExample = "{\"name\": \"Savage Attacker\", \"modifiers\": [{\"kind\": \"reroll_damage_take_best\"}]}";
 
     private readonly StatBlockService _statBlocks;
+    private readonly CampaignService _campaigns;
 
-    public BalanceTools(StatBlockService statBlocks)
+    public BalanceTools(StatBlockService statBlocks, CampaignService campaigns)
     {
         _statBlocks = statBlocks;
+        _campaigns = campaigns;
     }
 
     // balance_compare's example baseline scales (ASIs at 4 and 6, Extra Attack at 5 and 11), so its own level-equivalents
@@ -74,11 +86,12 @@ public sealed class BalanceTools
     // Idempotent and closed-world: an exact computation, a pure function of the arguments.
     [McpServerTool(Name = "balance_dpr", Title = "Damage per round", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
-        "Damage per round (DPR) of a D&D 5e build, 2014 or 2024 rules, computed exactly over every die outcome: " +
+        "Damage per round (DPR) of a D&D 5e build, 2014 or 2024 rules, exact over every die outcome: " +
         "round 1, a fight and an adventuring day; per attack and rider the hit and crit chances, uses and damage per use; the " +
-        "round-1 damage spread; power-attack choices; save effects with kill chances; and every assumption used. For what a " +
+        "round-1 spread; power-attack choices; save effects with kill chances; every assumption. For what a " +
         "feature adds to a build, use balance_compare.\n" +
-        "- build (required): name, level 1-20, edition (\"2024\" default or \"2014\"), abilities {str..cha}, fighting_style, attacks " +
+        "- build (required): name, level 1-20, edition (\"2014\" or \"2024\"; default: the campaign's ruleset, else 2024), " +
+        "abilities {str..cha}, fighting_style, attacks " +
         "[{name, count, damage \"2d6\", damage_type, to_hit, properties, mastery, cantrip}] and modifiers [{kind, ...}]: to_hit, " +
         "extra_damage (smites, Hex, Sneak Attack), bonus_damage, crit_range, advantage, lucky, elven_accuracy, damage_die_remap, " +
         "reroll_damage_take_best (Savage Attacker), extra_attack (Action Surge, bonus or reaction attacks), power_attack (2014 " +
@@ -89,7 +102,7 @@ public sealed class BalanceTools
         "default: the CR = level row of profile \"dmg2014\" (DMG table) or \"mm2024\"/\"mm2014\" (SRD medians).\n" +
         "- levels: e.g. [1, 5, 11, 17] for a curve (default: the build's level); ac_range: [low, high] for a level x AC table.\n" +
         "- horizon: \"fight\" (default: the mean per round of a fight; rounds: its length, default 3), \"round1\" (the nova) or \"day\" " +
-        "(limited uses spread over an adventuring day: rest_preset \"dmg2014\" (default) or \"light\", or encounters_per_day and " +
+        "(limited uses spread over the day: rest_preset \"dmg2014\" (default) or \"light\", or encounters_per_day and " +
         "short_rests).\n" +
         "- rulings: {hew_gets_pb, cleave_part_of_attack_action, gwf_on_riders, savage_attacker_on_crit_dice}, default false.\n" +
         "Example: {\"build\": " + FighterExample + ", \"target\": {\"ac\": 15}}")]
@@ -111,6 +124,8 @@ public sealed class BalanceTools
         // The argument guard refuses a null build before this runs; the check keeps the Domain's non-null contract honest if
         // a caller ever bypasses the guard.
         var spec = build ?? throw new DndInputException($"build is null; give a build, e.g. {FighterExample}.");
+        var campaign = new CampaignEditionFill(_campaigns);
+        spec = campaign.Fill(spec);
         var (monster, notes) = await TargetMonster(target, spec, progress, cancellationToken);
         var request = new DprRequest
         {
@@ -127,7 +142,7 @@ public sealed class BalanceTools
             ShortRests = shortRests,
         };
         var report = await Task.Run(() => DprAnalysis.Analyze(request, cancellationToken), cancellationToken);
-        return BalanceDprMarkdown.Format(report, notes);
+        return BalanceDprMarkdown.Format(report, campaign.WithNote(notes));
     }
 
     [McpServerTool(Name = "balance_compare", Title = "Compare builds (DPR)", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
@@ -167,11 +182,18 @@ public sealed class BalanceTools
         CancellationToken cancellationToken = default)
     {
         var spec = baseline ?? throw new DndInputException($"baseline is null; give a build, e.g. {FighterExample}.");
+        var campaign = new CampaignEditionFill(_campaigns);
+
+        // A variant that names no edition follows the baseline's own, when it names one, before the campaign's: the
+        // comparison's Δ must never include an edition change the call did not ask for.
+        var baselineEdition = spec.Edition is { } named && DslValues.Editions.Set.TryMatch(named, out var canonical) ? canonical : null;
+        spec = campaign.Fill(spec);
+        var variantSpec = Variant(variant) is { } changed ? campaign.Fill(changed, baselineEdition) : null;
         var (monster, notes) = await TargetMonster(target, spec, progress, cancellationToken);
         var request = new CompareRequest
         {
             Baseline = spec,
-            Variant = Variant(variant),
+            Variant = variantSpec,
             Feature = feature,
             Target = target,
             TargetMonster = monster,
@@ -184,11 +206,12 @@ public sealed class BalanceTools
             ShortRests = shortRests,
         };
         var report = await Task.Run(() => DprComparison.Compare(request, cancellationToken), cancellationToken);
-        return BalanceCompareMarkdown.Format(report, notes);
+        return BalanceCompareMarkdown.Format(report, campaign.WithNote(notes));
     }
 
     /// <summary>
-    /// The stat block <c>target.monster</c> names, looked up in the build's edition (2024 when it names none), and the
+    /// The stat block <c>target.monster</c> names, looked up in the build's edition (the campaign's already filled in when
+    /// the call named none; 2024 when neither did), and the
     /// lookup's notes; (null, []) without a monster. The target's fields are checked first (the Domain's messages, before any
     /// wait for the index): a blank monster, monster with cr or profile, and every other field problem.
     /// </summary>

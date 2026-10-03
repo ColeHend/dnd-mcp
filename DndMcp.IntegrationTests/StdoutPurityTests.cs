@@ -19,9 +19,18 @@ namespace DndMcp.IntegrationTests;
 /// <para>
 /// The session deliberately includes every path that logs — a failing tool, an argument-guard rejection and an
 /// unknown tool, each of which writes an exception to the log — because a logger misconfigured onto stdout stays
-/// silent on the happy path. It also runs a rules search, which builds the SRD index in the background (SQLite, file
-/// moves, the index's own log line) while the session is live. Shutdown is included because output written while
-/// stopping lands after the last response, where a test that stopped reading early would miss it.
+/// silent on the happy path. It lists the resources and the prompts at connect, as Claude Code does. It also runs a rules
+/// search, which builds the SRD index in the background (SQLite, file moves, the index's own log line) while the session
+/// is live, and a campaign's first night: <c>campaign create</c> (campaigns.db created, probed and migrated, a
+/// resources/list_changed notification sent), a <c>campaign_write</c> batch, a <c>campaign_search</c> (FTS5 as the
+/// party), a <c>campaign_knowledge</c> check; then, with campaigns.db there, what reads it outside the campaign tools: the
+/// resource list (which Claude Code sends at every connect, so a stray line there would drop the server for every user
+/// with a campaign), a campaign resource, a prompt, and a rules call whose edition the campaign decides; then a session
+/// started, a <c>dice_roll</c> logged to it and the session ended (its backup made with <c>VACUUM INTO</c>, and retention
+/// run), each of which can log. Those run one after another, each waiting for what it needs, because the server handles
+/// requests concurrently and a write sent with the create could reach a campaign that does not exist yet. The startup
+/// SQLite probe's verdict goes to stderr too. Shutdown is included because output written while stopping lands after the
+/// last response, where a test that stopped reading early would miss it.
 /// </para>
 /// <para>
 /// By default this runs <c>dotnet DndMcp.dll</c> from the build. Set <see cref="BuiltHost.HostExecutableVariable"/>
@@ -43,6 +52,22 @@ public sealed class StdoutPurityTests
     private const int RulesSearchCallId = 8;
     private const int SimulateCallId = 9;
     private const int CombatantCallId = 10;
+    private const int CampaignCreateCallId = 11;
+    private const int CampaignWriteCallId = 12;
+    private const int CampaignSearchCallId = 13;
+    private const int CampaignCheckCallId = 14;
+    private const int SessionStartCallId = 15;
+    private const int LoggedRollCallId = 16;
+    private const int SessionEndCallId = 17;
+    private const int ListResourcesAtConnectId = 18;
+    private const int ListPromptsAtConnectId = 19;
+    private const int ListResourcesWithCampaignId = 20;
+    private const int ReadSummaryId = 21;
+    private const int GetPromptId = 22;
+    private const int CampaignEditionCallId = 23;
+
+    // What the startup SQLite probe logs when the native library has everything (SqliteCapabilityCheck).
+    private const string ProbeVerdict = ") has every feature dnd-mcp needs: ";
 
     [Fact]
     public async Task BuiltServer_FullSession_WritesOnlyJsonRpcToStdout()
@@ -76,6 +101,54 @@ public sealed class StdoutPurityTests
         Assert.False(IsToolError(responses[SimulateCallId]), $"The balance_simulate call failed.{server.Diagnostics()}");
         Assert.StartsWith("# Fight simulation: ", ResultText(responses[SimulateCallId]), StringComparison.Ordinal);
         Assert.False(IsToolError(responses[CombatantCallId]), $"The rules_get combatant call failed.{server.Diagnostics()}");
+
+        // campaigns.db was created, migrated and written in the isolated data directory, then read back through FTS5 as the
+        // party and checked for a character: the native library's campaign features all ran in the real binary.
+        Assert.False(IsToolError(responses[CampaignCreateCallId]), $"The campaign create call failed.{server.Diagnostics()}");
+        Assert.StartsWith("# Created campaign Purity (`purity`)", ResultText(responses[CampaignCreateCallId]), StringComparison.Ordinal);
+        Assert.False(IsToolError(responses[CampaignWriteCallId]), $"The campaign_write call failed.{server.Diagnostics()}");
+        Assert.StartsWith("# campaign_write: 2 ops applied (purity)", ResultText(responses[CampaignWriteCallId]), StringComparison.Ordinal);
+        Assert.False(IsToolError(responses[CampaignSearchCallId]), $"The campaign_search call failed.{server.Diagnostics()}");
+        Assert.Contains("**Iron Guts** · character · `character:iron-guts`", ResultText(responses[CampaignSearchCallId]), StringComparison.Ordinal);
+        Assert.False(IsToolError(responses[CampaignCheckCallId]), $"The campaign_knowledge check call failed.{server.Diagnostics()}");
+        Assert.StartsWith("# Knowledge check: ", ResultText(responses[CampaignCheckCallId]), StringComparison.Ordinal);
+        Assert.True(File.Exists(Path.Combine(server.WorkingDirectory, "data", "campaigns.db")), $"campaigns.db is not in the isolated data directory.{server.Diagnostics()}");
+
+        // What Claude Code asks at connect: the resource list (the campaign list handler ran, with no campaigns.db yet) and
+        // the prompts. Then, with campaigns.db there, everything that reads it outside the campaign tools ran too.
+        var atConnect = ResourceUris(Result(responses[ListResourcesAtConnectId], "resources/list at connect", server));
+        Assert.Contains("campaign://list", atConnect);
+        Assert.DoesNotContain("campaign://purity/summary", atConnect);
+        Assert.Contains(
+            Result(responses[ListPromptsAtConnectId], "prompts/list", server).GetProperty("prompts").EnumerateArray(),
+            prompt => prompt.GetProperty("name").GetString() == "knowledge_check");
+        var withCampaign = ResourceUris(Result(responses[ListResourcesWithCampaignId], "resources/list with a campaign", server));
+        Assert.Contains("campaign://purity/summary", withCampaign);
+        Assert.Contains("campaign://purity/threads", withCampaign);
+        Assert.StartsWith(
+            "# Purity (`purity`)",
+            Result(responses[ReadSummaryId], "resources/read of the summary", server).GetProperty("contents")[0].GetProperty("text").GetString(),
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "1. Call campaign_knowledge {",
+            Result(responses[GetPromptId], "prompts/get knowledge_check", server).GetProperty("messages")[0].GetProperty("content").GetProperty("text").GetString(),
+            StringComparison.Ordinal);
+        Assert.False(IsToolError(responses[CampaignEditionCallId]), $"The rules_get call with a campaign active failed.{server.Diagnostics()}");
+        Assert.EndsWith("2024 rules: the active campaign's (purity) ruleset.", ResultText(responses[CampaignEditionCallId]), StringComparison.Ordinal);
+
+        // A night at the table: the roll went into the live session's log and the end took the session-end backup.
+        Assert.False(IsToolError(responses[SessionStartCallId]), $"The campaign_session start call failed.{server.Diagnostics()}");
+        Assert.Contains("session:1 is live.", ResultText(responses[SessionStartCallId]), StringComparison.Ordinal);
+        Assert.False(IsToolError(responses[LoggedRollCallId]), $"The logged dice_roll failed.{server.Diagnostics()}");
+        Assert.EndsWith("Logged to purity, session 1.", ResultText(responses[LoggedRollCallId]), StringComparison.Ordinal);
+        Assert.False(IsToolError(responses[SessionEndCallId]), $"The campaign_session end call failed.{server.Diagnostics()}");
+        Assert.Contains("Session-end backup: ", ResultText(responses[SessionEndCallId]), StringComparison.Ordinal);
+        Assert.Single(Directory.GetFiles(Path.Combine(server.WorkingDirectory, "data", "backups"), "*-session-end.db"));
+
+        // The startup probe's verdict is a log line: on stderr (and, by the purity check above, nowhere on stdout).
+        Assert.True(
+            server.StderrLines.Any(line => line.Contains(ProbeVerdict, StringComparison.Ordinal)),
+            $"The SQLite probe's verdict is not on stderr.{server.Diagnostics()}");
     }
 
     [Fact]
@@ -202,6 +275,8 @@ public sealed class StdoutPurityTests
 
         await server.SendAsync("""{"jsonrpc":"2.0","method":"notifications/initialized"}""");
         await server.SendAsync(Request(ListToolsId, "tools/list", "{}"));
+        await server.SendAsync(Request(ListResourcesAtConnectId, "resources/list", "{}"));
+        await server.SendAsync(Request(ListPromptsAtConnectId, "prompts/list", "{}"));
         await server.SendAsync(Request(GoodCallId, "tools/call", """{"name":"dice_roll","arguments":{"expression":"2d6+3","times":2}}"""));
         await server.SendAsync(Request(DomainErrorCallId, "tools/call", """{"name":"dice_roll","arguments":{"expression":"2d6 3"}}"""));
         await server.SendAsync(Request(GuardErrorCallId, "tools/call", """{"name":"dice_roll","arguments":{"times":"three"}}"""));
@@ -213,8 +288,27 @@ public sealed class StdoutPurityTests
         await server.SendAsync(Request(CombatantCallId, "tools/call", """{"name":"rules_get","arguments":{"name":"Lich","format":"combatant","edition":"both"}}"""));
 
         var rest = await server.WaitForResponsesAsync(
-            [ListToolsId, GoodCallId, DomainErrorCallId, GuardErrorCallId, UnknownToolId, OddsCallId, RulesSearchCallId, SimulateCallId, CombatantCallId],
+            [
+                ListToolsId, ListResourcesAtConnectId, ListPromptsAtConnectId, GoodCallId, DomainErrorCallId, GuardErrorCallId, UnknownToolId,
+                OddsCallId, RulesSearchCallId, SimulateCallId, CombatantCallId,
+            ],
             timeout.Token);
+
+        // One at a time (class summary): each campaign call needs what the one before it wrote. A wait only keeps the ids it
+        // names, so each starts after every earlier response has been read.
+        var campaign = new Dictionary<int, JsonElement>();
+        foreach (var (ids, requests) in CampaignCalls())
+        {
+            foreach (var (id, method, parameters) in requests)
+            {
+                await server.SendAsync(Request(id, method, parameters));
+            }
+
+            foreach (var response in await server.WaitForResponsesAsync(ids, timeout.Token))
+            {
+                campaign[response.Key] = response.Value;
+            }
+        }
 
         server.CloseInput();
         var exitCode = await server.WaitForExitAsync(ExitTimeout);
@@ -222,8 +316,45 @@ public sealed class StdoutPurityTests
         // Only once the process is gone is stdout guaranteed complete; anything printed during shutdown counts.
         var stdout = exitCode.HasValue ? await server.ReadStdoutToEndAsync(ExitTimeout) : server.StdoutLines;
 
-        var responses = initialize.Concat(rest).ToDictionary(p => p.Key, p => p.Value);
+        var responses = initialize.Concat(rest).Concat(campaign).ToDictionary(p => p.Key, p => p.Value);
         return new Session(stdout, responses, exitCode);
+    }
+
+    // The campaign part of the session, in the order it must run: create, then a write into it, then the reads of what the
+    // write made (each step's requests may run together: none needs another's result), then a session started, a roll
+    // logged to it and the session ended.
+    private static IEnumerable<(int[] Ids, (int Id, string Method, string Params)[] Requests)> CampaignCalls()
+    {
+        yield return ([CampaignCreateCallId],
+        [
+            (CampaignCreateCallId, "tools/call",
+                """{"name":"campaign","arguments":{"action":"create","name":"Purity","role":"player","ruleset":"2024","my_character":"Aria Vale"}}"""),
+        ]);
+        yield return ([CampaignWriteCallId],
+        [
+            (CampaignWriteCallId, "tools/call",
+                """{"name":"campaign_write","arguments":{"ops":[{"op":"upsert","kind":"character","name":"Iron Guts","subtype":"npc","visibility":"party"},""" +
+                """{"op":"fact","statement":"Iron Guts owes the band a favour.","about":["character:iron-guts"],"known_by":[{"who":"party"}]}]}}"""),
+        ]);
+        yield return ([CampaignSearchCallId, CampaignCheckCallId],
+        [
+            (CampaignSearchCallId, "tools/call", """{"name":"campaign_search","arguments":{"query":"iron guts","perspective":"party"}}"""),
+            (CampaignCheckCallId, "tools/call",
+                """{"name":"campaign_knowledge","arguments":{"action":"check","perspective":"character:aria-vale","text":"Iron Guts owes us a favour.","diegetic":true}}"""),
+        ]);
+        yield return ([ListResourcesWithCampaignId, ReadSummaryId, GetPromptId, CampaignEditionCallId],
+        [
+            (ListResourcesWithCampaignId, "resources/list", "{}"),
+            (ReadSummaryId, "resources/read", """{"uri":"campaign://purity/summary"}"""),
+            (GetPromptId, "prompts/get", """{"name":"knowledge_check","arguments":{"character":"aria-vale"}}"""),
+            (CampaignEditionCallId, "tools/call", """{"name":"rules_get","arguments":{"name":"Fireball"}}"""),
+        ]);
+        yield return ([SessionStartCallId], [(SessionStartCallId, "tools/call", """{"name":"campaign_session","arguments":{"action":"start"}}""")]);
+        yield return ([LoggedRollCallId], [(LoggedRollCallId, "tools/call", """{"name":"dice_roll","arguments":{"expression":"1d20+5","label":"Stealth"}}""")]);
+        yield return ([SessionEndCallId],
+        [
+            (SessionEndCallId, "tools/call", """{"name":"campaign_session","arguments":{"action":"end","recap_md":"Iron Guts paid the band back."}}"""),
+        ]);
     }
 
     private static string InitializeParams() =>
@@ -264,6 +395,16 @@ public sealed class StdoutPurityTests
 
     private static string ResultText(JsonElement response) =>
         response.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString() ?? string.Empty;
+
+    // The result of a request that is not a tool call; a JSON-RPC error instead fails with the error and the server's stderr.
+    private static JsonElement Result(JsonElement response, string request, BuiltServerProcess server)
+    {
+        Assert.True(response.TryGetProperty("result", out var result), $"The {request} request failed: {response}{server.Diagnostics()}");
+        return result;
+    }
+
+    private static List<string?> ResourceUris(JsonElement result) =>
+        result.GetProperty("resources").EnumerateArray().Select(r => r.GetProperty("uri").GetString()).ToList();
 
     private static bool IsToolError(JsonElement response) =>
         response.TryGetProperty("result", out var result) &&
