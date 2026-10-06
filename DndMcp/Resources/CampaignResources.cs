@@ -4,6 +4,8 @@ using DndMcp.Domain.Features;
 using DndMcp.Formatting.Campaign;
 using DndMcp.Hosting;
 using DndMcp.Repository.Campaign;
+using DndMcp.Repository.Campaign.Characters;
+using DndMcp.Repository.Campaign.Combat;
 using DndMcp.Repository.Campaign.Read;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
@@ -16,8 +18,9 @@ namespace DndMcp.Resources;
 
 /// <summary>
 /// The <c>campaign://</c> resources: <c>campaign://list</c> (a static resource, like <see cref="RulesResources"/>), one
-/// <c>campaign://&lt;slug&gt;/summary</c> and <c>/threads</c> per campaign in resources/list, and the deep URIs
-/// <c>/session/&lt;n&gt;</c>, <c>/entity/&lt;ref&gt;</c> and <c>/knowledge/&lt;perspective&gt;</c>, readable but never listed.
+/// <c>campaign://&lt;slug&gt;/summary</c>, <c>/threads</c> and <c>/party</c> per campaign in resources/list, and the deep
+/// URIs <c>/session/&lt;n&gt;</c>, <c>/entity/&lt;ref&gt;</c> and <c>/knowledge/&lt;perspective&gt;</c>, readable but never
+/// listed.
 ///
 /// <para>
 /// <b>Concrete URIs, never templates.</b> A URI with a <c>{parameter}</c> is listed only in resources/templates/list,
@@ -43,8 +46,10 @@ namespace DndMcp.Resources;
 /// protocol 2026-07-28, -32602 from it on) for anything that is not <c>campaign://</c>.
 /// </para>
 /// <para>
-/// <b>Views.</b> Summary, threads, session and entity are the author's view (resources are what the user at the keyboard
-/// attaches). <c>/knowledge/&lt;perspective&gt;</c> is that perspective's view, through the same filtered reader as every
+/// <b>Views.</b> Summary, threads, party, session and entity are the author's view (resources are what the user at the
+/// keyboard attaches). <c>/party</c> (contract §15 H1) is every current party member (contract D8) with the line of their
+/// sheet, the same text as <c>campaign_character get</c>'s list form: bounded by the party's size and stable between
+/// fights, so it is listed beside the summary and the threads. <c>/knowledge/&lt;perspective&gt;</c> is that perspective's view, through the same filtered reader as every
 /// non-author read, under the banner. Every resource renders through the same readers and formatters as the tools.
 /// </para>
 /// </summary>
@@ -54,9 +59,14 @@ public sealed class CampaignResources
     public const string ListUri = Scheme + "list";
     public const string SummaryPath = "summary";
     public const string ThreadsPath = "threads";
+    public const string PartyPath = "party";
     public const string SessionPath = "session";
     public const string EntityPath = "entity";
     public const string KnowledgePath = "knowledge";
+    public const string CombatPath = "combat";
+
+    /// <summary>The one combat resource: the fight running now (<c>campaign://&lt;slug&gt;/combat/current</c>).</summary>
+    public const string CombatCurrent = "current";
 
     private const string MimeType = "text/markdown";
 
@@ -80,10 +90,12 @@ public sealed class CampaignResources
 
     public static string ThreadsUri(string slug) => $"{Scheme}{slug}/{ThreadsPath}";
 
+    public static string PartyUri(string slug) => $"{Scheme}{slug}/{PartyPath}";
+
     [McpServerResource(UriTemplate = ListUri, Name = "campaigns", Title = "Campaigns", MimeType = MimeType)]
     [Description(
         "Every campaign in campaigns.db (slug, role, ruleset, status) and the campaign:// resources each one can be read at: " +
-        "summary, threads, and by URI entity/<ref>, session/<n> and knowledge/<perspective>.")]
+        "summary, threads, party, and by URI entity/<ref>, session/<n>, knowledge/<perspective> and combat/current.")]
     public string List()
     {
         // The mark is the campaign a call without campaign uses, by the rule the campaign tool's list marks it with.
@@ -92,7 +104,8 @@ public sealed class CampaignResources
     }
 
     /// <summary>
-    /// resources/list: a summary and a threads resource per campaign (the SDK appends the static resources after these).
+    /// resources/list: a summary, a threads and a party resource per campaign (the SDK appends the static resources after
+    /// these).
     /// Read-only and never throws (class summary).
     /// </summary>
     public static ValueTask<ListResourcesResult> ListAsync(RequestContext<ListResourcesRequestParams> request, CancellationToken cancellationToken)
@@ -126,6 +139,15 @@ public sealed class CampaignResources
                     Description = $"Every quest and thread of the {name} campaign by status, open ones first. Also: campaign_search with kinds [\"quest\", \"thread\"].",
                     MimeType = MimeType,
                 });
+                result.Resources.Add(new Resource
+                {
+                    Uri = PartyUri(slug),
+                    Name = slug + "-party",
+                    Title = name + ": party sheets",
+                    Description = $"The {name} campaign's current party members with their sheets: level, classes, HP, AC, conditions. " +
+                                  "Also: campaign_character, action \"get\".",
+                    MimeType = MimeType,
+                });
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -156,8 +178,8 @@ public sealed class CampaignResources
         var slash = rest.IndexOf('/', StringComparison.Ordinal);
         if (slash <= 0 || slash == rest.Length - 1)
         {
-            throw NotFound(request, uri, "campaign resources are campaign://<slug>/summary, /threads, /entity/<ref>, /session/<n> or " +
-                                         "/knowledge/<perspective>; campaign://list lists the campaigns");
+            throw NotFound(request, uri, "campaign resources are campaign://<slug>/summary, /threads, /party, /entity/<ref>, /session/<n>, " +
+                                         "/knowledge/<perspective> or /combat/current; campaign://list lists the campaigns");
         }
 
         var slug = Uri.UnescapeDataString(rest[..slash]);
@@ -166,7 +188,7 @@ public sealed class CampaignResources
             $"there is no campaign \"{CampaignMarkdownText.Echo(slug)}\"; campaign://list lists the campaigns");
         var database = campaigns.Database;
         var markdown = Read(database, campaign, path) ?? throw NotFound(request, uri,
-            $"campaign {campaign.Slug} has summary, threads, entity/<ref>, session/<n> and knowledge/<perspective>");
+            $"campaign {campaign.Slug} has summary, threads, party, entity/<ref>, session/<n>, knowledge/<perspective> and combat/current");
         return ValueTask.FromResult(new ReadResourceResult
         {
             Contents = [new TextResourceContents { Uri = uri, MimeType = MimeType, Text = markdown }],
@@ -186,6 +208,11 @@ public sealed class CampaignResources
             return Threads(database, campaign);
         }
 
+        if (path == PartyPath)
+        {
+            return SheetMarkdown.FormatList(campaign, new SheetReader(database).Party(campaign), banner: null, SheetLiveFight.Read(database, campaign));
+        }
+
         var slash = path.IndexOf('/', StringComparison.Ordinal);
         if (slash <= 0 || slash == path.Length - 1)
         {
@@ -198,10 +225,11 @@ public sealed class CampaignResources
         {
             EntityPath => EntityMarkdown.Format(
                 new EntityReader(database).Get(campaign, [argument], EntityIncludes.All with { History = false }, Perspective.Author),
-                CampaignView.Author, campaign.Slug, full: true),
+                CampaignView.Author.WithLiveFight(database, campaign), campaign.Slug, full: true),
             SessionPath => CampaignResourceMarkdown.Session(campaign.Name, campaign.Slug,
                 new SessionReader(database).Get(campaign, SessionHandle(argument), Perspective.Author)),
             KnowledgePath => Knowledge(database, campaign, argument),
+            CombatPath when argument == CombatCurrent => CombatMarkdown.FormatState(campaign, new CombatReader(database).State(campaign)),
             _ => null,
         };
     }

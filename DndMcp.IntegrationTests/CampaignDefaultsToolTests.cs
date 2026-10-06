@@ -342,6 +342,158 @@ public sealed class CampaignDefaultsToolTests
     }
 
     [Fact]
+    public async Task EncounterDifficulty_CampaignNamingTheActiveOne_IsByteIdenticalToLeavingItOut()
+    {
+        // Naming the campaign the defaults already come from changes nothing: the same rules, offset and notes, word for word.
+        var server = await StartAsync("2014", offset: 1);
+        try
+        {
+            var arguments = """{"party": [5, 5, 5, 5], "monsters": [{"name": "Ogre", "count": 3}]""";
+            var named = server.SuccessText(await server.CallToolJsonAsync("encounter_difficulty", arguments + """, "campaign": "belmakor"}"""));
+
+            Assert.Equal(server.SuccessText(await server.CallToolJsonAsync("encounter_difficulty", arguments + "}")), named);
+            Assert.Contains("- " + Note2014 + "\n", named, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await server.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task EncounterDifficulty_CampaignNamingAnotherOne_TakesItsRulesetAndOffsetAndNamesIt()
+    {
+        // belmakor (2014) is active; the call names deep (2024, +2): deep's rules and offset, in notes that name deep and
+        // never call it the active campaign.
+        var server = await StartAsync("2014");
+        try
+        {
+            var settings = new Dictionary<string, JsonElement> { ["effective_level_offset"] = JsonSerializer.SerializeToElement(2) };
+            server.Services.GetRequiredService<CampaignService>().Store.Create("Deep", "dm", "2024", slug: "deep", settings: settings);
+
+            var text = server.SuccessText(await server.CallToolJsonAsync("encounter_difficulty",
+                """{"party": [5, 5, 5, 5], "monsters": [{"name": "Ogre", "count": 3}], "campaign": "deep"}"""));
+
+            Assert.Contains("\n## 2024 rules: ", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("## 2014 rules", text, StringComparison.Ordinal);
+            Assert.Contains("**Effective level:** +2 (4 characters at level 7).", text, StringComparison.Ordinal);
+            Assert.Contains(
+                "**Notes:**\n- 2024 rules: the deep campaign's ruleset.\n- Effective level +2: the deep campaign's effective_level_offset; pass " +
+                "effective_level_offset 0 for the book levels alone.\n",
+                text, StringComparison.Ordinal);
+            Assert.DoesNotContain("active campaign", text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await server.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task BalanceSimulate_CampaignNamingTheActiveOne_IsByteIdenticalToLeavingItOut()
+    {
+        // The chosen campaign is the active one: the same rules and the same note, word for word.
+        var server = await StartAsync("2014");
+        try
+        {
+            var arguments = $$"""{"party": {{Party}}, "enemies": [{"monster": "ogre"}], "iterations": 200, "seed": 7""";
+            var named = server.SuccessText(await server.CallToolJsonAsync("balance_simulate", arguments + """, "campaign": "belmakor"}"""));
+
+            Assert.Equal(server.SuccessText(await server.CallToolJsonAsync("balance_simulate", arguments + "}")), named);
+            Assert.Contains("- " + Note2014 + "\n", named, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await server.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task BalanceSimulate_CampaignNamingAnotherOne_TakesItsRulesetAndNamesIt()
+    {
+        // belmakor (2014) is active; the call names deep (2024): deep's rules for the archetypes and the ogre, in a note that
+        // names deep and never calls it the active campaign (CampaignEditionFill's chosen-campaign form).
+        var server = await StartAsync("2014");
+        try
+        {
+            server.Services.GetRequiredService<CampaignService>().Store.Create("Deep", "dm", "2024", slug: "deep");
+
+            var text = server.SuccessText(await server.CallToolJsonAsync("balance_simulate",
+                $$"""{"party": {{Party}}, "enemies": [{"monster": "ogre"}], "iterations": 200, "seed": 7, "campaign": "deep"}"""));
+
+            Assert.Contains("| archetype fighter (level 5, 2024) |", text, StringComparison.Ordinal);
+            Assert.Contains("| monster 2024/monster/ogre |", text, StringComparison.Ordinal);
+            Assert.Contains("### Notes\n\n- 2024 rules: the deep campaign's ruleset.\n", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("active campaign", text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await server.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task BalanceSimulate_NoCampaignNamedNoEncounterNoCharacter_NeverResolvesOne()
+    {
+        // With nothing in the call naming a campaign's part, the ambient defaults stand as before: with no campaigns at all
+        // the call answers as it always did and creates no campaigns.db.
+        var server = await StartAsync(null);
+        try
+        {
+            server.SuccessText(await server.CallToolJsonAsync("balance_simulate", $$"""{"party": {{Party}}, "enemies": [{"monster": "ogre"}], "iterations": 100, "seed": 7}"""));
+
+            Assert.False(File.Exists(Path.Combine(server.DataDirectory, "campaigns.db")));
+        }
+        finally
+        {
+            await server.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task ToolSchema_BalanceSimulateEncounterArguments_PublishDefaultNullAndNothingIsRequired()
+    {
+        var server = await StartAsync(null);
+        try
+        {
+            var schema = (await server.Client.ListToolsAsync()).Single(t => t.Name == "balance_simulate").JsonSchema;
+
+            foreach (var argument in new[] { "party", "enemies", "encounter", "from_state", "campaign" })
+            {
+                Assert.Equal(JsonValueKind.Null, schema.GetProperty("properties").GetProperty(argument).GetProperty("default").ValueKind);
+            }
+
+            Assert.Contains("Default: the current campaign.", schema.GetProperty("properties").GetProperty("campaign").GetProperty("description").GetString(),
+                StringComparison.Ordinal);
+            Assert.False(schema.TryGetProperty("required", out _), "balance_simulate requires an argument");
+        }
+        finally
+        {
+            await server.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task ToolSchema_EncounterCampaign_PublishesDefaultNullAndIsOptional()
+    {
+        var server = await StartAsync(null);
+        try
+        {
+            var schema = (await server.Client.ListToolsAsync()).Single(t => t.Name == "encounter_difficulty").JsonSchema;
+            var property = schema.GetProperty("properties").GetProperty("campaign");
+
+            Assert.Equal(JsonValueKind.Null, property.GetProperty("default").ValueKind);
+            Assert.Contains("Default: the current campaign.", property.GetProperty("description").GetString(), StringComparison.Ordinal);
+            Assert.Equal(["party", "monsters"], schema.GetProperty("required").EnumerateArray().Select(r => r.GetString()!));
+            Assert.False(schema.GetProperty("properties").GetProperty("party").TryGetProperty("type", out _), "party is published typed");
+        }
+        finally
+        {
+            await server.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task BalanceDpr_BuildWithoutEdition_Follows2014AndFightsThe2014Ogre()
     {
         var text = await CallAsync("2014", "balance_dpr", $$$"""{"build": {{{Fighter}}}, "target": {"monster": "ogre"}}""");
@@ -772,8 +924,8 @@ public sealed class CampaignDefaultsToolTests
             var entry = schema.GetProperty("properties").GetProperty("party").GetProperty("items");
 
             Assert.Equal(
-                ["ac", "archetype", "build", "count", "death_saves", "edition", "hp", "initiative_bonus", "level", "monster", "name",
-                 "position", "save_proficiencies", "saves"],
+                ["ac", "archetype", "build", "character", "count", "death_saves", "edition", "hp", "initiative_bonus", "level", "monster",
+                 "name", "position", "save_proficiencies", "saves"],
                 entry.GetProperty("properties").EnumerateObject().Select(p => p.Name).Order(StringComparer.Ordinal));
             Assert.False(entry.TryGetProperty("required", out _), "An entry field became required.");
         }

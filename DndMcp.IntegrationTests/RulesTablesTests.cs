@@ -66,6 +66,7 @@ public sealed class RulesTablesTests : IClassFixture<McpServerHarness>
     [InlineData("monster-stats-by-cr-2014", 34)]
     [InlineData("monster-stats-by-cr-empirical", 34)]
     [InlineData("dpr-targets-by-level", 20)]
+    [InlineData("character-advancement", 20)]
     public async Task RulesGet_EveryTable_HasEveryRow(string slug, int rows)
     {
         var text = await Get(new() { ["ref"] = RulesTables.UriPrefix + slug });
@@ -118,6 +119,11 @@ public sealed class RulesTablesTests : IClassFixture<McpServerHarness>
     [InlineData("monster-stats-by-cr-empirical", "| 19 | 1 | 19 | 262 | +14 | — | +9.00 | 1 | 19 | 287 | +14 | — | +7.00 | 19 | 341–355 | +10 | 19 |")]
     // CR 18: no SRD monster in either edition, so every value is interpolated and marked, with no count.
     [InlineData("monster-stats-by-cr-empirical", "| 18 | — | ~19 | ~259 | ~+13.75 | ~20.67 | ~+8.50 | — | ~19 |")]
+    // Character advancement (SRD 5.1 "Beyond 1st Level", SRD 5.2 "Character Creation"): the first, a tier's first, and the last row.
+    [InlineData("character-advancement", "| 1 | 0 | +2 |")]
+    [InlineData("character-advancement", "| 5 | 6,500 | +3 |")]
+    [InlineData("character-advancement", "| 12 | 100,000 | +4 |")]
+    [InlineData("character-advancement", "| 20 | 355,000 | +6 |")]
     public async Task RulesGet_Table_RendersTheDomainValues(string slug, string row)
     {
         Assert.Contains(row, await Get(new() { ["ref"] = RulesTables.UriPrefix + slug }), StringComparison.Ordinal);
@@ -191,6 +197,37 @@ public sealed class RulesTablesTests : IClassFixture<McpServerHarness>
                 Assert.Equal(data.HitPoints.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture), row[edition.Item2 + 2]);
             }
         }
+    }
+
+    [Fact]
+    public async Task RulesGet_CharacterAdvancement_EveryRowIsTheDomainTableTheSheetsUse()
+    {
+        // The page and campaign_character's level-due reminders read one table (Advancement), never two typings of it.
+        var rows = (await Get(new() { ["ref"] = RulesTables.UriPrefix + RulesTables.AdvancementSlug }))
+            .Split('\n').Where(l => l.StartsWith("| ", StringComparison.Ordinal)).Skip(1).ToList();
+
+        Assert.Equal(
+            DndMcp.Domain.Characters.Advancement.Rows.Select(r =>
+                $"| {r.Level.ToString(System.Globalization.CultureInfo.InvariantCulture)} | {r.Xp.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} | +{r.ProficiencyBonus.ToString(System.Globalization.CultureInfo.InvariantCulture)} |"),
+            rows);
+    }
+
+    [Fact]
+    public async Task RulesGet_CharacterAdvancement_NamesBothSrdChaptersAndQuotesTheRule()
+    {
+        // Contract D21: the one part of the 2024 Character Creation chapter this server serves, quoted (CC-BY) from both SRDs.
+        var text = await Get(new() { ["name"] = "Character Advancement" });
+        var line = text.Split('\n')[2];
+
+        Assert.StartsWith("# Character Advancement\n", text, StringComparison.Ordinal);
+        Assert.Equal(
+            "*2014 and 2024 rules · SRD 5.1 \"Beyond 1st Level\" (2014) and SRD 5.2 \"Character Creation\" › Level Advancement (2024), CC-BY-4.0; " +
+            "the same in both editions · `rules://tables/character-advancement`*",
+            line);
+        Assert.Contains(
+            "\"When your XP total equals or exceeds a number in the Experience Points column, you reach the corresponding level\" (SRD 5.2).", text,
+            StringComparison.Ordinal);
+        Assert.Contains("campaign_character keeps a sheet's XP (action \"xp\")", text, StringComparison.Ordinal);
     }
 
     [Fact]

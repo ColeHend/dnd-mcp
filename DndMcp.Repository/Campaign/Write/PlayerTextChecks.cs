@@ -433,8 +433,8 @@ internal sealed class PlayerTextChecks
             ? string.Empty
             : $", \"state\": \"{verdict.State}\"";
         var trueName = CampaignLogJson.Serialize(JsonValue.Create(entity.Row.Name));
-        return $"or, if {reader.Key} now knows the name, record it: campaign_knowledge {{\"action\": \"record\", \"campaign\": \"{campaignSlug}\", " +
-               $"\"targets\": [\"{entity.Ref}\"], \"knowers\": [{{\"who\": \"{reader.Key}\"{keep}, \"known_as\": {trueName}}}]}}";
+        return $"or, if {reader.Key} now knows the name, record it: campaign_knowledge {{\"action\": \"record\", " +
+               $"\"targets\": [\"{entity.Ref}\"], \"knowers\": [{{\"who\": \"{reader.Key}\"{keep}, \"known_as\": {trueName}}}], \"campaign\": \"{campaignSlug}\"}}";
     }
 
     // "the party's", "the table's"; a character by its handle: "character:serif's".

@@ -3,6 +3,8 @@ using DndMcp.Domain.Core;
 using DndMcp.Domain.Dice;
 using DndMcp.Prompts;
 using DndMcp.Repository.Campaign;
+using DndMcp.Repository.Campaign.Characters;
+using DndMcp.Repository.Campaign.Combat;
 using DndMcp.Repository.Srd.Index;
 using DndMcp.Resources;
 using DndMcp.Tools;
@@ -31,7 +33,7 @@ namespace DndMcp.Hosting;
 /// user's campaigns.db or another test's.
 /// </para>
 /// <para>
-/// ServerSurfaceTests pins what these registrations expose (15 tools with their hints, 6 prompts with their arguments,
+/// ServerSurfaceTests pins what these registrations expose (17 tools with their hints, 6 prompts with their arguments,
 /// the static resources and the per-campaign ones, no templates), so a line added or dropped here fails there first.
 /// </para>
 /// </summary>
@@ -67,6 +69,12 @@ internal static class DndMcpServerRegistration
         // the process's current campaign lives here. It opens nothing until a campaign tool or a default lookup asks, so
         // registering it costs initialize nothing.
         services.AddSingleton<CampaignService>();
+
+        // Singleton: stateless. The combat side of campaign_character's D5 routing: while a character is a sheet-seeded
+        // combatant of the active fight, its damage, heal, temp_hp, use and condition change the combatant (written to the
+        // sheet at combat end), not the sheet the write-back would overwrite. On the options' clock, like campaigns.db
+        // itself: its combat_log rows must agree with the rest of the fight's (and with a test's fixed clock).
+        services.AddSingleton<ICombatRouter>(sp => new CombatRouter(sp.GetRequiredService<DndMcpServerOptions>().Time));
 
         return services
             .AddMcpServer(serverOptions =>
@@ -177,14 +185,19 @@ internal static class DndMcpServerRegistration
             .WithTools<CampaignKnowledgeTools>(McpJson.Options)
             .WithTools<CampaignSessionTools>(McpJson.Options)
             .WithTools<CampaignHistoryTools>(McpJson.Options)
+            // campaign_character takes the combat layer's ICombatRouter when one is registered (contract D5), else none.
+            .WithTools<CampaignCharacterTools>(McpJson.Options)
+            // combat gets the dice (handed to the Repository, which rolls and logs) and the stat blocks its srd entries need.
+            .WithTools<CombatTools>(McpJson.Options)
             // Prompts: instructions that drive the campaign tools; one instance per prompts/get (constructor DI).
             .WithPrompts<CampaignPrompts>(McpJson.Options)
             // Static resources, fixed when the container is built: the attribution, the rules tables, campaign://list.
             .WithResources<RulesResources>()
             .WithResources(RulesTableResources.Create())
             .WithResources<CampaignResources>()
-            // campaign://<slug>/summary and /threads are listed per request and the deep campaign:// URIs read on demand:
-            // concrete URIs rather than templates, which the model's resource listing never shows. The read handler is
+            // campaign://<slug>/summary, /threads and /party are listed per request and the deep campaign:// URIs (entity,
+            // session, knowledge and combat/current) read on demand: concrete URIs rather than templates, which the model's
+            // resource listing never shows. The read handler is
             // reached only for URIs no registered resource matches, so rules:// reads are unchanged. One handler per slot:
             // a second WithListResourcesHandler or WithReadResourceHandler would replace these, not add to them.
             .WithListResourcesHandler(CampaignResources.ListAsync)
@@ -192,12 +205,17 @@ internal static class DndMcpServerRegistration
     }
 
     /// <summary>
-    /// The tools that read campaigns.db and can fail on it: the seven campaign tools, all named <c>campaign</c> or
-    /// <c>campaign_*</c> (ServerSurfaceTests pins the tool list). dice_roll and the rules, encounter and balance tools read it
-    /// too, but never let a failure out (a roll stands; a default falls back), so a SqliteException from them is srd.db's.
+    /// The tools that read campaigns.db and can fail on it: the eight campaign tools, all named <c>campaign</c> or
+    /// <c>campaign_*</c>, and <c>combat</c>, whose every step reads and writes campaigns.db (ServerSurfaceTests pins the
+    /// tool list; ToolErrorTests' damaged-page row for <c>combat state</c> with a character's perspective proves it is
+    /// covered: resolving that view reads the entity table outside the Repository's own mapping, which the party's board
+    /// with no fight running never does). A tool added under another name is not covered until it is named here. dice_roll
+    /// and the rules, encounter and balance tools read it too, but never let a failure out (a roll stands; a default falls
+    /// back) or map it themselves (encounter_difficulty's and balance_simulate's campaign reads), so a SqliteException from
+    /// them is srd.db's.
     /// </summary>
     internal static bool IsCampaignTool(string name) =>
-        name == "campaign" || name.StartsWith("campaign_", StringComparison.Ordinal);
+        name == "campaign" || name.StartsWith("campaign_", StringComparison.Ordinal) || name == "combat";
 
     // The store's message for a campaigns.db failure a person can fix, or null (another code, or no campaigns.db opened).
     private static CampaignStoreUnavailableException? StoreFailure(IServiceProvider? services, SqliteException exception) =>

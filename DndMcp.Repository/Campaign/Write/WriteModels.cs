@@ -160,6 +160,13 @@ public static class WarningKinds
 
     /// <summary>A character joined the party during a session: the membership's since was set to that session.</summary>
     public const string MemberSince = "member_since";
+
+    /// <summary>
+    /// An upsert's <c>data</c> on a character set a key a character sheet owns (<c>level</c>, <c>hp</c>, <c>max_hp</c>,
+    /// <c>ac</c>, <c>xp</c>, <c>classes</c>, <c>spell_slots</c>): data is free-form notes no tool reads as the sheet, so the
+    /// value would sit beside the real one and disagree with it (Phase 7). Advisory; the write is applied.
+    /// </summary>
+    public const string SheetShadow = "sheet_shadow";
 }
 
 /// <summary>The fields a <see cref="PlayerTextWarning"/> names, as wire strings.</summary>

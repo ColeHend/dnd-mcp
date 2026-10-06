@@ -62,9 +62,30 @@ internal static partial class SimulationMarkdown
 
     /// <param name="seedGiven">The caller passed the seed (the reproduce hint then says the same call repeats it).</param>
     /// <param name="notes">How the monsters were found (forms, another edition's stat block), from the host's lookup.</param>
-    public static string Format(SimulationReport report, bool seedGiven, IReadOnlyList<string> notes)
+    public static string Format(SimulationReport report, bool seedGiven, IReadOnlyList<string> notes) => Format(report, seedGiven, notes, reserve: 0);
+
+    /// <summary>
+    /// <c>balance_simulate {encounter}</c>'s result: the encounter's notes block (<see cref="EncounterNotes"/>), then the
+    /// report, which fits in what the block leaves of <see cref="MaxChars"/>, so the whole result never passes it. A report
+    /// shorter than that room is the same text it would be alone, so an encounter's report still equals its explicit
+    /// call's byte for byte.
+    /// </summary>
+    /// <param name="campaignSlug">The campaign the encounter belongs to.</param>
+    /// <param name="fromState">The run resumes the live fight.</param>
+    public static string FormatEncounter(
+        SimulationReport report, bool seedGiven, IReadOnlyList<string> notes, Repository.Campaign.Combat.EncounterSimulation simulation, string campaignSlug,
+        bool fromState)
+    {
+        var block = EncounterNotes(simulation, campaignSlug, fromState);
+        return block + Format(report, seedGiven, notes, reserve: block.Length);
+    }
+
+    // The report within MaxChars − reserve. The only reserve is an EncounterNotes block, at most MaxEncounterNotesChars by
+    // construction, so the report always keeps at least seven eighths of the room.
+    private static string Format(SimulationReport report, bool seedGiven, IReadOnlyList<string> notes, int reserve)
     {
         ArgumentNullException.ThrowIfNull(report);
+        var max = MaxChars - Math.Clamp(reserve, 0, MaxEncounterNotesChars);
         var blocks = new List<string?>
         {
             Title(report) + "\n\n" + Headline(report),
@@ -82,27 +103,105 @@ internal static partial class SimulationMarkdown
         var main = SrdMarkdownText.Blocks(blocks);
         if (report.ReplayLog is not { } log || report.ReplayIteration is not { } iteration)
         {
-            return Cap(main + "\n");
+            return Cap(main + "\n", max);
         }
 
-        var room = MaxChars - main.Length - ReplayOverhead;
-        return Cap(main + "\n\n" + Replay(iteration, report, log, room) + "\n");
+        var room = max - main.Length - ReplayOverhead;
+        return Cap(main + "\n\n" + Replay(iteration, report, log, room) + "\n", max);
     }
+
+    /// <summary>
+    /// The most an encounter's notes block takes (<see cref="EncounterNotes"/>), whatever the encounter holds: its notes are
+    /// cut with a count past it, and a single note longer than <see cref="MaxEncounterNoteChars"/> (forty neutral names in one
+    /// line) is excerpted. Without the bound a long block would leave the report too little room, and the result would pass
+    /// the cap.
+    /// </summary>
+    public const int MaxEncounterNotesChars = 3_000;
+
+    /// <summary>The longest one note of the block prints (<see cref="MaxEncounterNotesChars"/>); a longer one ends with "…".</summary>
+    public const int MaxEncounterNoteChars = 600;
+
+    // Room the block keeps for its last line ("- … and 1,234 more notes.") and its closing blank line.
+    private const int EncounterNotesTail = 64;
+
+    /// <summary>
+    /// The block <c>balance_simulate {encounter}</c> prints BEFORE the report (contract §6.11): which fight it is, and what
+    /// only the encounter form says (who was left out and the fix, the neutral and left combatants omitted, where the party
+    /// came from, what the live state holds that the simulation cannot). It is its own <c># </c> section so the report
+    /// that follows (from <c># Fight simulation: </c>) is byte for byte the report of the equivalent explicit call (the same
+    /// seed and entries, the sheet-seeded members as <c>character</c> entries): nothing only the encounter knows may reach
+    /// that report, and a reader (or a test) drops this block to compare the two. Two forms have no explicit equal, and the
+    /// block says so instead of claiming one: <paramref name="fromState"/> (no call carries a live state) and a fight in a
+    /// lair (balance_simulate takes no lair, so the same entries given explicitly fight outside it, with other legendary
+    /// counts and other numbers; contract §6.11 pins a lair encounter in the encounter form only). A claim the explicit
+    /// call cannot keep would send the model after a report no call it can make reproduces.
+    /// </summary>
+    /// <param name="campaignSlug">The campaign the encounter belongs to.</param>
+    /// <param name="fromState">The run resumes the live fight.</param>
+    public static string EncounterNotes(Repository.Campaign.Combat.EncounterSimulation simulation, string campaignSlug, bool fromState)
+    {
+        ArgumentNullException.ThrowIfNull(simulation);
+        var text = new StringBuilder();
+        text.Append(Invariant, $"# Encounter \"{Campaign.CampaignMarkdownText.Excerpt(OneLine(simulation.EncounterName), 200)}\" as a simulation\n\n");
+        var how = fromState
+            ? "resumed from its live state (HP, conditions, concentration, uses left, the turn)"
+            : "as a fresh fight from its combatants";
+        text.Append(Invariant, $"{campaignSlug} · {simulation.Status} · {simulation.Edition} rules{(simulation.Lair ? " · in a lair" : string.Empty)} · {how}. ");
+
+        // A fresh fight out of a lair has an explicit form (its entries, the same seed: contract §6.11). A resumed one has
+        // none, since no explicit call carries a live state; nor has a lair fight, since balance_simulate takes no lair (the
+        // explicit call with the same entries fights outside it and reports other numbers). The claim is made only where it
+        // holds.
+        text.Append(
+            fromState
+                ? "No explicit call can resume a fight, so this report has no explicit form; the same call with the same seed repeats it. These notes are this encounter's own.\n"
+                : simulation.Lair
+                    ? "No explicit call can put a fight in a lair, so this report has no explicit form; the same call with the same seed repeats it. These notes are this encounter's own.\n"
+                    : "The report below is the one an explicit call with the same entries and seed gives; these notes are this encounter's own.\n");
+        if (simulation.Notes.Count == 0)
+        {
+            text.Append("\nEvery combatant of the encounter is in the fight below.\n\n");
+            return text.ToString();
+        }
+
+        text.Append('\n');
+        var shown = 0;
+        foreach (var note in simulation.Notes)
+        {
+            var line = "- " + Campaign.CampaignMarkdownText.Excerpt(OneLine(note), MaxEncounterNoteChars) + "\n";
+            if (text.Length + line.Length > MaxEncounterNotesChars - EncounterNotesTail)
+            {
+                break;
+            }
+
+            text.Append(line);
+            shown++;
+        }
+
+        if (shown < simulation.Notes.Count)
+        {
+            text.Append(Invariant, $"- … and {Plural(simulation.Notes.Count - shown, "more note", "more notes")}.\n");
+        }
+
+        return text.Append('\n').ToString();
+    }
+
+    private static string OneLine(string text) => text.ReplaceLineEndings(" ").Trim();
 
     /// <summary>
     /// The last line of defence for <see cref="MaxChars"/>: every section is capped on its own, but 40 entries with
     /// 80-character names make a table and a replay summary long enough to pass it together. Cut at a line, close an open
     /// code fence, and say so; the headline, at the top, is never what is cut.
     /// </summary>
-    private static string Cap(string text)
+    private static string Cap(string text, int max)
     {
-        if (text.Length <= MaxChars)
+        if (text.Length <= max)
         {
             return text;
         }
 
         const string Note = "\n*[Cut to keep the result readable: {0} more characters not shown. Fewer entries, shorter names or no replay fit whole.]*\n";
-        var cut = text.LastIndexOf('\n', MaxChars - 300);
+        var cut = text.LastIndexOf('\n', max - 300);
         var kept = text[..cut];
         var fence = kept.Split('\n').Count(l => l.StartsWith("```", StringComparison.Ordinal)) % 2 == 1 ? "\n```" : string.Empty;
         return kept + fence + "\n" + string.Format(Invariant, Note, Number(text.Length - cut));
@@ -223,7 +322,7 @@ internal static partial class SimulationMarkdown
                "Kills count the other side's deaths it caused (by damage, an outright kill such as Power Word Kill, or a sixth " +
                "level of exhaustion); a death from failed death saves (or from regeneration stopped at 0 HP) is credited to no one.\n\n" +
                SrdMarkdownText.Table(
-                   ["Combatant", "Side", "From", "AC", "HP", "Dropped to 0", "Dead at end", "Dying at end", "HP lost mean (p50 / p90)", "Damage dealt (effective)", "Damage taken (effective)", "Kills"],
+                   ["Combatant", "Side", "From", "AC", report.Resumed ? "HP at start" : "HP", "Dropped to 0", "Dead at end", "Dying at end", "HP lost mean (p50 / p90)", "Damage dealt (effective)", "Damage taken (effective)", "Kills"],
                    rows);
     }
 
@@ -426,10 +525,13 @@ internal static partial class SimulationMarkdown
         return "### Notes\n\n" + shown + more;
     }
 
+    // How to repeat the run. A drawn seed is below 2^53 (SimulateTools.RandomSeed), so it is printed as the JSON number the
+    // schema takes and any client passes it back exactly (fix F1, U10: a quoted one was refused by the integer-only schema,
+    // and a 64-bit number came back rounded).
     private static string SeedLine(SimulationReport report, bool seedGiven) =>
         seedGiven
             ? $"Seed {Seed(report.Seed)} (given): the same call gives this result again, fight for fight."
-            : $"Seed {Seed(report.Seed)} (drawn at random): pass \"seed\": \"{Seed(report.Seed)}\" with the same arguments to " +
+            : $"Seed {Seed(report.Seed)} (drawn at random): pass \"seed\": {Seed(report.Seed)} with the same arguments to " +
               "reproduce this result exactly.";
 
     /// <summary>

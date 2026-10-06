@@ -45,7 +45,8 @@ internal static class CampaignResourceMarkdown
             b.Append(c.Role).Append(" campaign · ").Append(c.Ruleset).Append(" rules · ").Append(c.Status).Append('\n');
             b.Append("- `campaign://").Append(c.Slug).Append("/summary`: the state of play\n");
             b.Append("- `campaign://").Append(c.Slug).Append("/threads`: quests and threads\n");
-            b.Append("- `campaign://").Append(c.Slug).Append("/entity/<ref>`, `/session/<n>`, `/knowledge/<perspective>` (e.g. `/knowledge/party`)\n");
+            b.Append("- `campaign://").Append(c.Slug).Append("/party`: the party's sheets\n");
+            b.Append("- `campaign://").Append(c.Slug).Append("/entity/<ref>`, `/session/<n>`, `/knowledge/<perspective>` (e.g. `/knowledge/party`), `/combat/current` (the fight running now)\n");
         }
 
         return CampaignMarkdownText.Cap(b.ToString(), "the campaign tool lists campaigns too (action \"list\")");

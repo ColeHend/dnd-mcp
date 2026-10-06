@@ -280,8 +280,10 @@ public static class LevelValue
     /// <summary>
     /// A JSON number written as a whole number, or a string holding one: the host binds with numbers readable from
     /// strings, so "2" works wherever 2 does. "2.0" and "1e1" are refused, as the host's integer fields refuse them.
+    /// Internal for <see cref="BuildCanonicalizer"/>, which stores the strings this accepts as the numbers it reads them as:
+    /// one reader decides both what a step value means and how it is stored, so the two cannot drift apart.
     /// </summary>
-    private static bool TryReadWholeNumber(JsonElement element, out long value)
+    internal static bool TryReadWholeNumber(JsonElement element, out long value)
     {
         value = 0;
         var text = element.ValueKind switch

@@ -256,12 +256,13 @@ public sealed class SessionReader
 
     /// <summary>
     /// The list call a "no such session" refusal prints: valid JSON naming the campaign (a call sent as printed must work
-    /// while another campaign is current) and, for a non-author view, the perspective (so it lists what that view sees, not
-    /// the author's planned sessions). Both are what the caller already gave: nothing here is hidden from it.
+    /// while another campaign is current), last as in every printed call (fix F1), and, for a non-author view, the
+    /// perspective (so it lists what that view sees, not the author's planned sessions). Both are what the caller already
+    /// gave: nothing here is hidden from it.
     /// </summary>
     private static string ListCall(ReadScope scope) => scope.IsAuthorView
         ? $"{{\"action\": \"list\", \"campaign\": \"{scope.Campaign.Slug}\"}}"
-        : $"{{\"action\": \"list\", \"campaign\": \"{scope.Campaign.Slug}\", \"perspective\": \"{scope.Who.Perspective.Text}\"}}";
+        : $"{{\"action\": \"list\", \"perspective\": \"{scope.Who.Perspective.Text}\", \"campaign\": \"{scope.Campaign.Slug}\"}}";
 
     private static SessionSummary Summary(ReadScope scope, SessionRow row)
     {

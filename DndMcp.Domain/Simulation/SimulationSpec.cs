@@ -29,7 +29,7 @@ public sealed record CombatantSpec
     [Description("A label (default: the build's or monster's name). Copies get \" 2\", \" 3\"...")]
     public string? Name { get; init; }
 
-    [Description("An SRD monster by ref or name, e.g. \"2024/monster/ogre\" or \"Ogre\". Give exactly one of monster, build, archetype.")]
+    [Description("An SRD monster by ref or name, e.g. \"2024/monster/ogre\" or \"Ogre\". Give exactly one of monster, build, archetype, character.")]
     public string? Monster { get; init; }
 
     [Description("A DSL build (as balance_dpr takes): a PC, NPC or homebrew creature. Needs hp and ac.")]
@@ -37,6 +37,17 @@ public sealed record CombatantSpec
 
     [Description("A named party archetype (a simple class build for a level); give level (and edition).")]
     public string? Archetype { get; init; }
+
+    /// <summary>
+    /// A campaign character (a handle or a name), <b>expanded by the host</b> from its sheet before the Domain sees the
+    /// entry (contract D7: the sheet's sim_profile as <see cref="Build"/>, else the archetype of its class with the most
+    /// levels at its total level, with the sheet's effective maximum HP, AC, save proficiencies and initiative), exactly
+    /// as <see cref="Monster"/> is resolved to a stat block: the Domain never reads a campaign. An entry that still carries
+    /// it is a host bug (<see cref="ArgumentException"/>), never a combatant simulated as nothing. Its description is the
+    /// whole schema cost of "simulate my party" (balance_simulate's schema budget, 24,000), so it stays short.
+    /// </summary>
+    [Description("A campaign character with a sheet, e.g. \"character:torch\": its sim_profile, else its main class's archetype, at its level with its HP, AC, saves and initiative.")]
+    public string? Character { get; init; }
 
     [Description("The level: required with archetype; with build, resolves the build at this level instead of its own.")]
     public int? Level { get; init; }
@@ -111,9 +122,12 @@ public sealed class CompareSpec
 
 /// <summary>
 /// One entry as the Domain receives it: the spec and, for a <see cref="CombatantSpec.Monster"/> entry, the stat block the
-/// host resolved it to (null otherwise).
+/// host resolved it to (null otherwise), and, for a fight picked up where a live one stands (balance_simulate
+/// <c>from_state</c>), the creature's state there (null: a fresh creature). Neither the block nor the start is ever a tool
+/// parameter: the host builds them (from srd.db, from the tracker's rows), so they cost the published schema nothing and
+/// the model can never type them (contract X1).
 /// </summary>
-public sealed record SimulationCombatant(CombatantSpec Spec, StatBlock? Monster = null);
+public sealed record SimulationCombatant(CombatantSpec Spec, StatBlock? Monster = null, CombatantStart? Start = null);
 
 /// <summary>
 /// Everything <see cref="Simulator.Run"/> needs, minus host-only concerns: the seed is <see cref="Simulator.Run"/>'s own
@@ -156,6 +170,23 @@ public sealed class SimulationSpec
 
     /// <summary>Table rulings for every build in the fight (see <see cref="RulingsSpec"/>).</summary>
     public RulingsSpec? Rulings { get; init; }
+
+    /// <summary>
+    /// Pick a live fight up where it stands (balance_simulate <c>from_state</c>, contract §6.11): the tracker's turn order
+    /// instead of an initiative roll, and the round and turn to start at. Null: a fresh fight. With it, each entry's
+    /// <see cref="SimulationCombatant.Start"/> usually carries the creature's state, <see cref="Surprise"/> must be none
+    /// (surprise belongs to a fight's first round), and <see cref="RoundCap"/> counts rounds from the resumed one.
+    /// </summary>
+    public FightResume? Resume { get; init; }
+
+    /// <summary>
+    /// The fight is in a legendary creature's lair: its legendary action and Legendary Resistance counts are the in-lair
+    /// ones where the stat block has them (2024 "3/Day, or 4/Day in Lair"), and the assumptions say so; lair actions
+    /// themselves are never simulated (neither SRD has any). False keeps the non-lair counts and the old assumption line,
+    /// so a fight outside a lair reads exactly as it did before (the encounter form of a non-lair fight must give the
+    /// explicit call's text byte for byte).
+    /// </summary>
+    public bool Lair { get; init; }
 }
 
 /// <summary>The simulator's limits, in one place so messages, descriptions and tests agree.</summary>

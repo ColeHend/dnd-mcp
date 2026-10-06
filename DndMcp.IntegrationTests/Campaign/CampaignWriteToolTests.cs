@@ -569,7 +569,7 @@ public sealed partial class CampaignWriteToolTests : IClassFixture<McpServerHarn
         var after = await CampaignWriteSetup.CallAsync(_server, "campaign_knowledge", check);
 
         Assert.Contains("- **warning** · hidden name · ops item 1: ", told, StringComparison.Ordinal);
-        Assert.Equal($$"""{"action": "record", "campaign": "{{slug}}", "targets": ["character:keras"], "knowers": [{"who": "party", "state": "met", "known_as": "Keras"}]}""",
+        Assert.Equal($$"""{"action": "record", "targets": ["character:keras"], "knowers": [{"who": "party", "state": "met", "known_as": "Keras"}], "campaign": "{{slug}}"}""",
             call);
         Assert.DoesNotContain(": pass", before.Split('\n')[0], StringComparison.Ordinal);
         Assert.StartsWith($"# Knowledge check: pass ({slug})\n", after, StringComparison.Ordinal);

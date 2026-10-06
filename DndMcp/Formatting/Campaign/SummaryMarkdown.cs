@@ -168,7 +168,7 @@ internal static class SummaryMarkdown
 
         return CampaignMarkdownText.Cap(b.ToString(), view.AuthorView
             ? $"read campaign://{s.Slug}/threads or campaign_search for the full lists"
-            : $"campaign_search {{\"campaign\": \"{s.Slug}\", \"perspective\": \"{view.Perspective.Text}\"}} with kinds gives the full lists");
+            : $"campaign_search {{\"perspective\": \"{view.Perspective.Text}\", \"campaign\": \"{s.Slug}\"}} with kinds gives the full lists");
     }
 
     /// <summary>
@@ -176,7 +176,7 @@ internal static class SummaryMarkdown
     /// reads exactly what this view may see of this campaign, whatever campaign is current when the model sends it.
     /// </summary>
     private static string ViewSearch(string campaignSlug, CampaignView view, string kinds) =>
-        $"campaign_search {{\"campaign\": \"{campaignSlug}\", \"kinds\": [{kinds}], \"perspective\": \"{view.Perspective.Text}\"}}";
+        $"campaign_search {{\"kinds\": [{kinds}], \"perspective\": \"{view.Perspective.Text}\", \"campaign\": \"{campaignSlug}\"}}";
 
     private static void Author(StringBuilder b, CampaignSummaryView s, AuthorCampaignSummary a)
     {

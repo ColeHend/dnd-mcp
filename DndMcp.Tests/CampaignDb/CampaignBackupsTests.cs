@@ -240,7 +240,7 @@ public sealed class CampaignBackupsTests : IDisposable
         Assert.Equal(_db.DatabasePath, result.DatabasePath);
         Assert.Equal(new[] { "before" }, result.CampaignSlugs);
         Assert.Equal(CampaignDbMigrator.LatestVersion, result.SchemaVersion);
-        Assert.Equal(1, result.BackupSchemaVersion);
+        Assert.Equal(CampaignDbMigrator.LatestVersion, result.BackupSchemaVersion);
         using (var connection = _db.Open())
         {
             Assert.Equal("Before", connection.ExecuteScalar<string>("SELECT name FROM campaign"));
@@ -565,8 +565,8 @@ public sealed class CampaignBackupsTests : IDisposable
 
     /// <summary>
     /// A backup older than the build is brought up to the build's schema on the way in (the migrator's normal path, with a
-    /// pre-migrate copy of the restored data), so a restore never leaves a database this build cannot read. Only schema
-    /// version 1 is embedded yet, so the build here is 0001 plus a test 0002.
+    /// pre-migrate copy of the restored data), so a restore never leaves a database this build cannot read. The backup is
+    /// at the newest embedded version, so the build here is the embedded migrations plus one test migration after them.
     /// </summary>
     [Fact]
     public void Restore_BackupOlderThanTheBuild_IsMigratedToTheBuildsVersion()
@@ -577,19 +577,18 @@ public sealed class CampaignBackupsTests : IDisposable
         }
 
         var backup = _db.Database.Backups.Create(CampaignBackups.Reasons.Manual);
-        var build = new CampaignDbMigrator(
-            [CampaignDbMigrator.Embedded[0], new CampaignMigration(2, "0002_notes", "CREATE TABLE extra_note (id TEXT PRIMARY KEY) STRICT;")]);
+        var build = BuildWithANewerMigration();
 
         var result = _db.Database.Backups.Restore(backup, build);
 
-        Assert.Equal(1, result.BackupSchemaVersion);
-        Assert.Equal(2, result.SchemaVersion);
+        Assert.Equal(CampaignDbMigrator.LatestVersion, result.BackupSchemaVersion);
+        Assert.Equal(NewerVersion, result.SchemaVersion);
         Assert.Single(result.CampaignSlugs);
         using var connection = OpenReadOnly(_db.DatabasePath);
-        Assert.Equal(2L, connection.ExecuteScalar<long>("PRAGMA user_version"));
+        Assert.Equal(NewerVersion, connection.ExecuteScalar<long>("PRAGMA user_version"));
         Assert.Equal(1L, connection.ExecuteScalar<long>("SELECT count(*) FROM sqlite_master WHERE name = 'extra_note'"));
         Assert.Equal("Old Times", connection.ExecuteScalar<string>("SELECT name FROM campaign"));
-        Assert.Contains(_db.Database.Backups.List(), b => b.Reason == CampaignBackups.PreMigrateReason(2));
+        Assert.Contains(_db.Database.Backups.List(), b => b.Reason == CampaignBackups.PreMigrateReason(NewerVersion));
     }
 
     /// <summary>
@@ -609,11 +608,8 @@ public sealed class CampaignBackupsTests : IDisposable
         }
 
         var backup = _db.Database.Backups.Create(CampaignBackups.Reasons.Manual);
-        var build = new CampaignDbMigrator(
-            [CampaignDbMigrator.Embedded[0], new CampaignMigration(2, "0002_notes", "CREATE TABLE extra_note (id TEXT PRIMARY KEY) STRICT;")])
-        {
-            BeforeBegin = _ => throw new SqliteException("disk I/O error", 10),
-        };
+        var build = BuildWithANewerMigration();
+        build.BeforeBegin = _ => throw new SqliteException("disk I/O error", 10);
         using var elsewhere = new CampaignTestDb(create: false);
         using var target = campaignsDbExisted
             ? null
@@ -865,16 +861,13 @@ public sealed class CampaignBackupsTests : IDisposable
         }
 
         _db.Time.Advance(TimeSpan.FromMinutes(1));
-        var build = olderThanTheBuild
-            ? new CampaignDbMigrator(
-                [CampaignDbMigrator.Embedded[0], new CampaignMigration(2, "0002_notes", "CREATE TABLE extra_note (id TEXT PRIMARY KEY) STRICT;")])
-            : new CampaignDbMigrator();
+        var build = olderThanTheBuild ? BuildWithANewerMigration() : new CampaignDbMigrator();
 
         var result = _db.Database.Backups.Restore(made[0], build);
 
         Assert.Equal(made[0], result.RestoredFrom);
         Assert.All(made, path => Assert.True(File.Exists(path), $"the restore deleted {path}"));
-        Assert.Equal(olderThanTheBuild ? 2 : 1, result.SchemaVersion);
+        Assert.Equal(olderThanTheBuild ? NewerVersion : CampaignDbMigrator.LatestVersion, result.SchemaVersion);
     }
 
     /// <summary>
@@ -1090,6 +1083,17 @@ public sealed class CampaignBackupsTests : IDisposable
         connection.Open();
         return connection;
     }
+
+    // A build one schema version ahead of this one: the embedded migrations plus a test migration after them, so a backup
+    // made by this build is "older than the build" however many migrations are embedded.
+    private static readonly int NewerVersion = CampaignDbMigrator.LatestVersion + 1;
+
+    private static CampaignDbMigrator BuildWithANewerMigration() =>
+        new([
+            .. CampaignDbMigrator.Embedded,
+            new CampaignMigration(NewerVersion, NewerVersion.ToString("0000", System.Globalization.CultureInfo.InvariantCulture) + "_notes",
+                "CREATE TABLE extra_note (id TEXT PRIMARY KEY) STRICT;"),
+        ]);
 
     private static SqliteConnection OpenReadOnly(string path)
     {

@@ -7,11 +7,11 @@ namespace DndMcp.Domain.Campaign;
 /// per-kind subtype and status lists.
 ///
 /// <para>
-/// <b>These strings are stored data.</b> campaigns.db's CHECK constraints (<c>Campaign/Migrations/0001_init.sql</c>) list
+/// <b>These strings are stored data.</b> campaigns.db's CHECK constraints (<c>Campaign/Migrations/*.sql</c>) list
 /// the same values, and rows written today are read by every later version. Renaming a value here without a migration that
 /// rewrites the rows (and the CHECK) leaves old rows the code no longer recognises, which is why these are string constants
 /// and never CLR enums (stored data outlives enum renumbering). <c>CampaignValuesTests</c> pins that each set here equals
-/// the CHECK list in the migration, so the two cannot drift.
+/// the CHECK lists in the migrations, so the two cannot drift.
 /// </para>
 /// <para>
 /// Every set is a <see cref="DslValueSet"/>, so a model's spelling is matched forgivingly (case, spaces, hyphens and
@@ -41,6 +41,14 @@ public static class CampaignValues
         public const string Mixed = "mixed";
 
         public static readonly DslValueSet Set = new("ruleset", [R2014, R2024, Mixed]);
+
+        /// <summary>
+        /// The rules one character sheet or one encounter is played by: an edition, never <c>mixed</c>. A sheet or a fight
+        /// in a mixed campaign still runs one edition's rules (exhaustion, conditions, initiative, XP tables differ), so
+        /// <c>character_sheet.ruleset</c> and <c>encounter.ruleset</c> CHECK exactly these two; a <c>mixed</c> that got
+        /// through would be refused by SQLite at the write, as the generic store error.
+        /// </summary>
+        public static readonly DslValueSet Editions = new("edition", [R2014, R2024]);
     }
 
     public static class CampaignStatuses
@@ -276,6 +284,97 @@ public static class CampaignValues
         public const string AnyOf = "any_of";
 
         public static readonly DslValueSet Set = new("beat edge mode", [AllOf, AnyOf]);
+    }
+
+    /// <summary>
+    /// What an <c>award</c> row records for its recipient (a character, or the party faction): <c>xp</c> (an amount the
+    /// sheet's <c>xp</c> also gains when it tracks XP; the end-of-combat write-back files one per party member), a
+    /// <c>milestone</c> or <c>level</c> (advancement without XP), a <c>boon</c>, <c>inspiration</c>, or <c>renown</c>
+    /// (an amount with a faction). Awards are logged (undoing a fight's write-back takes its XP back), so a value renamed
+    /// here strands every award row and every change_log snapshot of one.
+    /// </summary>
+    public static class AwardKinds
+    {
+        public const string Xp = "xp";
+        public const string Milestone = "milestone";
+        public const string Level = "level";
+        public const string Boon = "boon";
+        public const string Inspiration = "inspiration";
+        public const string Renown = "renown";
+
+        public static readonly DslValueSet Set = new("award kind", [Xp, Milestone, Level, Boon, Inspiration, Renown]);
+    }
+
+    /// <summary>
+    /// An encounter's life: <c>planned</c> (<c>combat prepare</c>; not running) → <c>active</c> (<c>start</c>; at most one
+    /// per campaign, enforced by the partial unique index <c>ux_encounter_active</c>, so a second one is a constraint
+    /// error the combat service maps to its own refusal) → <c>ended</c> (<c>end</c>, with or without a write-back; never
+    /// restarted). <c>paused</c> is reserved for a fight set aside mid-way (it frees the one active slot without ending
+    /// it); the v1 tracker never writes it, but the CHECK allows it so Phase 8's import needs no migration.
+    /// </summary>
+    public static class EncounterStatuses
+    {
+        public const string Planned = "planned";
+        public const string Active = "active";
+        public const string Paused = "paused";
+        public const string Ended = "ended";
+
+        public static readonly DslValueSet Set = new("encounter status", [Planned, Active, Paused, Ended]);
+    }
+
+    /// <summary>
+    /// Which side a combatant fights on. <c>party</c> is the player characters' side (XP is shared among its sheet-seeded
+    /// members); <c>ally</c> fights with them; <c>enemy</c> against them (defeated and fled enemies are what a fight's
+    /// default XP counts); <c>neutral</c> neither. Only <c>enemy</c> and <c>neutral</c> combatants are ever marked
+    /// defeated at 0 HP: a party member at 0 is dying, not out of the fight.
+    /// </summary>
+    public static class CombatSides
+    {
+        public const string Party = "party";
+        public const string Ally = "ally";
+        public const string Enemy = "enemy";
+        public const string Neutral = "neutral";
+
+        public static readonly DslValueSet Set = new("side", [Party, Ally, Enemy, Neutral]);
+    }
+
+    /// <summary>
+    /// The kind of one <c>combat_log</c> row: the tracker's audit trail, one row per state change (HP ticks never reach
+    /// change_log). <c>start</c>/<c>end</c> bracket the fight; <c>add</c> (also <c>set</c>, with <c>detail.updated</c>) and
+    /// <c>remove</c> (<c>leave</c>) change who is in it; <c>initiative</c> and <c>turn</c> (also <c>prev</c>, with
+    /// <c>detail.prev</c>; a turn row's detail lists its automatic changes so <c>prev</c> can revert them) move the order;
+    /// <c>damage</c>, <c>heal</c>, <c>temp_hp</c>, <c>condition</c>, <c>concentration</c>, <c>save</c> (a saving throw
+    /// the tracker resolved, e.g. a concentration save; the tracker's docs say which), <c>death_save</c>, <c>legendary</c>
+    /// and <c>resource</c> (<c>use</c>) are the per-action changes;
+    /// <c>defeat</c> marks a combatant's <c>defeated</c> turning on; <c>note</c> is free text; <c>import</c> is reserved
+    /// for Phase 8's import of a fight in progress. Tests pin kinds, not row counts.
+    /// </summary>
+    public static class CombatLogKinds
+    {
+        public const string Start = "start";
+        public const string Add = "add";
+        public const string Remove = "remove";
+        public const string Initiative = "initiative";
+        public const string Turn = "turn";
+        public const string Damage = "damage";
+        public const string Heal = "heal";
+        public const string TempHp = "temp_hp";
+        public const string Condition = "condition";
+        public const string Concentration = "concentration";
+        public const string Save = "save";
+        public const string DeathSave = "death_save";
+        public const string Legendary = "legendary";
+        public const string Resource = "resource";
+        public const string Defeat = "defeat";
+        public const string Note = "note";
+        public const string End = "end";
+        public const string Import = "import";
+
+        public static readonly DslValueSet Set = new("combat log kind",
+        [
+            Start, Add, Remove, Initiative, Turn, Damage, Heal, TempHp, Condition, Concentration, Save, DeathSave, Legendary,
+            Resource, Defeat, Note, End, Import,
+        ]);
     }
 
     /// <summary>

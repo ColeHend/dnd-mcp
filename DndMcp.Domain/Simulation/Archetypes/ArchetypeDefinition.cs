@@ -76,6 +76,18 @@ internal sealed class ArchetypeDefinition
     /// <summary>The build's modifiers with step values and level ranges, the same at every level.</summary>
     public required IReadOnlyList<ModifierSpec> Modifiers { get; init; }
 
+    /// <summary>
+    /// The modifiers whose uses are spell slots, and which slots (<see cref="SlotFundedUse"/>): what a resumed fight reads
+    /// to start them from the slots the live fight has left. Empty for a class that casts nothing from its slots here.
+    /// </summary>
+    public IReadOnlyList<SlotFundedUse> SlotFunded { get; init; } = [];
+
+    /// <summary>
+    /// The spells it casts once a fight from a slot and keeps up (<see cref="SlotCastSpell"/>), its main spell first: what
+    /// a resumed fight reads to leave out a spell no slot is left for. Empty for a class that casts none such here.
+    /// </summary>
+    public IReadOnlyList<SlotCastSpell> SlotCast { get; init; } = [];
+
     /// <summary>The routine in one line: "Greatsword (2d6, GWF, Graze), Extra Attack 5/11/20, Action Surge, Second Wind".</summary>
     public required string Routine { get; init; }
 

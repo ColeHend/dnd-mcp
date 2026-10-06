@@ -175,7 +175,7 @@ public sealed partial class CampaignToolTests : IAsyncLifetime
     /// </summary>
     [Theory]
     [InlineData("get", "use campaign {\"action\": \"summary\", \"campaign\": \"big\"} for the state of play")]
-    [InlineData("get party", "use campaign {\"action\": \"summary\", \"campaign\": \"big\", \"perspective\": \"party\"} for the state of play")]
+    [InlineData("get party", "use campaign {\"action\": \"summary\", \"perspective\": \"party\", \"campaign\": \"big\"} for the state of play")]
     [InlineData("create", "campaign_history {\"action\": \"batch\", \"batch_id\": \"0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000\", \"campaign\": \"big\"} lists what the batch changed")]
     [InlineData("create dry run", "nothing was written; run the call without dry_run to create it")]
     [InlineData("update", "campaign_history {\"action\": \"batch\", \"batch_id\": \"0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000\", \"campaign\": \"big\"} lists what the batch changed")]
@@ -409,8 +409,8 @@ public sealed partial class CampaignToolTests : IAsyncLifetime
 
         Assert.Equal(
             "An error occurred invoking 'campaign': Invalid campaign call: action \"update\" needs at least one of name, status, ruleset, dm_name, " +
-            "settings, summary_md, current_location, current_ingame, my_character to change. Example: {\"action\": \"update\", \"campaign\": " +
-            "\"belmakor\", \"current_ingame\": \"3rd of Frostmoon\"}",
+            "settings, summary_md, current_location, current_ingame, my_character to change. Example: {\"action\": \"update\", \"current_ingame\": " +
+            "\"3rd of Frostmoon\", \"campaign\": \"belmakor\"}",
             text);
     }
 
@@ -593,7 +593,7 @@ public sealed partial class CampaignToolTests : IAsyncLifetime
             text, StringComparison.Ordinal);
         Assert.Contains("- **Default for calls without campaign:** yes\n\n## Summary\nA sky world of floating islands.\n", text, StringComparison.Ordinal);
         Assert.EndsWith(
-            "Resources: `campaign://sky/summary`, `campaign://sky/threads`; also readable by URI: `campaign://sky/entity/<ref>`, " +
+            "Resources: `campaign://sky/summary`, `campaign://sky/threads`, `campaign://sky/party`; also readable by URI: `campaign://sky/entity/<ref>`, " +
             "`campaign://sky/session/<n>`, `campaign://sky/knowledge/<perspective>`.\n",
             text, StringComparison.Ordinal);
     }
@@ -821,7 +821,7 @@ public sealed partial class CampaignToolTests : IAsyncLifetime
         Assert.Contains("_… and 2 more; campaign://hint/threads or campaign_search with kinds [\"quest\", \"thread\"] lists them all._", author, StringComparison.Ordinal);
         Assert.DoesNotContain("campaign://", party, StringComparison.Ordinal);
         var call = Regex.Match(party, "_… and 1 more; campaign_search (\\{[^}]*\\}) lists them all\\._").Groups[1].Value;
-        Assert.Equal("{\"campaign\": \"hint\", \"kinds\": [\"quest\", \"thread\"], \"perspective\": \"party\"}", call);
+        Assert.Equal("{\"kinds\": [\"quest\", \"thread\"], \"perspective\": \"party\", \"campaign\": \"hint\"}", call);
         var listed = await _s.Call("campaign_search", call);
         Assert.Contains("Party quest 9", listed, StringComparison.Ordinal);
         Assert.DoesNotContain("Axiom", listed, StringComparison.Ordinal);
@@ -856,7 +856,7 @@ public sealed partial class CampaignToolTests : IAsyncLifetime
         var text = await _s.Call("campaign", $$"""{"action": "summary", "campaign": "hint", "perspective": "{{perspective}}"}""");
         var author = await _s.Call("campaign", """{"action": "summary", "campaign": "hint"}""");
 
-        string Search(string kind) => $"campaign_search {{\"campaign\": \"hint\", \"kinds\": [\"{kind}\"], \"perspective\": \"{perspective}\"}}";
+        string Search(string kind) => $"campaign_search {{\"kinds\": [\"{kind}\"], \"perspective\": \"{perspective}\", \"campaign\": \"hint\"}}";
         Assert.EndsWith($", … and 1 more ({Search("character")} lists them)", PartyLine(text), StringComparison.Ordinal);
         Assert.Contains($"\n_… and 1 more; {Search("clock")} lists them all._\n", text, StringComparison.Ordinal);
         Assert.DoesNotContain("campaign_search with", text, StringComparison.Ordinal);
@@ -890,7 +890,7 @@ public sealed partial class CampaignToolTests : IAsyncLifetime
         var text = SummaryMarkdown.Format(summary, new CampaignView(parsed, false, CampaignMarkdownText.Banner(parsed, false)));
 
         Assert.EndsWith(
-            $"\n\n_Output cut at 24,000 characters; campaign_search {{\"campaign\": \"hint\", \"perspective\": \"{perspective}\"}} with kinds gives the full lists._",
+            $"\n\n_Output cut at 24,000 characters; campaign_search {{\"perspective\": \"{perspective}\", \"campaign\": \"hint\"}} with kinds gives the full lists._",
             text, StringComparison.Ordinal);
         Assert.DoesNotContain("campaign://", text, StringComparison.Ordinal);
     }
@@ -1205,6 +1205,18 @@ public sealed class CampaignToolSurfaceTests : IClassFixture<McpServerHarness>
             "campaign_history",
             ["action", "since", "session", "targets", "ref", "refs", "detail", "batch_id", "dry_run", "reason", "limit", "cursor", "campaign"]
         },
+        {
+            "campaign_character",
+            ["action", "character", "campaign", "perspective", "sheet", "sim_profile", "amount", "damage_type", "slot_level", "pact", "resource", "kind",
+                "hit_dice", "rolls", "add", "remove", "level", "class", "items", "coins", "session", "reason", "dry_run"]
+        },
+        {
+            "combat",
+            ["action", "campaign", "encounter", "name", "add_party", "lair", "edition", "combatants", "targets", "amount", "dice", "damage_type", "parts",
+                "critical", "magical", "half", "raw", "knock_out", "source", "secret", "temp", "item", "add", "remove", "duration", "dc", "ability", "level",
+                "round", "effect", "resource", "spell", "slot_level", "pact", "drop", "total", "face", "stable", "resistance", "rolls", "surprised", "from",
+                "perspective", "outcome", "xp", "loot", "currency", "discard", "force", "dry_run", "reason"]
+        },
     };
 
     [Theory]
@@ -1226,6 +1238,8 @@ public sealed class CampaignToolSurfaceTests : IClassFixture<McpServerHarness>
     [InlineData("campaign_search", "Search a campaign", true, false, true, false)]
     [InlineData("campaign_get", "Read campaign entries", true, false, true, false)]
     [InlineData("campaign_history", "Campaign history and undo", false, true, false, false)]
+    [InlineData("campaign_character", "Character sheets", false, true, false, false)]
+    [InlineData("combat", "Live combat", false, false, false, false)]
     public async Task Annotations_TheContractsHints(string name, string title, bool readOnly, bool destructive, bool idempotent, bool openWorld)
     {
         var tool = Assert.Single(await _server.Client.ListToolsAsync(), t => t.Name == name).ProtocolTool;
@@ -1239,6 +1253,8 @@ public sealed class CampaignToolSurfaceTests : IClassFixture<McpServerHarness>
     [InlineData("campaign", "action")]
     [InlineData("campaign_get", "refs")]
     [InlineData("campaign_history", "action")]
+    [InlineData("campaign_character", "action")]
+    [InlineData("combat", "action")]
     public async Task Schema_OnlyTheOneArgumentIsRequired(string name, string required)
     {
         var tool = Assert.Single(await _server.Client.ListToolsAsync(), t => t.Name == name);

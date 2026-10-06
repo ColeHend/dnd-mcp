@@ -231,7 +231,7 @@ public sealed class CampaignSearchToolTests : IClassFixture<BelmakorServer>
         Assert.Matches(new Regex(@"\*\*Vars Nocturne\*\* · character · alive · `e:\d+`"), text);
         // The footer reads the same view (FH6, L10): campaign_get without a perspective is the author's, and followed on a
         // disguised hit it would print the true name and the secret text.
-        Assert.EndsWith("8 results.\ncampaign_get {\"campaign\": \"belmakor\", \"refs\": [...], \"perspective\": \"party\"} reads any of these in full.\n",
+        Assert.EndsWith("8 results.\ncampaign_get {\"refs\": [...], \"perspective\": \"party\", \"campaign\": \"belmakor\"} reads any of these in full.\n",
             text, StringComparison.Ordinal);
     }
 
@@ -241,13 +241,13 @@ public sealed class CampaignSearchToolTests : IClassFixture<BelmakorServer>
     /// read as of a session exists to prevent. Sent as printed (with a ref in place of the dots), it reads as of the session.
     /// </summary>
     [Theory]
-    [InlineData("", "\"perspective\": \"party\"}")]
-    [InlineData(", \"as_of_session\": 3", "\"perspective\": \"party\", \"as_of_session\": 3}")]
+    [InlineData("", "\"perspective\": \"party\", \"campaign\": \"belmakor\"}")]
+    [InlineData(", \"as_of_session\": 3", "\"perspective\": \"party\", \"as_of_session\": 3, \"campaign\": \"belmakor\"}")]
     public async Task List_NonAuthorView_TheFooterReadsTheSameViewAtTheSamePointInTime(string asOf, string ending)
     {
         var text = await _f.Call("campaign_search", $$"""{"kinds":["character"],"perspective":"party"{{asOf}}}""");
 
-        var footer = $"campaign_get {{\"campaign\": \"belmakor\", \"refs\": [...], {ending} reads any of these in full.\n";
+        var footer = $"campaign_get {{\"refs\": [...], {ending} reads any of these in full.\n";
         Assert.EndsWith("\n" + footer, text, StringComparison.Ordinal);
         var read = await _f.Call("campaign_get", footer[13..footer.IndexOf(" reads", StringComparison.Ordinal)]
             .Replace("[...]", "[\"character:belmakor\"]", StringComparison.Ordinal));

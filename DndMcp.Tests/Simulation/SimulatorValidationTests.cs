@@ -33,7 +33,7 @@ public sealed class SimulatorValidationTests
     }
 
     [Theory]
-    [InlineData(true, true, "give only one of monster, build and archetype")]
+    [InlineData(true, true, "give only one of monster, build, archetype and character")]
     [InlineData(false, false, "give exactly one of monster")]
     public void SourcesOtherThanExactlyOne_AreRefused(bool build, bool archetype, string expected)
     {
@@ -304,7 +304,7 @@ public sealed class SimulatorValidationTests
     [Fact]
     public void MonsterEntry_LegendaryUses_AreTheNonLairCount()
     {
-        // The fight is never in a lair: a 3 (4 in lair) legendary monster gets 3 a round.
+        // Outside a lair (SimulationSpec.Lair false, the default): a 3 (4 in lair) legendary monster gets 3 a round.
         var lairBoss = TestStatBlocks.Sandbag(legendary: new LegendaryActions(3, 4, [TestStatBlocks.Attack("Tail", 5, "1d8", "bludgeoning", slot: StatBlockValues.ActionSlots.Legendary)]));
         Assert.Equal(3, SimulationPreparation.Prepare(SimKit.Spec([Fighter], [SimKit.Monster(lairBoss)])).Setup.Templates[1].LegendaryUses);
     }
@@ -339,4 +339,172 @@ public sealed class SimulatorValidationTests
         Assert.Contains("Goblin, Goblin 2", report.ReplayLog);
         Assert.Contains("Goblin 3", report.ReplayLog);
     }
+
+    // ------------------------------------------------------------------------------------------------------------------
+    // Campaign characters (contract §11.1): the host expands them; the Domain never simulates one as nothing.
+    // ------------------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void CharacterUnexpanded_IsAHostBug()
+    {
+        var unexpanded = new SimulationCombatant(new CombatantSpec { Character = "character:torch" });
+        var ex = Assert.Throws<ArgumentException>(() => Simulator.Run(SimKit.Spec([unexpanded], [Ogre]), 1));
+        Assert.Contains("party item 1 (character:torch): a character entry reached the simulator unexpanded", ex.Message);
+    }
+
+    [Fact]
+    public void CharacterBesideAnotherSource_IsRefusedNamingTheCharacter()
+    {
+        var both = new SimulationCombatant(new CombatantSpec { Character = "character:torch", Archetype = "fighter", Level = 5 });
+        Assert.Contains("party item 1 (character:torch): give only one of monster, build, archetype and character.", Refusal(SimKit.Spec([both], [Ogre])));
+    }
+
+    [Fact]
+    public void NoSource_TheMessageOffersCharacter() =>
+        Assert.Contains("give exactly one of monster (an SRD monster, e.g. \"Ogre\"), build (a DSL build with hp and ac), archetype or character (a campaign character with a sheet).",
+            Refusal(SimKit.Spec([Fighter], [new SimulationCombatant(new CombatantSpec { Hp = 9 })])));
+
+    // ------------------------------------------------------------------------------------------------------------------
+    // Live-state seeds and the resume (contract §11.3): DslProblems sentences naming the entry.
+    // ------------------------------------------------------------------------------------------------------------------
+
+    private static SimulationCombatant Seeded(SimulationCombatant combatant, CombatantStart start) => combatant with { Start = start };
+
+    private static SimulationSpec WithResume(IReadOnlyList<SimulationCombatant> party, IReadOnlyList<SimulationCombatant> enemies, FightResume resume, string? surprise = null) => new()
+    {
+        Party = party,
+        Enemies = enemies,
+        Surprise = surprise,
+        Resume = resume,
+    };
+
+    [Fact]
+    public void Start_OnACopiedEntry_IsRefused() =>
+        Assert.Contains("enemies item 1 (Goblin): count is 3; a start state is one creature's, so give count 1 (one entry per creature).",
+            Refusal(SimKit.Spec([Fighter], [Seeded(SimKit.Monster(TestStatBlocks.Goblin, count: 3), new CombatantStart { Hp = 2 })])));
+
+    [Theory]
+    [InlineData(45, "party item 1 (Fighter): start hp is 45; it is 0 to its hit point maximum, 44.")]
+    [InlineData(-1, "party item 1 (Fighter): start hp is -1; it is 0 to its hit point maximum, 44.")]
+    public void Start_HpOutOfRange_IsRefused(int hp, string expected) =>
+        Assert.Contains(expected, Refusal(SimKit.Spec([Seeded(Fighter, new CombatantStart { Hp = hp })], [Ogre])));
+
+    [Fact]
+    public void Start_MonsterHpAboveItsStatBlocks_IsRefused() =>
+        Assert.Contains("enemies item 1 (Ogre): start hp is 60; it is 0 to its hit point maximum, 59.",
+            Refusal(SimKit.Spec([Fighter], [Seeded(Ogre, new CombatantStart { Hp = 60 })])));
+
+    [Fact]
+    public void Start_RangesAreCheckedAndCollected()
+    {
+        var message = Refusal(SimKit.Spec([Seeded(Fighter, new CombatantStart { TempHp = -1, DeathFailures = 3, Exhaustion = 7, LegendaryActionsLeft = -1, LegendaryResistanceLeft = -2 })], [Ogre]));
+        Assert.StartsWith("Invalid simulation (5 problems):", message);
+        Assert.Contains("party item 1 (Fighter): start legendary_actions_left is -1; it is 0 or more.", message);
+        Assert.Contains("party item 1 (Fighter): start temp_hp is -1; it is 0 to 5000.", message);
+        Assert.Contains("party item 1 (Fighter): start death_failures is 3; it is 0 to 2.", message);
+        Assert.Contains("party item 1 (Fighter): start exhaustion is 7; it is 0 to 6.", message);
+        Assert.Contains("party item 1 (Fighter): start legendary_resistance_left is -2; it is 0 or more.", message);
+    }
+
+    [Fact]
+    public void Start_DeadWithoutPlaceholder_IsRefused() =>
+        Assert.Contains("party item 1 (Fighter): start dead is only for a placeholder",
+            Refusal(SimKit.Spec([Seeded(Fighter, new CombatantStart { Dead = true }), Fighter with { Spec = Fighter.Spec with { Name = "Other" } }], [Ogre])));
+
+    [Theory]
+    [InlineData("charmd", "fight", null, "start condition 1: \"charmd\" is not a condition; they are blinded, charmed, deafened, frightened, grappled, incapacitated, invisible, paralyzed, petrified, poisoned, prone, restrained, stunned, unconscious.")]
+    [InlineData("exhaustion", "fight", null, "start condition 1: exhaustion is a level, given as start exhaustion, not as a condition.")]
+    [InlineData("charmed", "a while", null, "start condition 1: duration \"a while\" is not a simulator duration; give until_start_of_source_turn, until_end_of_source_turn, save_ends, rounds, until_escape, until_stands, fight, until_end_of_target_turn, until_start_of_target_turn.")]
+    [InlineData("charmed", "rounds", null, "start condition 1: rounds needs rounds_left and source_entry")]
+    [InlineData("charmed", "until_end_of_source_turn", null, "start condition 1: until_end_of_source_turn ends on its source's turn; give source_entry.")]
+    [InlineData("charmed", "until_start_of_source_turn", null, "start condition 1: until_start_of_source_turn ends on its source's turn; give source_entry.")]
+    [InlineData("grappled", "until escape", 1, "start condition 1: until_escape needs escape_dc and source_entry")]
+    [InlineData("charmed", "save ends", null, "start condition 1: save_ends needs save_ability and save_dc")]
+    [InlineData("charmed", "fight", 5, "start condition 1: source_entry is 5; it is an entry's 0-based index over party then enemies, 0 to 1.")]
+    public void Start_Conditions_AreChecked(string condition, string duration, int? source, string expected) =>
+        Assert.Contains("party item 1 (Fighter): " + expected,
+            Refusal(SimKit.Spec([Seeded(Fighter, new CombatantStart { Conditions = [new StartCondition(condition, duration, SourceEntry: source)] })], [Ogre])));
+
+    [Fact]
+    public void Start_ConditionsMatchForgivingly()
+    {
+        var fight = Scripted.Begin(SimKit.Spec([Seeded(Fighter, new CombatantStart { Conditions = [new StartCondition(" Poisoned ", "Until End Of Target Turn")] })], [Ogre]));
+        Assert.True(fight.Named("Fighter").Has(Cond.Poisoned));
+    }
+
+    [Fact]
+    public void Start_ASourceWithCopies_IsRefused() =>
+        Assert.Contains("party item 1 (Fighter): start condition 1: source_entry 1 has 2 copies; a source is one creature (an entry of count 1).",
+            Refusal(SimKit.Spec([Seeded(Fighter, new CombatantStart { Conditions = [new StartCondition("frightened", "fight", SourceEntry: 1)] })],
+                [SimKit.Monster(TestStatBlocks.Goblin, count: 2)])));
+
+    [Fact]
+    public void Start_HeldByASourceThatConcentratesOnNothing_IsRefused() =>
+        Assert.Contains("party item 1 (Fighter): start condition 1: it is held by its source's concentration, but source_entry 1 starts concentrating on nothing.",
+            Refusal(SimKit.Spec([Seeded(Fighter, new CombatantStart { Conditions = [new StartCondition("charmed", "fight", SourceEntry: 1, HeldBySourceConcentration: true)] })], [Ogre])));
+
+    [Theory]
+    [InlineData(true, "party has only placeholders; at least one party combatant must be able to fight.")]
+    [InlineData(false, "enemies has only placeholders; at least one enemy must be able to fight.")]
+    public void Start_OnlyPlaceholdersOnASide_IsRefused(bool party, string expected)
+    {
+        // Without it a side of placeholders would be a crash (no creature to take the fight's edition from), not a refusal.
+        var gone = new SimulationCombatant(new CombatantSpec { Name = "Gone" }, Start: new CombatantStart { Placeholder = true });
+        Assert.Contains(expected, Refusal(party ? SimKit.Spec([gone], [Ogre]) : SimKit.Spec([Fighter], [gone])));
+    }
+
+    [Theory]
+    [InlineData(-1, "start condition 1: rounds_left is -1; it is 0 to 10000.")]
+    [InlineData(10_001, "start condition 1: rounds_left is 10001; it is 0 to 10000.")]
+    public void Start_RoundsLeftOutOfRange_IsRefused(int roundsLeft, string expected) =>
+        Assert.Contains("party item 1 (Fighter): " + expected,
+            Refusal(SimKit.Spec([Seeded(Fighter, new CombatantStart { Conditions = [new StartCondition("charmed", "rounds", SourceEntry: 1, RoundsLeft: roundsLeft)] })], [Ogre])));
+
+    [Fact]
+    public void Start_ImposedDuringResumedTurnWithoutAResume_IsRefused() =>
+        Assert.Contains("party item 1 (Fighter): start condition 1: imposed_during_resumed_turn marks a condition imposed during the turn a resumed fight starts at; give the resume, or leave it false.",
+            Refusal(SimKit.Spec([Seeded(Fighter, new CombatantStart { Conditions = [new StartCondition("charmed", "until_start_of_source_turn", SourceEntry: 1, ImposedDuringResumedTurn: true)] })], [Ogre])));
+
+    [Theory]
+    [InlineData(null, "spent")]
+    [InlineData("  ", "spent")]
+    [InlineData(null, "active_setups")]
+    [InlineData("", "active_setups")]
+    public void Start_ABlankNameInSpentOrActiveSetups_IsRefused(string? name, string field)
+    {
+        // Refused like a blank uses_left key: not a NullReferenceException in the compile, not "" in the report's names.
+        var start = field == "spent" ? new CombatantStart { Spent = ["Fire Breath", name!] } : new CombatantStart { ActiveSetups = [name!] };
+        Assert.Contains($"enemies item 1 (Ogre): start {field} has a blank name", Refusal(SimKit.Spec([Fighter], [Seeded(Ogre, start)])));
+    }
+
+    [Fact]
+    public void Start_APlaceholderWithNoSource_NeedsOnlyItsName()
+    {
+        var report = Simulator.Run(SimKit.Spec([Fighter], [Ogre, new SimulationCombatant(new CombatantSpec { Name = "Gone" }, Start: new CombatantStart { Placeholder = true })],
+            iterations: 10), 1);
+        Assert.Equal(["Fighter", "Ogre"], report.Combatants.Select(c => c.Name));
+    }
+
+    [Fact]
+    public void Compare_OnAPlaceholder_IsRefused()
+    {
+        var feature = SimKit.Feature("""{ "name": "Plus one", "modifiers": [{ "kind": "to_hit", "amount": 1 }] }""");
+        var placeholder = Seeded(Fighter with { Spec = Fighter.Spec with { Name = "Gone" } }, new CombatantStart { Placeholder = true });
+        Assert.Contains("compare: member 2 is a placeholder (dead, holding its place); compare a member who fights.",
+            Refusal(SimKit.Spec([Fighter, placeholder], [Ogre], compare: new CompareSpec { Member = 2, Feature = feature })));
+    }
+
+    [Theory]
+    [InlineData(new[] { 0, 0 }, 0, 1, "resume order must list each of the 2 entries exactly once, by 0-based index over party then enemies; it is [0, 0].")]
+    [InlineData(new[] { 0 }, 0, 1, "resume order must list each of the 2 entries exactly once")]
+    [InlineData(new[] { 1, 2 }, 0, 1, "resume order must list each of the 2 entries exactly once")]
+    [InlineData(new[] { 1, 0 }, 2, 1, "resume start_at is 2; it is a position in the order, 0 to 1.")]
+    [InlineData(new[] { 1, 0 }, 0, 0, "resume round is 0; it is 1 to 10000.")]
+    public void Resume_OrderStartAndRound_AreChecked(int[] order, int startAt, int round, string expected) =>
+        Assert.Contains(expected, Refusal(WithResume([Fighter], [Ogre], new FightResume(order, startAt, round))));
+
+    [Fact]
+    public void Resume_WithSurprise_IsRefused() =>
+        Assert.Contains("surprise is \"enemies\"; a resumed fight has none (surprise belongs to a fight's first round).",
+            Refusal(WithResume([Fighter], [Ogre], new FightResume([0, 1], 0, 1), surprise: "enemies")));
 }

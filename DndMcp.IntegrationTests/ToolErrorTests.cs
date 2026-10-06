@@ -384,7 +384,8 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>, IC
     }
 
     private const string BalanceSimulateParameters =
-        "balance_simulate accepts: party (array of object, required), enemies (array of object, required), iterations (integer, " +
+        "balance_simulate accepts: party (array of object, optional), enemies (array of object, optional), encounter (string, optional), " +
+        "from_state (boolean, optional), campaign (string, optional), iterations (integer, " +
         "optional), seed (integer, optional), round_cap (integer, optional), edition (string, optional), surprise (string, " +
         "optional), enemy_hp (string, optional), precision (number, optional), replay (integer, optional), policies (object, " +
         "optional), compare (object, optional), rulings (object, optional).";
@@ -392,14 +393,29 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>, IC
     private const string Ogre = """{"monster":"ogre"}""";
 
     [Theory]
-    [InlineData("""{"party":[OGRE]}""", "missing required argument 'enemies'")]
-    [InlineData("""{"enemies":[OGRE]}""", "missing required argument 'party'")]
+    // party and enemies are optional (an encounter can give the sides): a call with one side and no encounter is the tool's
+    // refusal, past the guard, naming what is missing and the fix.
+    [InlineData("""{"party":[OGRE]}""", "enemies is missing")]
+    [InlineData("""{"enemies":[OGRE]}""", "party is missing")]
+    [InlineData("""{}""", "neither was given")]
+    public async Task CallTool_BalanceSimulateWithoutBothSidesOrAnEncounter_IsTheToolsRefusalWithTheFix(string template, string missing)
+    {
+        var text = _server.ErrorText(await _server.CallToolJsonAsync("balance_simulate", template.Replace("OGRE", Ogre, StringComparison.Ordinal)));
+
+        Assert.StartsWith(
+            "An error occurred invoking 'balance_simulate': give party and enemies, or encounter (a stored fight: \"current\", \"last\" or its name); " +
+            missing + ". Example: {\"party\": [{\"archetype\": \"fighter\"",
+            text, StringComparison.Ordinal);
+        Assert.False(File.Exists(Path.Combine(_server.DataDirectory, "campaigns.db")), "The refusal reached campaigns.db.");
+    }
+
+    [Theory]
     // enemies is published untyped (party's shape) and checked by the guard exactly as party is.
     [InlineData("""{"party":[OGRE],"enemies":[{"monster":"ogre","cuont":3}]}""",
-        "argument 'enemies' item 1 has unknown field 'cuont' (fields: name, monster, build, archetype, level, edition, hp, ac, " +
+        "argument 'enemies' item 1 has unknown field 'cuont' (fields: name, monster, build, archetype, character, level, edition, hp, ac, " +
         "save_proficiencies, saves, initiative_bonus, position, count, death_saves)")]
     [InlineData("""{"party":[{"monster":"ogre","cuont":3}],"enemies":[OGRE]}""",
-        "argument 'party' item 1 has unknown field 'cuont' (fields: name, monster, build, archetype, level, edition, hp, ac, " +
+        "argument 'party' item 1 has unknown field 'cuont' (fields: name, monster, build, archetype, character, level, edition, hp, ac, " +
         "save_proficiencies, saves, initiative_bonus, position, count, death_saves)")]
     [InlineData("""{"party":[OGRE],"enemies":{"monster":"ogre"}}""", "argument 'enemies' should be array but was an object")]
     [InlineData("""{"party":[OGRE],"enemies":["ogre"]}""", "argument 'enemies' item 1 should be object but was the string \"ogre\"")]
@@ -527,6 +543,27 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>, IC
         "ref (string, optional), refs (array of string, optional), detail (string, optional), batch_id (string, optional), dry_run (boolean, optional), " +
         "reason (string, optional), limit (integer, optional), cursor (string, optional), campaign (string, optional).";
 
+    private const string CombatParameters =
+        "combat accepts: action (string, required), campaign (string, optional), encounter (string, optional), name (string, optional), " +
+        "add_party (boolean, optional), lair (boolean, optional), edition (string, optional), combatants (array of object, optional), " +
+        "targets (array of string, optional), amount (integer, optional), dice (string, optional), damage_type (string, optional), " +
+        "parts (array of object, optional), critical (boolean, optional), magical (boolean, optional), half (array of string, optional), " +
+        "raw (boolean, optional), knock_out (boolean, optional), source (string, optional), secret (boolean, optional), temp (boolean, optional), " +
+        "item (string, optional), add (array of string, optional), remove (array of string, optional), duration (string, optional), " +
+        "dc (integer, optional), ability (string, optional), level (integer, optional), round (integer, optional), effect (object, optional), " +
+        "resource (string, optional), spell (string, optional), slot_level (integer, optional), pact (boolean, optional), drop (boolean, optional), " +
+        "total (integer, optional), face (integer, optional), stable (boolean, optional), resistance (boolean, optional), " +
+        "rolls (array of object, optional), surprised (array of string, optional), from (string, optional), perspective (string, optional), " +
+        "outcome (string, optional), xp (integer, optional), loot (array of object, optional), currency (array of object, optional), " +
+        "discard (boolean, optional), force (boolean, optional), dry_run (boolean, optional), reason (string, optional).";
+
+    private const string CampaignCharacterParameters =
+        "campaign_character accepts: action (string, required), character (string, optional), campaign (string, optional), perspective (string, optional), " +
+        "sheet (object, optional), sim_profile (object, optional), amount (integer, optional), damage_type (string, optional), slot_level (integer, optional), " +
+        "pact (boolean, optional), resource (string, optional), kind (string, optional), hit_dice (integer, optional), rolls (array of integer, optional), " +
+        "add (array of string, optional), remove (array of string, optional), level (integer, optional), class (string, optional), items (array of object, optional), " +
+        "coins (object, optional), session (integer, optional), reason (string, optional), dry_run (boolean, optional).";
+
     [Theory]
     [InlineData("campaign", "{}", "missing required argument 'action'", CampaignParameters)]
     [InlineData("campaign", """{"action":"list","dry_run":"yes"}""", "argument 'dry_run' should be boolean or null but was the string \"yes\"", CampaignParameters)]
@@ -558,6 +595,49 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>, IC
     [InlineData("campaign_history", """{"action":"undo","batch_id":5}""", "argument 'batch_id' should be string or null but was the number 5", CampaignHistoryParameters)]
     [InlineData("campaign_history", """{"action":"since","targets":"f:1"}""", "argument 'targets' should be array or null but was the string \"f:1\"", CampaignHistoryParameters)]
     [InlineData("campaign_history", """{"action":"since","session":99999999999}""", "argument 'session' was the number 99999999999, which is too large to be valid", CampaignHistoryParameters)]
+    // campaign_character: the sheet and the inventory and coin entries are typed (a misspelt field is named, never dropped);
+    // sim_profile is published untyped and checked as a build, exactly as balance_dpr's build.
+    [InlineData("campaign_character", "{}", "missing required argument 'action'", CampaignCharacterParameters)]
+    [InlineData("campaign_character", """{"action":"update","sheet":{"levle":5}}""",
+        "argument 'sheet' has unknown field 'levle' (fields: player, ruleset, species, lineage, background, classes, level, xp, abilities, ac, max_hp, " +
+        "max_hp_reduction, hp, temp_hp, speed, initiative_bonus, passive_perception, spell_save_dc, spell_attack, save_proficiencies, save_bonus, defenses, " +
+        "slots, pact, resources, feats, features, spells, languages, inspiration, notes, sheet_source)", CampaignCharacterParameters)]
+    [InlineData("campaign_character", """{"action":"update","sheet":{"classes":[{"class":"wizard","lvl":3}]}}""",
+        "argument 'sheet' field 'classes' item 1 has unknown field 'lvl' (fields: class, subclass, level, hit_die)", CampaignCharacterParameters)]
+    [InlineData("campaign_character", """{"action":"update","sim_profile":{"name":"B","attacks":[{"name":"A","cuont":2}]}}""",
+        "argument 'sim_profile' field 'attacks' item 1 has unknown field 'cuont' (fields: name, count, action, to_hit, damage, damage_type, ability_to_damage, " +
+        "properties, offhand, mastery, cantrip, from_level, until_level)", CampaignCharacterParameters)]
+    [InlineData("campaign_character", """{"action":"update","sim_profile":{"nmae":"B","level":5}}""",
+        "argument 'sim_profile' has unknown field 'nmae' (fields: name, preset, edition, level, abilities, proficiency_bonus, fighting_style, attacks, " +
+        "modifiers)", CampaignCharacterParameters)]
+    [InlineData("campaign_character", """{"action":"update","sim_profile":"GWM"}""", "argument 'sim_profile' should be object but was the string \"GWM\"",
+        CampaignCharacterParameters)]
+    [InlineData("campaign_character", """{"action":"inventory","items":[{"item":"Rope","qtty":2}]}""",
+        "argument 'items' item 1 has unknown field 'qtty' (fields: item, qty, srd, equipped, attuned, notes)", CampaignCharacterParameters)]
+    [InlineData("campaign_character", """{"action":"currency","coins":{"gold":5}}""", "argument 'coins' has unknown field 'gold' (fields: cp, sp, ep, gp, pp)",
+        CampaignCharacterParameters)]
+    [InlineData("campaign_character", """{"action":"rest","rolls":[3,"four"]}""", "argument 'rolls' item 2 should be integer but was the string \"four\"",
+        CampaignCharacterParameters)]
+    [InlineData("campaign_character", """{"action":"damage","amount":"lots"}""", "argument 'amount' should be integer or null but was the string \"lots\"",
+        CampaignCharacterParameters)]
+    // combat: every entry list and the effect are typed (a misspelt field is named, never dropped); only an entry's hp is untyped.
+    [InlineData("combat", "{}", "missing required argument 'action'", CombatParameters)]
+    [InlineData("combat", """{"action":"add","combatants":[{"srd":"Bandit","cuont":2}]}""",
+        "argument 'combatants' item 1 has unknown field 'cuont' (fields: srd, character, name, count, hp, ac, init_bonus, side, hidden, death_saves, " +
+        "max_hp_reduction)", CombatParameters)]
+    [InlineData("combat", """{"action":"damage","targets":"torch","amount":3}""", "argument 'targets' should be array or null but was the string \"torch\"",
+        CombatParameters)]
+    [InlineData("combat", """{"action":"damage","targets":["torch"],"parts":[{"amount":3,"typ":"fire"}]}""",
+        "argument 'parts' item 1 has unknown field 'typ' (fields: amount, dice, type)", CombatParameters)]
+    [InlineData("combat", """{"action":"initiative","rolls":[{"combatant":"vars","fcae":12}]}""",
+        "argument 'rolls' item 1 has unknown field 'fcae' (fields: combatant, face, total)", CombatParameters)]
+    [InlineData("combat", """{"action":"condition","targets":["x"],"add":["Bladesong"],"effect":{"acc":5}}""",
+        "argument 'effect' has unknown field 'acc' (fields: ac, resist, immune, vulnerable, except)", CombatParameters)]
+    [InlineData("combat", """{"action":"end","loot":[{"itme":"Rope"}]}""", "argument 'loot' item 1 has unknown field 'itme' (fields: item, srd, qty, to)",
+        CombatParameters)]
+    [InlineData("combat", """{"action":"end","currency":[{"gold":5}]}""",
+        "argument 'currency' item 1 has unknown field 'gold' (fields: to, cp, sp, ep, gp, pp)", CombatParameters)]
+    [InlineData("combat", """{"action":"next","from":["belmakor"]}""", "argument 'from' should be string or null but was an array", CombatParameters)]
     public async Task CallTool_CampaignToolArgumentOfTheWrongShape_NamesItAndListsAcceptedParameters(
         string tool, string argumentsJson, string problem, string accepted)
     {
@@ -592,6 +672,17 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>, IC
     [InlineData("campaign_knowledge", """{"action":"check","text":"Old king, come down"}""")]
     [InlineData("campaign_session", """{"action":"list"}""")]
     [InlineData("campaign_history", """{"action":"since"}""")]
+    [InlineData("campaign_character", """{"action":"get"}""")]
+    [InlineData("campaign_character", """{"action":"damage","character":"character:aria-vale","amount":3}""")]
+    // party "campaign" resolves the campaign as every campaign call does (not a campaign tool to the filter, the same answer).
+    [InlineData("encounter_difficulty", """{"party":"campaign","monsters":[{"cr":"1"}]}""")]
+    [InlineData("combat", """{"action":"state"}""")]
+    [InlineData("combat", """{"action":"state","perspective":"party"}""")]
+    [InlineData("combat", """{"action":"damage","targets":["torch"],"amount":3}""")]
+    [InlineData("combat", """{"action":"start"}""")]
+    // An encounter or a character entry is a campaign's (the same answer as every campaign call).
+    [InlineData("balance_simulate", """{"encounter":"current"}""")]
+    [InlineData("balance_simulate", """{"party":[{"character":"character:torch"}],"enemies":[{"monster":"ogre"}]}""")]
     public async Task CallTool_CampaignToolWithNoCampaigns_SaysHowToCreateOneAndCreatesNoDatabase(string tool, string argumentsJson)
     {
         // The first campaign call a new user makes. The answer must say what to do next, and asking must not leave a
@@ -619,6 +710,37 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>, IC
     [InlineData("campaign_session", """{"action":"start","recap_md":"x"}""", "start does not take \"recap_md\"", "start takes session, played_on, precision")]
     [InlineData("campaign_history", """{"action":"entity"}""", "action \"entity\" needs ref", "Example: {\"action\": \"entity\", \"ref\": ")]
     [InlineData("campaign_history", """{"action":"since","since":"yesterday"}""", "since \"yesterday\" is not a date", "such as \"2026-09-19\"")]
+    [InlineData("campaign_character", """{"action":"heal","amount":3}""", "Aria Vale (character:aria-vale) has no sheet yet",
+        "campaign_character {\"action\": \"update\", \"character\": \"character:aria-vale\", \"sheet\": {\"level\": …}, \"campaign\": \"surface\"}")]
+    // An amount with no positive int (Math.Abs(int.MinValue) overflows): the refusal, never the SDK's bare error.
+    [InlineData("campaign_character", """{"action":"use","slot_level":1,"amount":-2147483648}""", "amount is -2147483648",
+        "give 1 to 999 uses spent, or a negative number to restore")]
+    [InlineData("campaign_character", """{"action":"get","character":"character:nobody"}""", "\"character:nobody\": no character by that handle in surface",
+        "The party: character:aria-vale.")]
+    [InlineData("campaign_character", """{"action":"rest","perspective":"party"}""", "rest does not take \"perspective\"",
+        "rest takes kind, hit_dice, rolls, character, campaign, session, reason, dry_run. Example: {\"action\": \"rest\"")]
+    [InlineData("campaign_character", """{"action":"rest","kind":"nap"}""", "kind is \"nap\"", "give \"short\" or \"long\"")]
+    // D8: the party's levels come from the sheets; Aria Vale has none, so the refusal carries the call that gives one.
+    [InlineData("encounter_difficulty", """{"party":"campaign","monsters":[{"cr":"1"}]}""", "1 member has no level on one: Aria Vale (no sheet)",
+        "campaign_character {\"action\": \"update\", \"character\": \"character:aria-vale\", \"sheet\": {\"level\": <n>}, \"campaign\": \"surface\"}")]
+    [InlineData("combat", """{"action":"fight"}""", "action \"fight\" is not a combat action; give prepare, start, add, set, leave, initiative",
+        "Example: {\"action\": \"damage\"")]
+    [InlineData("combat", """{"action":"damage","targets":["torch"],"spell":"Bless"}""", "combat damage does not take \"spell\"",
+        "damage takes targets, amount, dice, parts, damage_type, critical, magical, half, raw, knock_out, source, secret, campaign, encounter. Example:")]
+    [InlineData("combat", """{"action":"state","perspective":"character:nobody"}""", "perspective \"character:nobody\": no character nobody in this campaign",
+        "campaign_search with kinds [\"character\"] lists them")]
+    [InlineData("combat", """{"action":"legendary","name":"Lash"}""", "legendary needs source", "{\"action\": \"legendary\", \"source\": \"<name>\"")]
+    [InlineData("combat", """{"action":"prepare","name":"Probe","combatants":[{"srd":"Beholder"}]}""",
+        "combatants item 1: no monster in the 2014 or 2024 SRD is named \"Beholder\"", "add it by name with hp, ac and init_bonus instead of srd")]
+    [InlineData("combat", """{"action":"add","combatants":[{"name":"Imp","max_hp_reduction":5}]}""", "max_hp_reduction is set only",
+        "add it, then set its max_hp_reduction")]
+    [InlineData("combat", """{"action":"next"}""", "No combat is running in surface", "combat {\"action\": \"start\"")]
+    [InlineData("balance_simulate", """{"party":[{"character":"character:aria-vale"}],"enemies":[{"monster":"ogre"}]}""",
+        "party item 1 (character:aria-vale): Aria Vale has no sheet to simulate yet",
+        "campaign_character {\"action\": \"update\", \"character\": \"character:aria-vale\", \"sheet\": {\"level\": …}, \"campaign\": \"surface\"}")]
+    [InlineData("balance_simulate", """{"encounter":"current"}""", "No combat is running in surface", "start one with combat {\"action\": \"start\"")]
+    [InlineData("balance_simulate", """{"from_state":true,"party":[{"monster":"ogre"}]}""", "from_state resumes the fight exactly as it stands",
+        "leave them out")]
     public async Task CallTool_CampaignToolBadInput_SaysWhatWasWrongAndHowToFixIt(string tool, string argumentsJson, string wrong, string fix)
     {
         // The wording belongs to the tools and the repository services, whose own tests pin it whole; what this pins is
@@ -648,6 +770,14 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>, IC
     [InlineData("campaign_session", """{"action":"list","HUGE":1}""", 40)]
     [InlineData("campaign_history", """{"action":"HUGE"}""", 80)]
     [InlineData("campaign_history", """{"action":"since","since":"HUGE"}""", 80)]
+    [InlineData("campaign_character", """{"action":"HUGE"}""", 80)]
+    [InlineData("campaign_character", """{"action":"get","character":"HUGE"}""", 60)]
+    [InlineData("campaign_character", """{"action":"get","perspective":"HUGE"}""", 60)]
+    [InlineData("campaign_character", """{"action":"rest","kind":"HUGE"}""", 60)]
+    [InlineData("campaign_character", """{"action":"get","HUGE":1}""", 40)]
+    [InlineData("combat", """{"action":"HUGE"}""", 80)]
+    [InlineData("combat", """{"action":"state","perspective":"HUGE"}""", 80)]
+    [InlineData("combat", """{"action":"state","encounter":"HUGE"}""", 80)]
     public async Task CallTool_HugeArgumentInACampaignError_IsEchoedShortened(string tool, string argumentsTemplate, int longestEcho)
     {
         var argumentsJson = argumentsTemplate.Replace("HUGE", new string('x', 100_000), StringComparison.Ordinal);
@@ -669,6 +799,12 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>, IC
     [InlineData("campaign_knowledge", """{"action":"check","text":"Old king, come down"}""")]
     [InlineData("campaign_session", """{"action":"list"}""")]
     [InlineData("campaign_history", """{"action":"since"}""")]
+    [InlineData("campaign_character", """{"action":"get"}""")]
+    [InlineData("campaign_character", """{"action":"update","character":"character:aria-vale","sheet":{"level":3}}""")]
+    [InlineData("encounter_difficulty", """{"party":"campaign","monsters":[{"cr":"1"}]}""")]
+    [InlineData("combat", """{"action":"state"}""")]
+    [InlineData("combat", """{"action":"start","name":"Probe"}""")]
+    [InlineData("balance_simulate", """{"encounter":"current"}""")]
     public async Task CallTool_CampaignsDatabaseFromANewerVersion_ReturnsTheStoresMessageAndChangesNothing(string tool, string argumentsJson)
     {
         // The user's fix (update dnd-mcp, or point DND_MCP_DB elsewhere) is only in this message: without the call-tool
@@ -712,6 +848,8 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>, IC
     [InlineData("campaign://list")]
     [InlineData("campaign://sky/summary")]
     [InlineData("campaign://sky/knowledge/party")]
+    [InlineData("campaign://sky/party")]
+    [InlineData("campaign://sky/combat/current")]
     public async Task ReadResource_CampaignsDatabaseFromANewerVersion_FailsWithTheStoresMessage(string uri)
     {
         // An @dnd: mention of a campaign resource, read outside the call-tool filter: the read-resource filter's translation
@@ -733,6 +871,18 @@ public sealed partial class ToolErrorTests : IClassFixture<McpServerHarness>, IC
     [InlineData("campaign", """{"action":"summary"}""")]
     [InlineData("campaign_history", """{"action":"since"}""")]
     [InlineData("campaign_write", """{"ops":[{"op":"upsert","kind":"character","name":"Old Hero","summary":"changed"}]}""")]
+    [InlineData("campaign_character", """{"action":"get","character":"character:old-hero"}""")]
+    [InlineData("campaign_character", """{"action":"get","character":"character:old-hero","perspective":"party"}""")]
+    [InlineData("campaign_character", """{"action":"get"}""")]
+    [InlineData("campaign_character", """{"action":"update","character":"character:old-hero","sheet":{"level":3}}""")]
+    // Not a campaign tool to the filter (its SQLite failures are srd.db's): the party read maps the store's failure itself.
+    [InlineData("encounter_difficulty", """{"party":"campaign","monsters":[{"cr":"1"}]}""")]
+    // combat is a campaign tool to the filter (IsCampaignTool): a character's view is resolved (its entity read) before the
+    // board, outside the Repository's own mapping, so only the filter can give the store's message here.
+    [InlineData("combat", """{"action":"state","perspective":"character:old-hero"}""")]
+    [InlineData("combat", """{"action":"start","name":"Probe"}""")]
+    // balance_simulate is not (its SQLite failures are srd.db's): a character entry's sheet read maps the store's failure itself.
+    [InlineData("balance_simulate", """{"party":[{"character":"character:old-hero"}],"enemies":[{"monster":"ogre"}]}""")]
     public async Task CallTool_ReadOfADamagedCampaignsDatabasePage_ReturnsTheStoresMessage(string tool, string argumentsJson)
     {
         var result = await _damaged.Harness.CallToolJsonAsync(tool, argumentsJson);

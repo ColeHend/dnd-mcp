@@ -76,9 +76,9 @@ public sealed class RulesGetCombatantTests : IClassFixture<McpServerHarness>
     {
         var text = await Combatant("""{"name": "Adult Red Dragon", "format": "combatant"}""");
 
-        Assert.Contains("**Legendary Resistance** 3/day (4 in its lair; the simulator is never in a lair)", text, StringComparison.Ordinal);
+        Assert.Contains("**Legendary Resistance** 3/day (4 in its lair; balance_simulate uses it for an encounter fought in a lair)", text, StringComparison.Ordinal);
         Assert.Contains("- **Multiattack** (3 uses): Rend ×2; then 1 of: Rend, Scorching Ray", text, StringComparison.Ordinal);
-        Assert.Contains("3 uses per round (4 in its lair; the simulator is never in a lair)", text, StringComparison.Ordinal);
+        Assert.Contains("3 uses per round (4 in its lair; balance_simulate uses it for an encounter fought in a lair)", text, StringComparison.Ordinal);
         Assert.Contains("(costs 1, once per round)", text, StringComparison.Ordinal);
         Assert.Contains("### Warnings (what the simulation leaves out or simplifies)", text, StringComparison.Ordinal);
     }

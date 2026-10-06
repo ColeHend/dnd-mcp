@@ -113,6 +113,71 @@ public static class ArchetypeCatalog
         return Member(Definitions.Value[(name, canonicalEdition!)], level!.Value);
     }
 
+    /// <summary>
+    /// The modifiers of an archetype whose uses are its spell slots (<see cref="SlotFundedUse"/>), for a fight resumed from
+    /// a live tracker: empty for an unknown name or a class that casts nothing from its slots here.
+    /// </summary>
+    /// <param name="edition">"2014" or "2024"; null or unknown: <see cref="DslValues.Editions.Default"/>.</param>
+    public static IReadOnlyList<SlotFundedUse> SlotFunded(string? archetype, string? edition)
+    {
+        if (!TryMatch(archetype, out var name))
+        {
+            return [];
+        }
+
+        var canonical = edition is not null && V.Editions.Set.TryMatch(edition, out var matched) ? matched! : V.Editions.Default;
+        return Definitions.Value[(name, canonical)].SlotFunded;
+    }
+
+    /// <summary>
+    /// The spells an archetype casts once a fight from a slot and keeps up (<see cref="SlotCastSpell"/>), its main spell
+    /// first, for a fight resumed from a live tracker: empty for an unknown name or a class that casts none such here.
+    /// </summary>
+    /// <param name="edition">"2014" or "2024"; null or unknown: <see cref="DslValues.Editions.Default"/>.</param>
+    public static IReadOnlyList<SlotCastSpell> SlotCast(string? archetype, string? edition)
+    {
+        if (!TryMatch(archetype, out var name))
+        {
+            return [];
+        }
+
+        return Definitions.Value[(name, Canonical(edition))].SlotCast;
+    }
+
+    /// <summary>
+    /// Every spell an archetype of <paramref name="edition"/> casts once a fight from a slot, by name, one entry per name:
+    /// how a sheet's sim_profile modifier or attack of the same name (case and spacing ignored) is read when a fight is
+    /// resumed. By edition, because the editions differ: 2024's Hunter's Mark is Favored Enemy's free cast, 2014's a slot.
+    /// </summary>
+    public static IReadOnlyList<SlotCastSpell> SlotCastSpells(string? edition) => SpellsCastFromSlots.Value[Canonical(edition)];
+
+    private static readonly Lazy<IReadOnlyDictionary<string, IReadOnlyList<SlotCastSpell>>> SpellsCastFromSlots = new(() =>
+        V.Editions.Set.Values.ToDictionary(
+            e => e,
+            e => (IReadOnlyList<SlotCastSpell>)Definitions.Value.Where(d => d.Key.Edition == e).SelectMany(d => d.Value.SlotCast)
+                .GroupBy(u => DslValueSet.Key(u.Name), StringComparer.Ordinal)
+                .Select(g => g.First())
+                .OrderBy(u => u.Name, StringComparer.Ordinal)
+                .ToList(),
+            StringComparer.Ordinal));
+
+    private static string Canonical(string? edition) =>
+        edition is not null && V.Editions.Set.TryMatch(edition, out var matched) ? matched! : V.Editions.Default;
+
+    /// <summary>
+    /// Every spell an archetype casts from its slots, by modifier name, with the slots that fund it (no extra uses): how
+    /// a sheet's sim_profile modifier of the same name (case and spacing ignored) is read when a fight is resumed, since
+    /// the build DSL cannot say that a modifier's uses are slots. One entry per name; the editions agree on them.
+    /// </summary>
+    public static IReadOnlyList<SlotFundedUse> SlotFundedSpells => SpellsFundedBySlots.Value;
+
+    private static readonly Lazy<IReadOnlyList<SlotFundedUse>> SpellsFundedBySlots = new(() =>
+        Definitions.Value.Values.SelectMany(d => d.SlotFunded)
+            .GroupBy(u => DslValueSet.Key(u.Modifier), StringComparer.Ordinal)
+            .Select(g => g.First() with { ExtraUses = 0 })
+            .OrderBy(u => u.Modifier, StringComparer.Ordinal)
+            .ToList());
+
     /// <summary>The member a definition makes at a level: the build at that level plus the derived HP, AC and saves.</summary>
     internal static ArchetypeMember Member(ArchetypeDefinition definition, int level)
     {

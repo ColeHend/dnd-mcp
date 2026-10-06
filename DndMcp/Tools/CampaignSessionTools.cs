@@ -55,8 +55,9 @@ namespace DndMcp.Tools;
 public sealed class CampaignSessionTools
 {
     internal const string Example =
-        "{\"action\": \"end\", \"campaign\": \"belmakor\", \"recap_md\": \"The band played the Sky Fair; Serif bargained with the " +
-        "harbourmaster.\", \"attendance\": [{\"character\": \"character:belmakor\"}, {\"character\": \"character:serif\", \"present\": false}]}";
+        "{\"action\": \"end\", \"recap_md\": \"The band played the Sky Fair; Serif bargained with the " +
+        "harbourmaster.\", \"attendance\": [{\"character\": \"character:belmakor\"}, {\"character\": \"character:serif\", \"present\": false}], " +
+        "\"campaign\": \"belmakor\"}";
 
     private const string List = "list";
     private const string Get = "get";

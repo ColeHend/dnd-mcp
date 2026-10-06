@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using DndMcp.Domain.Campaign;
 using DndMcp.Repository.Campaign;
 using DndMcp.Repository.Campaign.Read;
@@ -346,7 +347,7 @@ internal static class SessionMarkdown
         WriteMarkdown.AppendWarnings(b, result.Warnings, opLabel: null);
         if (result.Checklist is { } checklist)
         {
-            AppendChecklist(b, checklist);
+            AppendChecklist(b, checklist, campaign.Slug);
         }
 
         return CampaignMarkdownText.Cap(b.ToString().TrimEnd() + "\n", "the session write itself is complete");
@@ -366,8 +367,8 @@ internal static class SessionMarkdown
         return b.ToString();
     }
 
-    /// <summary>The end / record_past checklist; an empty one says so.</summary>
-    public static void AppendChecklist(StringBuilder b, SessionChecklist checklist)
+    /// <summary>The end / record_past checklist; an empty one says so. <paramref name="campaign"/> (a slug) goes in the calls it prints.</summary>
+    public static void AppendChecklist(StringBuilder b, SessionChecklist checklist, string campaign)
     {
         b.Append("\n## Checklist\n");
         if (checklist.IsEmpty)
@@ -384,6 +385,7 @@ internal static class SessionMarkdown
         Item(b, checklist.FactsWithoutKnowers, "Facts established this session that no player-side knower holds: record who learned them (campaign_knowledge record)");
         Item(b, checklist.ClosedGateReveals, "Gated facts that reached a knower this session while the gate was not ready: confirm it was meant (or undo that batch)");
         Item(b, checklist.ProposedInventions, "Inventions proposed this session: accept or strike each (campaign_write fact/upsert with canon_status accepted or struck)");
+        RunningFights(b, checklist.ActiveEncounters ?? [], campaign);
         if (checklist.AttendanceNotRecorded)
         {
             b.Append("- [ ] Attendance was not recorded: what the party learned this session reads as \"attendance not recorded\" for every ")
@@ -419,6 +421,36 @@ internal static class SessionMarkdown
         b.Append(line).Append(list.Count > shown ? $", … and {(list.Count - shown).ToString(Invariant)} more" : string.Empty)
             .Append(then).Append(".\n");
     }
+
+    // The fights still running (contract §14), each with the end call that names it: a paused fight is not "current", so a
+    // bare end would miss it. Not Item(): its per-value cut would break a call, and a name is at most 200 characters, so
+    // each call is printed whole (the entry still stops at MaxEntryChars, with the rest counted).
+    private static void RunningFights(StringBuilder b, IReadOnlyList<string> names, string campaign)
+    {
+        if (names.Count == 0)
+        {
+            return;
+        }
+
+        var line = new StringBuilder("- [ ] Encounters still running: end each: ");
+        var shown = 0;
+        foreach (var name in names.Take(MaxItems))
+        {
+            if (shown > 0 && line.Length > MaxEntryChars)
+            {
+                break;
+            }
+
+            line.Append(shown == 0 ? string.Empty : "; ").Append("combat {\"action\": \"end\", \"encounter\": ").Append(JsonText(OneLine(name)))
+                .Append(", \"campaign\": ").Append(JsonText(campaign)).Append('}');
+            shown++;
+        }
+
+        b.Append(line).Append(names.Count > shown ? $"; … and {(names.Count - shown).ToString(Invariant)} more" : string.Empty).Append(".\n");
+    }
+
+    // A JSON string literal as a call prints it (quotes and backslashes escaped; accented letters kept).
+    private static string JsonText(string text) => JsonValue.Create(text).ToJsonString(CampaignLogJson.Options);
 
     private static void AppendDice(StringBuilder b, SessionDetail detail)
     {

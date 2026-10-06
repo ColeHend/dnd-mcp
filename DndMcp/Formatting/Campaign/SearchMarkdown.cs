@@ -136,7 +136,7 @@ internal static class SearchMarkdown
                     : $"{Number(result.Total)} result{(result.Total == 1 ? string.Empty : "s")}.").Append('\n');
         b.Append(view.AuthorView
             ? "campaign_get with refs reads any of these in full.\n"
-            : $"campaign_get {{\"campaign\": \"{campaignSlug}\", \"refs\": [...], {view.ViewArguments}}} reads any of these in full.\n");
+            : $"campaign_get {{\"refs\": [...], {view.ViewArguments}, \"campaign\": \"{campaignSlug}\"}} reads any of these in full.\n");
         return CampaignMarkdownText.Cap(b.ToString(), CapHint);
     }
 

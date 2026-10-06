@@ -16,8 +16,8 @@ namespace DndMcp.IntegrationTests.Campaign;
 
 /// <summary>
 /// Invariant: the <c>campaign://</c> resources are concrete URIs, never templates: <c>campaign://list</c> always, one
-/// <c>/summary</c> and one <c>/threads</c> per campaign in resources/list (with a name, title, description and the
-/// markdown type), and the deep <c>/entity/&lt;ref&gt;</c>, <c>/session/&lt;n&gt;</c> and <c>/knowledge/&lt;perspective&gt;</c>
+/// <c>/summary</c>, one <c>/threads</c> and one <c>/party</c> per campaign in resources/list (with a name, title, description
+/// and the markdown type), and the deep <c>/entity/&lt;ref&gt;</c>, <c>/session/&lt;n&gt;</c> and <c>/knowledge/&lt;perspective&gt;</c>
 /// readable but never listed. The list handler never creates, migrates or fails: with no campaigns.db, an unmigrated one
 /// or a damaged one it lists the static resources; and a URI nothing serves (an unknown <c>rules://</c> table included)
 /// fails exactly as it did before the campaign read handler existed.
@@ -38,6 +38,7 @@ public sealed class CampaignResourceTests : IAsyncLifetime
         "rules://attribution",
         "rules://tables/adventuring-day-xp-2014",
         "rules://tables/aoe-targets",
+        "rules://tables/character-advancement",
         "rules://tables/cr-xp",
         "rules://tables/dpr-targets-by-level",
         "rules://tables/encounter-multipliers-2014",
@@ -115,7 +116,8 @@ public sealed class CampaignResourceTests : IAsyncLifetime
         var resources = await _s.Server.Client.ListResourcesAsync();
 
         Assert.Equal(
-            StaticUris.Concat(["campaign://deep/summary", "campaign://deep/threads", "campaign://sky/summary", "campaign://sky/threads"]).Order(StringComparer.Ordinal),
+            StaticUris.Concat(["campaign://deep/summary", "campaign://deep/threads", "campaign://deep/party", "campaign://sky/summary", "campaign://sky/threads",
+                "campaign://sky/party"]).Order(StringComparer.Ordinal),
             resources.Select(r => r.Uri).Order(StringComparer.Ordinal));
         var summary = Assert.Single(resources, r => r.Uri == "campaign://sky/summary").ProtocolResource;
         Assert.Equal(("sky-summary", "Sky World: summary", "text/markdown"), (summary.Name, summary.Title, summary.MimeType));
@@ -123,6 +125,11 @@ public sealed class CampaignResourceTests : IAsyncLifetime
         var threads = Assert.Single(resources, r => r.Uri == "campaign://deep/threads").ProtocolResource;
         Assert.Equal(("deep-threads", "Deep: quests and threads", "text/markdown"), (threads.Name, threads.Title, threads.MimeType));
         Assert.False(string.IsNullOrWhiteSpace(threads.Description));
+        var party = Assert.Single(resources, r => r.Uri == "campaign://sky/party").ProtocolResource;
+        Assert.Equal(("sky-party", "Sky World: party sheets", "text/markdown"), (party.Name, party.Title, party.MimeType));
+        Assert.Equal(
+            "The Sky World campaign's current party members with their sheets: level, classes, HP, AC, conditions. Also: campaign_character, action \"get\".",
+            party.Description);
         Assert.Empty(await _s.Server.Client.ListResourceTemplatesAsync());
     }
 
@@ -482,10 +489,14 @@ public sealed class CampaignResourceTests : IAsyncLifetime
     }
 
     [Theory]
-    [InlineData("campaign://sky/bogus", "campaign sky has summary, threads, entity/<ref>, session/<n> and knowledge/<perspective>")]
-    [InlineData("campaign://sky/entity/", "campaign sky has summary, threads, entity/<ref>, session/<n> and knowledge/<perspective>")]
-    [InlineData("campaign://sky", "campaign resources are campaign://<slug>/summary, /threads, /entity/<ref>, /session/<n> or /knowledge/<perspective>; campaign://list lists the campaigns")]
-    [InlineData("campaign://sky/", "campaign resources are campaign://<slug>/summary, /threads, /entity/<ref>, /session/<n> or /knowledge/<perspective>; campaign://list lists the campaigns")]
+    [InlineData("campaign://sky/bogus", "campaign sky has summary, threads, party, entity/<ref>, session/<n>, knowledge/<perspective> and combat/current")]
+    [InlineData("campaign://sky/entity/", "campaign sky has summary, threads, party, entity/<ref>, session/<n>, knowledge/<perspective> and combat/current")]
+    [InlineData("campaign://sky/party/1", "campaign sky has summary, threads, party, entity/<ref>, session/<n>, knowledge/<perspective> and combat/current")]
+    // Only the fight running now is a resource: a fight by name is combat state's.
+    [InlineData("campaign://sky/combat/last", "campaign sky has summary, threads, party, entity/<ref>, session/<n>, knowledge/<perspective> and combat/current")]
+    [InlineData("campaign://sky/combat", "campaign sky has summary, threads, party, entity/<ref>, session/<n>, knowledge/<perspective> and combat/current")]
+    [InlineData("campaign://sky", "campaign resources are campaign://<slug>/summary, /threads, /party, /entity/<ref>, /session/<n>, /knowledge/<perspective> or /combat/current; campaign://list lists the campaigns")]
+    [InlineData("campaign://sky/", "campaign resources are campaign://<slug>/summary, /threads, /party, /entity/<ref>, /session/<n>, /knowledge/<perspective> or /combat/current; campaign://list lists the campaigns")]
     [InlineData("campaign://nope/summary", "there is no campaign \"nope\"; campaign://list lists the campaigns")]
     public async Task ReadCampaignUri_NothingServesIt_IsNotFoundSayingWhatExists(string uri, string hint)
     {
@@ -508,6 +519,7 @@ public sealed class CampaignResourceTests : IAsyncLifetime
         var session = await _s.Read("campaign://sky/session/1");
         var last = await _s.Read("campaign://sky/session/last");
         var knowledge = await _s.Read("campaign://sky/knowledge/party");
+        var combat = await _s.Read("campaign://sky/combat/current");
 
         // The author's heading carries the e:<n> every view accepts beside the kind:slug (review U05, fix FQ14).
         Assert.Matches(@"\A# Flotsam \(`location:flotsam` · `e:\d+`\)\nlocation\n> A floating port\.\n", entity);
@@ -515,9 +527,92 @@ public sealed class CampaignResourceTests : IAsyncLifetime
         Assert.Contains("## Recap\nWe reached Flotsam.\n", session, StringComparison.Ordinal);
         Assert.Equal(session, last);
         Assert.StartsWith("# Sky: what party knows\n_Perspective: party.", knowledge, StringComparison.Ordinal);
+        Assert.StartsWith("# sky: no combat running\n", combat, StringComparison.Ordinal);
         var listed = (await _s.Server.Client.ListResourcesAsync()).Select(r => r.Uri).ToList();
         Assert.DoesNotContain(listed, u => u.Contains("/entity/", StringComparison.Ordinal) || u.Contains("/session/", StringComparison.Ordinal) ||
-                                           u.Contains("/knowledge/", StringComparison.Ordinal));
+                                           u.Contains("/knowledge/", StringComparison.Ordinal) || u.Contains("/combat/", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Contract §15 H1: <c>/party</c> is the author's list of every current party member with the line of their sheet, the
+    /// text <c>campaign_character get</c>'s list form gives (a DM campaign's get with no character), the dead named apart.
+    /// </summary>
+    [Fact]
+    public async Task ReadParty_IsTheListFormOfCampaignCharacterGet()
+    {
+        await CharacterToolSetup.CreateDeepAsync(_s.Server);
+
+        var text = await _s.Read("campaign://deep/party");
+
+        Assert.StartsWith("# Deep: the party's sheets\n\n- **Björn Mountainfell** (`character:bjorn-mountainfell`) — level 8 Barbarian", text, StringComparison.Ordinal);
+        Assert.Contains("\nNot in the party now: Old Tom (`character:old-tom`, dead).\n", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Harbour Master", text, StringComparison.Ordinal);
+        Assert.Equal(await _s.Call("campaign_character", """{"action": "get", "campaign": "deep"}"""), text);
+    }
+
+    [Fact]
+    public async Task ReadParty_PlayerCampaign_ListsItsPartyAsTheAuthorSeesIt()
+    {
+        // A player campaign has no list form of get (get is my character), but its party resource lists the party.
+        await CharacterToolSetup.CreateSkyAsync(_s.Server);
+        await CharacterToolSetup.BelmakorAsync(_s.Server);
+
+        var text = await _s.Read("campaign://sky/party");
+
+        Assert.Equal(
+            "# Sky: the party's sheets\n\n- **Belmakor** (`character:belmakor`) — level 12 Wizard (Bladesinger), 2014 · HP 110/110 (+7 temp) · AC 17 · Init +5\n",
+            text);
+    }
+
+    /// <summary>
+    /// Contract §15 H2: <c>/combat/current</c> is the author's <c>combat state</c> of the fight running now, readable and
+    /// never listed (it would come and go with every fight); with none it is the no-fight listing, the same text.
+    /// </summary>
+    [Fact]
+    public async Task ReadCombatCurrent_ARunningFight_IsTheAuthorsCombatState()
+    {
+        await CharacterToolSetup.CreateDeepAsync(_s.Server);
+        await _s.Call("combat", """{"action": "start", "name": "The deep", "campaign": "deep", "combatants": [{"name": "Shark", "hp": 30, "ac": 12}]}""");
+
+        var text = await _s.Read("campaign://deep/combat/current");
+
+        Assert.StartsWith("# The deep — round 0 (roll initiative to begin round 1)\n", text, StringComparison.Ordinal);
+        Assert.Contains("| Björn Mountainfell (character:bjorn-mountainfell) | party | 85/85 |", text, StringComparison.Ordinal);
+        Assert.Equal(await _s.Call("combat", """{"action": "state", "campaign": "deep"}"""), text);
+        Assert.DoesNotContain((await _s.Server.Client.ListResourcesAsync()).Select(r => r.Uri), u => u.Contains("/combat", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ReadCombatCurrent_NoFight_IsTheListingOfPlannedAndEndedFights()
+    {
+        await CharacterToolSetup.CreateDeepAsync(_s.Server);
+        await _s.Call("combat", """{"action": "prepare", "name": "Reef \"ambush\"", "campaign": "deep"}""");
+
+        var text = await _s.Read("campaign://deep/combat/current");
+
+        // The name is quoted as a JSON string, so its own quotes cannot end the quotation (as in the call after it).
+        Assert.StartsWith("# deep: no combat running\n\nPlanned:\n- \"Reef \\\"ambush\\\"\" (0 combatants): start it with " +
+                          "combat {\"action\": \"start\", \"encounter\": \"Reef \\\"ambush\\\"\", \"campaign\": \"deep\"}\n", text, StringComparison.Ordinal);
+        Assert.Equal(await _s.Call("combat", """{"action": "state", "campaign": "deep"}"""), text);
+    }
+
+    [Fact]
+    public async Task ReadParty_NoMembers_SaysNoPartySheetsYetWithTheCall()
+    {
+        await _s.Create("Sky");
+
+        Assert.Equal(
+            "# Sky: the party's sheets\n\nNo party sheets yet: campaign_character {\"action\": \"update\", \"character\": \"character:…\", \"sheet\": " +
+            "{\"level\": …}, \"campaign\": \"sky\"} makes one for a member (link a character member_of the party first).\n",
+            await _s.Read("campaign://sky/party"));
+    }
+
+    [Fact]
+    public async Task ReadList_NamesEachCampaignsPartyResource()
+    {
+        await _s.Create("Sky");
+
+        Assert.Contains("- `campaign://sky/party`: the party's sheets\n", await _s.Read("campaign://list"), StringComparison.Ordinal);
     }
 
     [Fact]

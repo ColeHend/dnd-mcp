@@ -73,7 +73,7 @@ internal static class CombatantMarkdown
         if (block.LegendaryResistance > 0)
         {
             lines.Add($"**Legendary Resistance** {Number(block.LegendaryResistance)}/day" +
-                      (block.LegendaryResistanceInLair is { } inLair ? $" ({Number(inLair)} in its lair; the simulator is never in a lair)" : string.Empty) +
+                      (block.LegendaryResistanceInLair is { } inLair ? $" ({Number(inLair)} in its lair; balance_simulate uses it for an encounter fought in a lair)" : string.Empty) +
                       ": a failed save becomes a success, spent as the legendary_resistance policy says.");
         }
 
@@ -424,7 +424,7 @@ internal static class CombatantMarkdown
         }
 
         var uses = $"{Plural(legendary.Uses, "use", "uses")} per round" +
-                   (legendary.UsesInLair is { } lair ? $" ({Number(lair)} in its lair; the simulator is never in a lair)" : string.Empty) +
+                   (legendary.UsesInLair is { } lair ? $" ({Number(lair)} in its lair; balance_simulate uses it for an encounter fought in a lair)" : string.Empty) +
                    ", reset at the start of its turn, spent after other creatures' turns, the best value first.";
         return "### Legendary actions\n\n" + uses + "\n\n" + string.Join("\n", legendary.Actions.Select(a => "- " + ActionLine(a)));
     }

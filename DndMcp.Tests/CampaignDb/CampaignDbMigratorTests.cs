@@ -1,9 +1,14 @@
 using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Dapper;
 using DndMcp.Domain.Campaign;
+using DndMcp.Domain.Campaign.Ops;
 using DndMcp.Domain.Features;
 using DndMcp.Repository.Campaign;
+using DndMcp.Repository.Campaign.Write;
+using DndMcp.Tests.CampaignWrite;
 using Microsoft.Data.Sqlite;
 using Xunit;
 
@@ -20,13 +25,18 @@ public sealed class CampaignDbMigratorTests : IDisposable
 {
     private static readonly string[] ExpectedTables =
     [
-        "app_state", "beat_edge", "campaign", "change_log", "clock", "cross_link", "dice_roll", "entity", "entity_alias",
-        "entity_fts", "entity_tag", "fact", "fact_dependency", "fact_fts", "fact_link", "knowledge", "objective", "relation",
-        "schema_migrations", "session", "session_attendance", "tag",
+        "app_state", "award", "beat_edge", "campaign", "change_log", "character_sheet", "clock", "combat_log", "combatant",
+        "cross_link", "currency_txn", "dice_roll", "encounter", "entity", "entity_alias", "entity_fts", "entity_tag", "fact",
+        "fact_dependency", "fact_fts", "fact_link", "holding", "knowledge", "objective", "relation", "schema_migrations",
+        "session", "session_attendance", "tag",
     ];
 
+    // Test migrations come after every embedded one: numbered from LatestVersion so these tests keep testing a PENDING
+    // migration over a file the build has fully migrated, however many migrations the build embeds.
+    private static readonly int Next = CampaignDbMigrator.LatestVersion + 1;
+
     private static readonly CampaignMigration AddNotesTable =
-        new(2, "0002_notes", "CREATE TABLE extra_note (id TEXT PRIMARY KEY, body TEXT NOT NULL) STRICT;");
+        Extra("notes", "CREATE TABLE extra_note (id TEXT PRIMARY KEY, body TEXT NOT NULL) STRICT;");
 
     private readonly CampaignTestDb _db = new(create: false);
 
@@ -41,12 +51,14 @@ public sealed class CampaignDbMigratorTests : IDisposable
 
         Assert.Equal(0, result.FromVersion);
         Assert.Equal(CampaignDbMigrator.LatestVersion, result.ToVersion);
-        Assert.Equal(new[] { 1 }, result.Applied);
+        Assert.Equal(new[] { 1, 2 }, result.Applied);
         Assert.Empty(result.Backups);
         Assert.Equal("wal", result.JournalMode);
         Assert.Equal(ExpectedTables, Tables(connection));
         Assert.Equal(CampaignDbMigrator.LatestVersion, CampaignDbMigrator.UserVersion(connection, null));
-        Assert.Equal(new[] { (1L, "0001_init") }, connection.Query<(long, string)>("SELECT version, name FROM schema_migrations").ToList());
+        Assert.Equal(
+            new[] { (1L, "0001_init"), (2L, "0002_characters_combat") },
+            connection.Query<(long, string)>("SELECT version, name FROM schema_migrations ORDER BY version").ToList());
         Assert.False(Directory.Exists(_db.BackupsPath));
     }
 
@@ -84,7 +96,7 @@ public sealed class CampaignDbMigratorTests : IDisposable
 
         Assert.Empty(result.Applied);
         Assert.Empty(result.Backups);
-        Assert.Equal(1, connection.ExecuteScalar<long>("SELECT count(*) FROM schema_migrations"));
+        Assert.Equal(CampaignDbMigrator.LatestVersion, connection.ExecuteScalar<long>("SELECT count(*) FROM schema_migrations"));
         Assert.Empty(other.Backups.List());
     }
 
@@ -114,7 +126,7 @@ public sealed class CampaignDbMigratorTests : IDisposable
         Assert.True(raced);
         Assert.Empty(result.Applied);
         Assert.Equal(CampaignDbMigrator.LatestVersion, result.ToVersion);
-        Assert.Equal(1, connection.ExecuteScalar<long>("SELECT count(*) FROM schema_migrations"));
+        Assert.Equal(CampaignDbMigrator.LatestVersion, connection.ExecuteScalar<long>("SELECT count(*) FROM schema_migrations"));
     }
 
     [Fact]
@@ -143,20 +155,117 @@ public sealed class CampaignDbMigratorTests : IDisposable
     [Fact]
     public void Migrate_PendingMigrationOverExistingData_TakesAPreMigrateBackupFirst()
     {
-        var campaign = SeedCampaignAtVersion1();
+        var campaign = SeedCampaignAtTheLatestVersion();
         using var connection = _db.Open();
 
-        var result = new CampaignDbMigrator([CampaignDbMigrator.Embedded[0], AddNotesTable]).Migrate(connection, _db.Database.Backups, _db.DatabasePath);
+        var result = With(AddNotesTable).Migrate(connection, _db.Database.Backups, _db.DatabasePath);
 
-        Assert.Equal(new[] { 2 }, result.Applied);
+        Assert.Equal(new[] { Next }, result.Applied);
         var backup = Assert.Single(result.Backups);
-        Assert.Matches(@"^campaigns-\d{8}T\d{9}Z-\d+-pre-migrate-v2\.db$", Path.GetFileName(backup));
+        Assert.Matches($@"^campaigns-\d{{8}}T\d{{9}}Z-\d+-pre-migrate-v{Next}\.db$", Path.GetFileName(backup));
         Assert.StartsWith("campaigns-20260901T120000000Z-", Path.GetFileName(backup), StringComparison.Ordinal);
         using var copy = OpenReadOnly(backup);
-        Assert.Equal(1, CampaignDbMigrator.UserVersion(copy, null));
+        Assert.Equal(CampaignDbMigrator.LatestVersion, CampaignDbMigrator.UserVersion(copy, null));
         Assert.Equal(campaign.Slug, copy.ExecuteScalar<string>("SELECT slug FROM campaign"));
         Assert.Equal(0, copy.ExecuteScalar<long>("SELECT count(*) FROM sqlite_master WHERE name = 'extra_note'"));
-        Assert.Equal(2, CampaignDbMigrator.UserVersion(connection, null));
+        Assert.Equal(Next, CampaignDbMigrator.UserVersion(connection, null));
+    }
+
+    /// <summary>
+    /// R02: while another process holds the version-1 file's write lock past busy_timeout, every campaign call tries the
+    /// migration again, and each attempt fails after its backup. Each attempt copies the file, and a copy byte-identical
+    /// to the newest pre-migrate-v2 backup is deleted (F2, review RR01), so three refused attempts and the migration that
+    /// finally goes through leave ONE backup of the unchanged file; a file that changed in between gets a new one (below).
+    /// </summary>
+    [Fact]
+    public void Migrate_Version1FileHeldLockedByAnotherProcess_ThreeRefusedAttemptsAndTheMigrationTakeOneBackup()
+    {
+        Phase6File();
+        var backups = _db.Database.Backups;
+        using (var holder = OpenRaw())
+        {
+            using var held = holder.BeginTransaction(deferred: false);
+            holder.Execute("UPDATE campaign SET name = name", transaction: held);
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                using var connection = Impatient();
+                Assert.Throws<SqliteException>(() => new CampaignDbMigrator().Migrate(connection, backups, _db.DatabasePath));
+                Assert.Single(backups.List());
+            }
+
+            held.Rollback();
+        }
+
+        _db.Database.EnsureReady();
+
+        var backup = Assert.Single(backups.List());
+        Assert.Equal(CampaignBackups.PreMigrateReason(2), backup.Reason);
+        using var copy = OpenReadOnly(backup.Path);
+        Assert.Equal(1, CampaignDbMigrator.UserVersion(copy, null));
+        using var migrated = OpenRaw();
+        Assert.Equal(2, CampaignDbMigrator.UserVersion(migrated, null));
+    }
+
+    /// <summary>
+    /// R02, RR01: a file that changed between two refused attempts gets a new backup, of what the migration then changes,
+    /// whatever the write was: a roll logged (the file's counters move), or a row changed in place (an UPDATE, or a 0.6.0
+    /// logged write that adds no entity, fact or roll: change_log.seq is no AUTOINCREMENT key), which neither the file's size
+    /// nor its counters show, so F1's fingerprint reused the first attempt's backup and the only pre-migrate-v2 backup
+    /// missed the write. Every attempt now takes its copy and keeps it unless it is byte-identical to the newest one.
+    /// </summary>
+    [Theory]
+    [InlineData("INSERT INTO dice_roll (id, campaign_id, expression, label, total, detail, secret, at) " +
+                "SELECT 'late-roll', id, '1d20', 'after the first attempt', 12, '{}', 0, '2026-09-01T12:00:00.000Z' FROM campaign LIMIT 1",
+                "SELECT count(*) FROM dice_roll WHERE id = 'late-roll'")]
+    [InlineData("UPDATE entity SET summary = 'Changed between the attempts.' WHERE slug = 'belmakor'",
+                "SELECT count(*) FROM entity WHERE summary = 'Changed between the attempts.'")]
+    [InlineData("UPDATE campaign SET name = 'Renamed between the attempts' WHERE slug = 'belmakor'",
+                "SELECT count(*) FROM campaign WHERE name = 'Renamed between the attempts'")]
+    public void Migrate_Version1FileChangedBetweenTwoRefusedAttempts_TheNewestBackupHoldsTheChange(string write, string check)
+    {
+        Phase6File();
+        var backups = _db.Database.Backups;
+
+        RefusedWhileHeld();
+        using (var writer = OpenRaw())
+        {
+            Assert.Equal(1, writer.Execute(write));
+        }
+
+        RefusedWhileHeld();
+        _db.Database.EnsureReady();
+
+        var taken = backups.List().OrderBy(b => b.At).ToList();
+        Assert.Equal(2, taken.Count);
+        using var first = OpenReadOnly(taken[0].Path);
+        using var latest = OpenReadOnly(taken[^1].Path);
+        Assert.Equal((0L, 1L), (first.ExecuteScalar<long>(check), latest.ExecuteScalar<long>(check)));
+    }
+
+    // One migration attempt refused because another connection holds the write lock (BEGIN IMMEDIATE) past busy_timeout.
+    private void RefusedWhileHeld()
+    {
+        using var holder = OpenRaw();
+        using var held = holder.BeginTransaction(deferred: false);
+        using var connection = Impatient();
+        Assert.Throws<SqliteException>(() => new CampaignDbMigrator().Migrate(connection, _db.Database.Backups, _db.DatabasePath));
+        held.Rollback();
+    }
+
+    // A connection that gives up on a held lock at once (no busy wait, the shortest retry bound), for refused attempts.
+    private SqliteConnection Impatient()
+    {
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = _db.DatabasePath,
+            Mode = SqliteOpenMode.ReadWrite,
+            ForeignKeys = true,
+            Pooling = false,
+            DefaultTimeout = 1,
+        }.ToString());
+        connection.Open();
+        connection.Execute("PRAGMA busy_timeout = 0");
+        return connection;
     }
 
     /// <summary>A brand-new file has nothing to lose: several migrations in a row take no backup at all.</summary>
@@ -165,11 +274,11 @@ public sealed class CampaignDbMigratorTests : IDisposable
     {
         using var connection = OpenRaw();
 
-        var result = new CampaignDbMigrator([CampaignDbMigrator.Embedded[0], AddNotesTable]).Migrate(connection, _db.Database.Backups, _db.DatabasePath);
+        var result = With(AddNotesTable).Migrate(connection, _db.Database.Backups, _db.DatabasePath);
 
-        Assert.Equal(new[] { 1, 2 }, result.Applied);
+        Assert.Equal(Enumerable.Range(1, Next), result.Applied);
         Assert.Empty(result.Backups);
-        Assert.Equal(2, connection.ExecuteScalar<long>("SELECT count(*) FROM schema_migrations"));
+        Assert.Equal(Next, connection.ExecuteScalar<long>("SELECT count(*) FROM schema_migrations"));
     }
 
     /// <summary>
@@ -179,20 +288,20 @@ public sealed class CampaignDbMigratorTests : IDisposable
     [Fact]
     public void Migrate_FailingMigration_LeavesVersionAndDataUnchangedAndKeepsTheBackup()
     {
-        var campaign = SeedCampaignAtVersion1();
-        var failing = new CampaignMigration(2, "0002_broken",
+        var campaign = SeedCampaignAtTheLatestVersion();
+        var failing = Extra("broken",
             "CREATE TABLE half_done (x INTEGER) STRICT; UPDATE campaign SET name = 'renamed'; INSERT INTO no_such_table VALUES (1);");
         using var connection = _db.Open();
 
         var error = Assert.Throws<CampaignStoreUnavailableException>(() =>
-            new CampaignDbMigrator([CampaignDbMigrator.Embedded[0], failing]).Migrate(connection, _db.Database.Backups, _db.DatabasePath));
+            With(failing).Migrate(connection, _db.Database.Backups, _db.DatabasePath));
 
-        Assert.Equal(1, CampaignDbMigrator.UserVersion(connection, null));
-        Assert.Equal(1, connection.ExecuteScalar<long>("SELECT count(*) FROM schema_migrations"));
+        Assert.Equal(CampaignDbMigrator.LatestVersion, CampaignDbMigrator.UserVersion(connection, null));
+        Assert.Equal(CampaignDbMigrator.LatestVersion, connection.ExecuteScalar<long>("SELECT count(*) FROM schema_migrations"));
         Assert.Equal(0, connection.ExecuteScalar<long>("SELECT count(*) FROM sqlite_master WHERE name = 'half_done'"));
         Assert.Equal("Test Campaign", connection.ExecuteScalar<string>("SELECT name FROM campaign WHERE id = @id", new { id = campaign.Id }));
         var backup = Assert.Single(_db.Database.Backups.List());
-        Assert.Equal("pre-migrate-v2", backup.Reason);
+        Assert.Equal(CampaignBackups.PreMigrateReason(Next), backup.Reason);
         Assert.Contains(backup.Path, error.Message);
         Assert.Contains("rolled back", error.Message);
         Assert.DoesNotContain("no_such_table", error.Message);
@@ -203,15 +312,15 @@ public sealed class CampaignDbMigratorTests : IDisposable
     [Fact]
     public void Migrate_BackupCannotBeWritten_StopsBeforeMigrating()
     {
-        SeedCampaignAtVersion1();
+        SeedCampaignAtTheLatestVersion();
         File.WriteAllText(_db.BackupsPath, "a file where the backups directory should be");
         using var connection = _db.Open();
 
         var error = Assert.Throws<CampaignStoreUnavailableException>(() =>
-            new CampaignDbMigrator([CampaignDbMigrator.Embedded[0], AddNotesTable]).Migrate(connection, _db.Database.Backups, _db.DatabasePath));
+            With(AddNotesTable).Migrate(connection, _db.Database.Backups, _db.DatabasePath));
 
         Assert.Contains("nothing was changed", error.Message);
-        Assert.Equal(1, CampaignDbMigrator.UserVersion(connection, null));
+        Assert.Equal(CampaignDbMigrator.LatestVersion, CampaignDbMigrator.UserVersion(connection, null));
         Assert.Equal(0, connection.ExecuteScalar<long>("SELECT count(*) FROM sqlite_master WHERE name = 'extra_note'"));
     }
 
@@ -225,13 +334,13 @@ public sealed class CampaignDbMigratorTests : IDisposable
     [InlineData(false, 0)]
     public void Migrate_CampaignTableRebuild_KeepsChildRowsOnlyWithTheForeignKeysOffDirective(bool directive, long entitiesAfter)
     {
-        var campaign = SeedCampaignAtVersion1();
+        var campaign = SeedCampaignAtTheLatestVersion();
         using (var seed = _db.Open())
         {
             new CampaignSeed(seed).Entity(campaign.Id, CampaignValues.Kinds.Character, "Iron Guts");
         }
 
-        var rebuild = new CampaignMigration(2, "0002_rebuild_campaign",
+        var rebuild = Extra("rebuild_campaign",
             (directive ? CampaignMigration.ForeignKeysOffDirective + "\n" : string.Empty) +
             """
             CREATE TABLE campaign_new (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, role TEXT NOT NULL,
@@ -247,7 +356,7 @@ public sealed class CampaignDbMigratorTests : IDisposable
             """);
         using var connection = _db.Open();
 
-        new CampaignDbMigrator([CampaignDbMigrator.Embedded[0], rebuild]).Migrate(connection, _db.Database.Backups, _db.DatabasePath);
+        With(rebuild).Migrate(connection, _db.Database.Backups, _db.DatabasePath);
 
         Assert.Equal(entitiesAfter, connection.ExecuteScalar<long>("SELECT count(*) FROM entity"));
         Assert.Equal(1, connection.ExecuteScalar<long>("SELECT count(*) FROM campaign"));
@@ -259,20 +368,20 @@ public sealed class CampaignDbMigratorTests : IDisposable
     [Fact]
     public void Migrate_ForeignKeysOffMigrationLeavingDanglingKeys_IsRolledBack()
     {
-        var campaign = SeedCampaignAtVersion1();
+        var campaign = SeedCampaignAtTheLatestVersion();
         using (var seed = _db.Open())
         {
             var entity = new CampaignSeed(seed).Entity(campaign.Id, CampaignValues.Kinds.Character, "Iron Guts");
             new CampaignSeed(seed).Tag(campaign.Id, entity.Id, "villain");
         }
 
-        var dangling = new CampaignMigration(2, "0002_dangling", CampaignMigration.ForeignKeysOffDirective + "\nDELETE FROM tag;");
+        var dangling = Extra("dangling", CampaignMigration.ForeignKeysOffDirective + "\nDELETE FROM tag;");
         using var connection = _db.Open();
 
         Assert.Throws<CampaignStoreUnavailableException>(() =>
-            new CampaignDbMigrator([CampaignDbMigrator.Embedded[0], dangling]).Migrate(connection, _db.Database.Backups, _db.DatabasePath));
+            With(dangling).Migrate(connection, _db.Database.Backups, _db.DatabasePath));
 
-        Assert.Equal(1, CampaignDbMigrator.UserVersion(connection, null));
+        Assert.Equal(CampaignDbMigrator.LatestVersion, CampaignDbMigrator.UserVersion(connection, null));
         Assert.Equal(1, connection.ExecuteScalar<long>("SELECT count(*) FROM tag"));
         Assert.Equal(1, connection.ExecuteScalar<long>("PRAGMA foreign_keys"));
     }
@@ -309,6 +418,15 @@ public sealed class CampaignDbMigratorTests : IDisposable
         seed.Objective(quest.Id, "Climb the tower");
         seed.BeatEdge(campaign.Id, beatA.Id, beatB.Id);
         seed.DiceRoll(campaign.Id, session.EntityId);
+        seed.CharacterSheet(pc.Id, level: 12, maxHp: 98, hp: 98);
+        seed.Holding(campaign.Id, pc.Id, "Potion of healing", itemId: other.Id, acquiredSessionId: session.EntityId);
+        seed.CurrencyTxn(campaign.Id, pc.Id, gp: 50, sessionId: session.EntityId);
+        seed.Award(campaign.Id, pc.Id, amount: 450, sessionId: session.EntityId);
+        var encounter = seed.Encounter(campaign.Id, status: CampaignValues.EncounterStatuses.Active, sessionId: session.EntityId, sceneId: beatA.Id);
+        var combatant = seed.Combatant(encounter, "Belmakor", CampaignValues.CombatSides.Party, entityId: pc.Id, sheetSnapshot: "{}");
+        var roll = CampaignDatabase.NewId();
+        seed.DiceRoll(campaign.Id, session.EntityId, id: roll, encounterId: encounter);
+        seed.CombatLog(encounter, CampaignValues.CombatLogKinds.Damage, actorId: combatant, targetId: combatant, rollId: roll);
         connection.Execute("INSERT INTO app_state(key, value) VALUES ('active_campaign', @id)", new { id = campaign.Id });
         connection.Execute(
             "INSERT INTO change_log(campaign_id, at, actor, batch_id, action, op, target_table, target_id) " +
@@ -322,8 +440,9 @@ public sealed class CampaignDbMigratorTests : IDisposable
         Assert.Empty(connection.Query("PRAGMA foreign_key_check"));
         foreach (var table in new[]
                  {
-                     "dice_roll", "beat_edge", "objective", "clock", "session_attendance", "knowledge", "fact_dependency",
-                     "fact_link", "cross_link", "relation", "entity_tag", "tag", "entity_alias", "session", "fact", "app_state",
+                     "combat_log", "combatant", "dice_roll", "encounter", "award", "currency_txn", "holding", "character_sheet",
+                     "beat_edge", "objective", "clock", "session_attendance", "knowledge", "fact_dependency", "fact_link",
+                     "cross_link", "relation", "entity_tag", "tag", "entity_alias", "session", "fact", "app_state",
                  })
         {
             connection.Execute($"DELETE FROM {table}");
@@ -335,6 +454,419 @@ public sealed class CampaignDbMigratorTests : IDisposable
         Assert.Empty(connection.Query("PRAGMA foreign_key_check"));
         Assert.Equal(0, connection.ExecuteScalar<long>("SELECT count(*) FROM entity_fts"));
         Assert.Equal(1, connection.ExecuteScalar<long>("SELECT count(*) FROM change_log"));
+    }
+
+    /// <summary>
+    /// The upgrade every 0.6.0 user gets: their version-1 file, full of Phase 6 history, is migrated by the first campaign
+    /// call (<see cref="CampaignDatabase.EnsureReady"/>, the production path) to version 2. A pre-migrate-v2 backup holding
+    /// the version-1 data comes first; afterwards every row of every Phase 6 table (and both FTS indexes, and the
+    /// AUTOINCREMENT counters) is exactly as it was, dice_roll has gained encounter_id last and NULL, foreign keys and the
+    /// file's integrity check are clean, and the Phase 7 tables exist, empty.
+    /// </summary>
+    [Fact]
+    public void Migrate_Version1FileWithPhase6Data_KeepsEveryRowBehindAPreMigrateV2Backup()
+    {
+        var world = Phase6File();
+        IReadOnlyDictionary<string, IReadOnlyList<string>> v1;
+        string before;
+        using (var raw = OpenRaw())
+        {
+            Assert.Equal(1, CampaignDbMigrator.UserVersion(raw, null));
+            v1 = Version1File.Tables(raw);
+            before = Version1File.Dump(raw, v1);
+        }
+
+        Assert.Contains("dice_roll", v1.Keys);
+        Assert.DoesNotContain("encounter_id", v1["dice_roll"]);
+        Assert.True(world.Rolls >= 2 && world.Batches > 20, $"{world.Rolls} rolls, {world.Batches} batches: not much of a Phase 6 file");
+
+        _db.Database.EnsureReady();
+
+        using var connection = _db.Open();
+        Assert.Equal(2, CampaignDbMigrator.UserVersion(connection, null));
+        Assert.Equal(
+            new[] { (1L, "0001_init"), (2L, "0002_characters_combat") },
+            connection.Query<(long, string)>("SELECT version, name FROM schema_migrations ORDER BY version").ToList());
+        Assert.Equal(before, Version1File.Dump(connection, v1));
+        Assert.Equal(ExpectedTables, Tables(connection));
+        Assert.Equal(v1["dice_roll"].Append("encounter_id"), Version1File.Tables(connection)["dice_roll"]);
+        Assert.Equal(0, connection.ExecuteScalar<long>("SELECT count(*) FROM dice_roll WHERE encounter_id IS NOT NULL"));
+        Assert.Empty(connection.Query("PRAGMA foreign_key_check"));
+        Assert.Equal("ok", connection.ExecuteScalar<string>("PRAGMA integrity_check"));
+        foreach (var table in new[] { "character_sheet", "holding", "currency_txn", "award", "encounter", "combatant", "combat_log" })
+        {
+            Assert.Equal(0, connection.ExecuteScalar<long>($"SELECT count(*) FROM {table}"));
+        }
+
+        var backup = Assert.Single(_db.Database.Backups.List());
+        Assert.Equal(CampaignBackups.PreMigrateReason(2), backup.Reason);
+        using var copy = OpenReadOnly(backup.Path);
+        Assert.Equal(1, CampaignDbMigrator.UserVersion(copy, null));
+        Assert.Equal(before, Version1File.Dump(copy, v1));
+        Assert.Equal(0, copy.ExecuteScalar<long>("SELECT count(*) FROM sqlite_master WHERE name = 'character_sheet'"));
+    }
+
+    /// <summary>
+    /// Search still works on a migrated file: what was indexed is found, and 0001's FTS triggers (which 0002 must not have
+    /// dropped: it rebuilds no table) still re-index an entity on a rename and on a new alias.
+    /// </summary>
+    [Fact]
+    public void Migrate_Version1FileWithPhase6Data_KeepsSearchWorking()
+    {
+        var world = Phase6File();
+        string[] triggers;
+        using (var raw = OpenRaw())
+        {
+            triggers = Triggers(raw);
+        }
+
+        _db.Database.EnsureReady();
+
+        using (var connection = _db.Open())
+        {
+            Assert.Equal(triggers, Triggers(connection));
+        }
+
+        Assert.Equal(15, triggers.Length);
+        Assert.Contains(world.BelmakorSeq, Hits("silverwind"));
+        Assert.Equal(new[] { world.LateArrivalSeq }, Hits("\"late arrival\""));
+        _db.Batch(world.CampaignId, r =>
+        {
+            r.Update("entity", world.LateArrivalId, new Dictionary<string, object?> { ["name"] = "Captain Ondine" }, "upsert");
+            r.Insert("entity_alias", new Dictionary<string, object?> { ["entity_id"] = world.BelmakorId, ["alias"] = "Bladesong Bard", ["visibility"] = "party" }, "upsert");
+        });
+
+        Assert.Equal(new[] { world.LateArrivalSeq }, Hits("ondine"));
+        Assert.Empty(Hits("\"late arrival\""));
+        Assert.Equal(new[] { world.BelmakorSeq }, Hits("\"bladesong bard\""));
+    }
+
+    /// <summary>
+    /// History carries across the upgrade: a batch made before it is undone after it (the late batch, and the FTS row it
+    /// made goes with it), a point-in-time read replays a pre-migration change (f:6 was restricted until session 2), and
+    /// the new logged tables take a batch and an undo on the old file like on a new one.
+    /// </summary>
+    [Fact]
+    public void Migrate_Version1FileWithPhase6Data_KeepsHistoryUndoableAndReplayable()
+    {
+        var world = Phase6File();
+        _db.Database.EnsureReady();
+
+        _db.Undo(world.CampaignId, world.LateBatchId);
+
+        using (var connection = _db.Open())
+        {
+            Assert.Equal(0, connection.ExecuteScalar<long>("SELECT count(*) FROM entity WHERE id = @id", new { id = world.LateArrivalId }));
+            Assert.Equal("restricted", ChangeReplay.RowAsOf(connection, "fact", world.F6Id, 1)!["visibility"]);
+            Assert.Equal("party", ChangeReplay.RowAsOf(connection, "fact", world.F6Id, 2)!["visibility"]);
+        }
+
+        Assert.Empty(Hits("\"late arrival\""));
+        var sheet = _db.Batch(world.CampaignId, r => r.Insert("character_sheet", new Dictionary<string, object?>
+        {
+            ["entity_id"] = world.BelmakorId, ["ruleset"] = "2014", ["level"] = 12, ["max_hp"] = 98, ["hp"] = 98,
+            ["classes"] = new JsonArray(new JsonObject { ["class"] = "wizard", ["subclass"] = "bladesinger", ["level"] = 12 }),
+        }, "update"));
+        using (var connection = _db.Open())
+        {
+            Assert.Equal(98L, connection.ExecuteScalar<long>("SELECT hp FROM character_sheet WHERE entity_id = @id", new { id = world.BelmakorId }));
+        }
+
+        _db.Undo(world.CampaignId, sheet);
+
+        using (var connection = _db.Open())
+        {
+            Assert.Equal(0, connection.ExecuteScalar<long>("SELECT count(*) FROM character_sheet"));
+        }
+    }
+
+    /// <summary>
+    /// The foreign-key actions 0002 declares, each exercised (an action that is only declared fails at DML time, as
+    /// "no such table" or a mismatch, never at CREATE): deleting an entity takes its sheet, holdings, coins and awards with
+    /// it but only unlinks an item, a combatant, an encounter's scene and session, and the session of coins and awards;
+    /// deleting a combatant unlinks the log rows naming it (actor or target); deleting a roll unlinks the log row that
+    /// cites it; deleting an encounter takes its combatants and log and unlinks its rolls; deleting a campaign takes all of
+    /// it. Every SET NULL is checked as "the row is still there, with the column NULL": a CASCADE in its place would
+    /// silently delete logged holdings, a live fight's combatants, or dice rolls (which nothing may un-roll), and reading
+    /// the column alone cannot tell a NULL from a row that is gone.
+    /// </summary>
+    [Fact]
+    public void Migrate_Phase7ForeignKeys_ActAsDeclared()
+    {
+        _db.Database.EnsureReady();
+        using var connection = _db.Open();
+        var seed = new CampaignSeed(connection);
+        var campaign = seed.Campaign();
+        var pc = seed.Entity(campaign.Id, CampaignValues.Kinds.Character, "Belmakor Silverwind", subtype: "pc");
+        var npc = seed.Entity(campaign.Id, CampaignValues.Kinds.Character, "Iron Guts", subtype: "npc");
+        var sword = seed.Entity(campaign.Id, CampaignValues.Kinds.Item, "Flame tongue");
+        var scene = seed.Entity(campaign.Id, CampaignValues.Kinds.Scene, "The crypt");
+        var session = seed.Session(campaign.Id, 1);
+        seed.CharacterSheet(pc.Id, level: 12);
+        var held = seed.Holding(campaign.Id, npc.Id, "Flame tongue", itemId: sword.Id);
+        var heldByPc = seed.Holding(campaign.Id, pc.Id, "Rope", acquiredSessionId: session.EntityId);
+        var coins = seed.CurrencyTxn(campaign.Id, pc.Id, gp: 5, sessionId: session.EntityId);
+        var award = seed.Award(campaign.Id, pc.Id, amount: 10, sessionId: session.EntityId);
+        var encounter = seed.Encounter(campaign.Id, status: CampaignValues.EncounterStatuses.Active, sessionId: session.EntityId, sceneId: scene.Id);
+        var guts = seed.Combatant(encounter, "Iron Guts", entityId: npc.Id, hp: 10, maxHp: 10);
+        var bel = seed.Combatant(encounter, "Belmakor", CampaignValues.CombatSides.Party, entityId: pc.Id, sheetSnapshot: "{}");
+        var mummy = seed.Combatant(encounter, "Mummy");
+        var roll = CampaignDatabase.NewId();
+        seed.DiceRoll(campaign.Id, session.EntityId, id: roll, encounterId: encounter);
+        var laterRoll = CampaignDatabase.NewId();
+        seed.DiceRoll(campaign.Id, null, id: laterRoll, encounterId: encounter);
+        var log = seed.CombatLog(encounter, CampaignValues.CombatLogKinds.Damage, actorId: bel, targetId: guts, rollId: roll);
+        seed.CombatLog(encounter, CampaignValues.CombatLogKinds.Damage, actorId: mummy, targetId: mummy, rollId: laterRoll);
+
+        connection.Execute("DELETE FROM entity WHERE id = @id", new { id = sword.Id });
+        Assert.Equal(1, Count(connection, "holding WHERE id = @id AND item_id IS NULL", held));
+        connection.Execute("DELETE FROM entity WHERE id = @id", new { id = npc.Id });
+        Assert.Equal(1, Count(connection, "combatant WHERE id = @id AND entity_id IS NULL", guts));
+        Assert.Equal(0, Count(connection, "holding WHERE id = @id", held));
+        connection.Execute("DELETE FROM entity WHERE id IN (@scene, @session)", new { scene = scene.Id, session = session.EntityId });
+        Assert.Equal(1, Count(connection, "encounter WHERE id = @id AND scene_id IS NULL AND session_id IS NULL", encounter));
+        Assert.Equal(1, Count(connection, "holding WHERE id = @id AND acquired_session_id IS NULL", heldByPc));
+        Assert.Equal(1, Count(connection, "currency_txn WHERE id = @id AND session_id IS NULL", coins));
+        Assert.Equal(1, Count(connection, "award WHERE id = @id AND session_id IS NULL", award));
+        connection.Execute("DELETE FROM combatant WHERE id = @bel", new { bel });
+        Assert.Equal(1, Count(connection, "combat_log WHERE seq = @id AND actor_id IS NULL AND target_id IS NOT NULL", log));
+        connection.Execute("DELETE FROM combatant WHERE id = @guts", new { guts });
+        Assert.Equal(1, Count(connection, "combat_log WHERE seq = @id AND target_id IS NULL AND roll_id IS NOT NULL", log));
+        connection.Execute("DELETE FROM dice_roll WHERE id = @roll", new { roll });
+        Assert.Equal(1, Count(connection, "combat_log WHERE seq = @id AND roll_id IS NULL", log));
+        connection.Execute("DELETE FROM entity WHERE id = @id", new { id = pc.Id });
+        Assert.Equal(0, connection.ExecuteScalar<long>("SELECT count(*) FROM character_sheet"));
+        Assert.Equal(0, Count(connection, "holding WHERE id = @id", heldByPc));
+        Assert.Equal(0, Count(connection, "currency_txn WHERE id = @id", coins));
+        Assert.Equal(0, Count(connection, "award WHERE id = @id", award));
+        connection.Execute("DELETE FROM encounter WHERE id = @encounter", new { encounter });
+        Assert.Equal(0, connection.ExecuteScalar<long>("SELECT count(*) FROM combatant"));
+        Assert.Equal(0, connection.ExecuteScalar<long>("SELECT count(*) FROM combat_log"));
+        Assert.Equal(1, Count(connection, "dice_roll WHERE id = @id AND encounter_id IS NULL", laterRoll));
+        var second = seed.Encounter(campaign.Id);
+        seed.Combatant(second, "Mummy");
+        connection.Execute("UPDATE campaign SET party_id = NULL");
+        connection.Execute("DELETE FROM entity");
+        connection.Execute("DELETE FROM campaign");
+        Assert.Equal(0, connection.ExecuteScalar<long>("SELECT count(*) FROM encounter"));
+        Assert.Equal(0, connection.ExecuteScalar<long>("SELECT count(*) FROM combatant"));
+        Assert.Equal(0, connection.ExecuteScalar<long>("SELECT count(*) FROM dice_roll"));
+        Assert.Empty(connection.Query("PRAGMA foreign_key_check"));
+    }
+
+    /// <summary>
+    /// One active encounter per campaign is the partial unique index's job (D13: the combat service maps its constraint
+    /// error to its own refusal): a second active one in the same campaign is refused, while any number of planned,
+    /// paused and ended ones, and an active one in another campaign, are not.
+    /// </summary>
+    [Theory]
+    [InlineData(CampaignValues.EncounterStatuses.Active, true, true)]
+    [InlineData(CampaignValues.EncounterStatuses.Active, false, false)]
+    [InlineData(CampaignValues.EncounterStatuses.Planned, true, false)]
+    [InlineData(CampaignValues.EncounterStatuses.Paused, true, false)]
+    [InlineData(CampaignValues.EncounterStatuses.Ended, true, false)]
+    public void Migrate_EncounterActiveIndex_AllowsOneActiveEncounterPerCampaign(string secondStatus, bool sameCampaign, bool refused)
+    {
+        _db.Database.EnsureReady();
+        using var connection = _db.Open();
+        var seed = new CampaignSeed(connection);
+        var campaign = seed.Campaign();
+        var other = seed.Campaign(name: "Other");
+        seed.Encounter(campaign.Id, "The crypt", status: CampaignValues.EncounterStatuses.Active);
+        seed.Encounter(campaign.Id, "Old fight", status: CampaignValues.EncounterStatuses.Ended);
+
+        var second = Record.Exception(() => seed.Encounter(sameCampaign ? campaign.Id : other.Id, "The dark station", status: secondStatus));
+
+        if (refused)
+        {
+            var error = Assert.IsType<SqliteException>(second);
+            Assert.Equal(19, error.SqliteErrorCode);
+            Assert.Contains("encounter.campaign_id", error.Message);
+        }
+        else
+        {
+            Assert.Null(second);
+        }
+    }
+
+    /// <summary>
+    /// The constraints of 0002 that no vocabulary list covers refuse what the C# rules must never write: a level outside
+    /// 1-20, negative XP, HP, quantity, reduction, damage taken or round, an exhaustion past 6, JSON of the wrong kind, a
+    /// combatant above its maximum HP, a NULL where a column is required, and a key that names no row (the foreign keys the
+    /// combat log and the dice log rely on). They are the store's backstop under the sheet and tracker rules.
+    /// </summary>
+    [Theory]
+    [InlineData("UPDATE character_sheet SET level = 21")]
+    [InlineData("UPDATE character_sheet SET level = 0")]
+    [InlineData("UPDATE character_sheet SET xp = -1")]
+    [InlineData("UPDATE character_sheet SET hp = -1")]
+    [InlineData("UPDATE character_sheet SET temp_hp = -1")]
+    [InlineData("UPDATE character_sheet SET ac = -1")]
+    [InlineData("UPDATE character_sheet SET max_hp = 5001")]
+    [InlineData("UPDATE character_sheet SET death_saves = '[]'")]
+    [InlineData("UPDATE character_sheet SET classes = NULL")]
+    [InlineData("UPDATE character_sheet SET ac = 51")]
+    [InlineData("UPDATE character_sheet SET max_hp = 0")]
+    [InlineData("UPDATE character_sheet SET max_hp_reduction = -1")]
+    [InlineData("UPDATE character_sheet SET exhaustion = 7")]
+    [InlineData("UPDATE character_sheet SET inspiration = 2")]
+    [InlineData("UPDATE character_sheet SET classes = '{}'")]
+    [InlineData("UPDATE character_sheet SET spell_slots = '[]'")]
+    [InlineData("UPDATE character_sheet SET concentration = 'not json'")]
+    [InlineData("UPDATE character_sheet SET ruleset = 'mixed'")]
+    [InlineData("UPDATE holding SET quantity = -0.5")]
+    [InlineData("UPDATE holding SET quantity = 'two'")]
+    [InlineData("UPDATE award SET kind = 'gold'")]
+    [InlineData("UPDATE encounter SET status = 'won'")]
+    [InlineData("UPDATE encounter SET ruleset = 'mixed'")]
+    [InlineData("UPDATE combatant SET hp = 11")]
+    [InlineData("UPDATE combatant SET side = 'monster'")]
+    [InlineData("UPDATE combatant SET exhaustion = 7")]
+    [InlineData("UPDATE combatant SET conditions = '{}'")]
+    [InlineData("UPDATE combat_log SET kind = 'attack'")]
+    [InlineData("UPDATE combat_log SET round = -1")]
+    [InlineData("UPDATE combat_log SET detail = '[]'")]
+    [InlineData("UPDATE combat_log SET roll_id = 'no such roll'")]
+    [InlineData("UPDATE combat_log SET encounter_id = 'no such encounter'")]
+    [InlineData("UPDATE combat_log SET actor_id = 'no such combatant'")]
+    [InlineData("UPDATE combatant SET damage_taken = -1")]
+    [InlineData("UPDATE combatant SET temp_hp = -1")]
+    [InlineData("UPDATE combatant SET max_hp = 0")]
+    [InlineData("UPDATE combatant SET statblock = '[]'")]
+    [InlineData("UPDATE combatant SET sheet_snapshot = '[]'")]
+    [InlineData("UPDATE combatant SET resources = '[]'")]
+    [InlineData("UPDATE combatant SET name = NULL")]
+    [InlineData("UPDATE combatant SET order_key = NULL")]
+    [InlineData("UPDATE combatant SET entity_id = 'no such entity'")]
+    [InlineData("UPDATE encounter SET round = -1")]
+    [InlineData("UPDATE encounter SET ruleset = NULL")]
+    [InlineData("UPDATE encounter SET lair = 2")]
+    [InlineData("UPDATE encounter SET data = '[]'")]
+    [InlineData("UPDATE holding SET name = NULL")]
+    [InlineData("UPDATE holding SET item_id = 'no such entity'")]
+    [InlineData("UPDATE dice_roll SET encounter_id = 'no such encounter'")]
+    public void Migrate_Phase7Checks_RefuseWhatTheRulesMustNeverWrite(string update)
+    {
+        _db.Database.EnsureReady();
+        using var connection = _db.Open();
+        var seed = new CampaignSeed(connection);
+        var campaign = seed.Campaign();
+        var pc = seed.Entity(campaign.Id, CampaignValues.Kinds.Character, "Belmakor Silverwind", subtype: "pc");
+        seed.CharacterSheet(pc.Id, level: 12, maxHp: 98, hp: 98);
+        seed.Holding(campaign.Id, pc.Id, "Rope");
+        seed.Award(campaign.Id, pc.Id, amount: 1);
+        var encounter = seed.Encounter(campaign.Id);
+        seed.Combatant(encounter, "Mummy", hp: 10, maxHp: 10);
+        seed.CombatLog(encounter);
+        seed.DiceRoll(campaign.Id, null, encounterId: encounter);
+
+        var error = Assert.Throws<SqliteException>(() => connection.Execute(update));
+
+        Assert.Equal(19, error.SqliteErrorCode);
+    }
+
+    public static TheoryData<string, string, object> Phase7Defaults() => new()
+    {
+        { "character_sheet", "death_saves", "{\"successes\":0,\"failures\":0,\"stable\":false}" },
+        { "character_sheet", "classes", "[]" },
+        { "character_sheet", "abilities", "{}" },
+        { "character_sheet", "spell_slots", "{}" },
+        { "character_sheet", "conditions", "[]" },
+        { "character_sheet", "max_hp_reduction", 0L },
+        { "character_sheet", "temp_hp", 0L },
+        { "character_sheet", "exhaustion", 0L },
+        { "character_sheet", "inspiration", 0L },
+        { "character_sheet", "notes_md", "" },
+        { "holding", "quantity", 1.0 },
+        { "holding", "equipped", 0L },
+        { "holding", "attuned", 0L },
+        { "currency_txn", "gp", 0L },
+        { "encounter", "status", "planned" },
+        { "encounter", "round", 0L },
+        { "encounter", "lair", 0L },
+        { "encounter", "data", "{}" },
+        { "encounter", "notes_md", "" },
+        { "combatant", "death_saves", "{\"successes\":0,\"failures\":0,\"stable\":false}" },
+        { "combatant", "conditions", "[]" },
+        { "combatant", "resources", "{}" },
+        { "combatant", "init_bonus", 0L },
+        { "combatant", "damage_taken", 0L },
+        { "combatant", "makes_death_saves", 0L },
+        { "combatant", "removed", 0L },
+    };
+
+    /// <summary>
+    /// What a row gets for a column its insert leaves out (contract §3/§4): a new sheet is alive with no death-save tallies
+    /// (an empty object would read as no state at all), a holding holds one, a new encounter is planned at round 0 (a
+    /// default of active would take the campaign's one active slot), and every count and flag starts at 0. The sheet store
+    /// and the tracker insert only what they know and rely on these.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Phase7Defaults))]
+    public void Migrate_Phase7Defaults_FillWhatAnInsertLeavesOut(string table, string column, object expected)
+    {
+        _db.Database.EnsureReady();
+        using var connection = _db.Open();
+        var seed = new CampaignSeed(connection);
+        var campaign = seed.Campaign();
+        var pc = seed.Entity(campaign.Id, CampaignValues.Kinds.Character, "Belmakor Silverwind", subtype: "pc");
+        var encounter = seed.Encounter(campaign.Id, "Old fight");
+        var at = new { campaign = campaign.Id, pc = pc.Id, encounter, at = "2026-09-01T12:00:00.000Z" };
+        connection.Execute(table switch
+        {
+            "character_sheet" => "INSERT INTO character_sheet(entity_id, created_at, updated_at) VALUES (@pc, @at, @at)",
+            "holding" => "INSERT INTO holding(id, campaign_id, holder_id, name, created_at, updated_at) VALUES ('new', @campaign, @pc, 'Rope', @at, @at)",
+            "currency_txn" => "INSERT INTO currency_txn(id, campaign_id, holder_id, note, created_at) VALUES ('new', @campaign, @pc, 'loot', @at)",
+            "encounter" => "INSERT INTO encounter(id, campaign_id, name, ruleset, created_at, updated_at) VALUES ('new', @campaign, 'The crypt', '2024', @at, @at)",
+            _ => "INSERT INTO combatant(id, encounter_id, name, side, order_key, created_at, updated_at) VALUES ('new', @encounter, 'Mummy', 'enemy', 1, @at, @at)",
+        }, at);
+
+        var key = table == "character_sheet" ? "entity_id = @pc" : "id = 'new'";
+        var stored = connection.ExecuteScalar<object>($"SELECT {column} FROM {table} WHERE {key}", at);
+
+        Assert.Equal(expected, stored);
+    }
+
+    /// <summary>
+    /// The schema 0002 leaves, object by object as SQLite stores it (sqlite_master, whitespace runs collapsed), is exactly
+    /// what contract §3's frozen text gives when run on a version-1 file: every column, type, NOT NULL, DEFAULT, CHECK,
+    /// foreign key and action, every index and its WHERE, and the column dice_roll gains. Behaviour tests cover the
+    /// constraints the rules lean on; this covers the rest, which an edit could otherwise change with every test green and
+    /// ship to every user's file. A difference fails naming the object.
+    /// </summary>
+    [Fact]
+    public void Embedded_CharactersCombatMigration_CreatesExactlyTheFrozenSchema()
+    {
+        var migrated = SchemaAfter(CampaignDbMigrator.Embedded, then: null);
+        var frozen = SchemaAfter([CampaignDbMigrator.Embedded[0]], then: FrozenSchema.CharactersCombat);
+
+        Assert.Equal(frozen, migrated);
+        Assert.Contains(migrated, o => o.StartsWith("table combatant: CREATE TABLE combatant (", StringComparison.Ordinal));
+        Assert.Contains(migrated, o => o.StartsWith("table dice_roll: ", StringComparison.Ordinal) &&
+            o.EndsWith(", encounter_id TEXT REFERENCES encounter(id) ON DELETE SET NULL) STRICT", StringComparison.Ordinal));
+    }
+
+    public static TheoryData<string, string> FrozenMigrations() => new()
+    {
+        { "0001_init", "A6F4E4E7120C3FA3583AA6A0681A31EB533BC303EC311B9306F736EE54A840AF" },
+        { "0002_characters_combat", "6B6611C52DA95FCC31C158EAF8D50C8EE7E234C1A6A0B969DE81F6886190CEED" },
+    };
+
+    /// <summary>
+    /// A migration that has shipped (0001 in 0.6.0) or been frozen by its contract (0002, Phase 7 §3) is never edited, not
+    /// even a comment: every file already migrated by it keeps the old text's schema, so an edit would split users at the
+    /// same user_version. The SHA-256 of each embedded file (line endings as checked out, LF) is pinned; a schema change is
+    /// a new migration. Never update a hash here to follow an edit.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(FrozenMigrations))]
+    public void Embedded_FrozenMigration_IsNeverEdited(string name, string sha256)
+    {
+        var migration = Assert.Single(CampaignDbMigrator.Embedded, m => m.Name == name);
+
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(migration.Sql.ReplaceLineEndings("\n"))));
+
+        Assert.Equal(sha256, hash);
     }
 
     /// <summary>
@@ -380,6 +912,12 @@ public sealed class CampaignDbMigratorTests : IDisposable
             "change_log", "op",
             [CampaignValues.ChangeOps.Create, CampaignValues.ChangeOps.Update, CampaignValues.ChangeOps.Delete]
         },
+        { "character_sheet", "ruleset", Values(CampaignValues.Rulesets.Editions) },
+        { "award", "kind", Values(CampaignValues.AwardKinds.Set) },
+        { "encounter", "ruleset", Values(CampaignValues.Rulesets.Editions) },
+        { "encounter", "status", Values(CampaignValues.EncounterStatuses.Set) },
+        { "combatant", "side", Values(CampaignValues.CombatSides.Set) },
+        { "combat_log", "kind", Values(CampaignValues.CombatLogKinds.Set) },
     };
 
     /// <summary>
@@ -404,7 +942,7 @@ public sealed class CampaignDbMigratorTests : IDisposable
     [Fact]
     public void Embedded_Migrations_AreNumberedFromOneWithTheInitScriptFirst()
     {
-        Assert.Equal(1, CampaignDbMigrator.LatestVersion);
+        Assert.Equal(2, CampaignDbMigrator.LatestVersion);
         var first = CampaignDbMigrator.Embedded[0];
         Assert.Equal(1, first.Version);
         Assert.Equal("0001_init", first.Name);
@@ -412,13 +950,32 @@ public sealed class CampaignDbMigratorTests : IDisposable
         Assert.False(first.ForeignKeysOff);
     }
 
+    /// <summary>
+    /// 0002 only creates tables and appends one column: no Phase 6 table is rebuilt (a rebuild of entity would drop its
+    /// FTS triggers), so it needs no foreign_keys=off directive, and every statement is a CREATE or the dice_roll ALTER.
+    /// </summary>
+    [Fact]
+    public void Embedded_CharactersCombatMigration_IsVersionTwoAndOnlyAddsTablesAndOneColumn()
+    {
+        var second = CampaignDbMigrator.Embedded[1];
+
+        Assert.Equal((2, "0002_characters_combat"), (second.Version, second.Name));
+        Assert.False(second.ForeignKeysOff);
+        var statements = Regex.Matches(second.Sql, @"(?m)^(CREATE|ALTER|DROP|INSERT|UPDATE|DELETE|PRAGMA)\b[^\n]*").Select(m => m.Value).ToList();
+        Assert.All(statements, st => Assert.True(
+            st.StartsWith("CREATE TABLE ", StringComparison.Ordinal) || st.StartsWith("CREATE INDEX ", StringComparison.Ordinal) ||
+            st.StartsWith("CREATE UNIQUE INDEX ", StringComparison.Ordinal) ||
+            st == "ALTER TABLE dice_roll ADD COLUMN encounter_id TEXT REFERENCES encounter(id) ON DELETE SET NULL;", st));
+        Assert.Equal(7, statements.Count(st => st.StartsWith("CREATE TABLE ", StringComparison.Ordinal)));
+    }
+
     /// <summary>A gap means a migration file fell out of the build; applying the next one to the wrong schema corrupts data.</summary>
     [Fact]
     public void Constructor_MigrationsWithAGap_Throw()
     {
-        var third = new CampaignMigration(3, "0003_later", "SELECT 1;");
+        var afterAGap = new CampaignMigration(Next + 1, "9999_later", "SELECT 1;");
 
-        var error = Assert.Throws<InvalidOperationException>(() => new CampaignDbMigrator([CampaignDbMigrator.Embedded[0], third]));
+        var error = Assert.Throws<InvalidOperationException>(() => new CampaignDbMigrator([.. CampaignDbMigrator.Embedded, afterAGap]));
 
         Assert.Contains("no gap", error.Message);
     }
@@ -433,6 +990,26 @@ public sealed class CampaignDbMigratorTests : IDisposable
         Assert.Equal(expected, new CampaignMigration(2, "0002_x", sql).ForeignKeysOff);
 
     private static string[] Values(DslValueSet set) => set.Values.ToArray();
+
+    private static long Count(SqliteConnection connection, string fromWhere, object id) =>
+        connection.ExecuteScalar<long>($"SELECT count(*) FROM {fromWhere}", new { id });
+
+    // A fresh in-memory file migrated by the given migrations, then (optionally) running more SQL by hand: its
+    // sqlite_master as "type name: sql" lines with whitespace runs collapsed, in a stable order.
+    private List<string> SchemaAfter(IReadOnlyList<CampaignMigration> migrations, string? then)
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:;Foreign Keys=True;Pooling=False");
+        connection.Open();
+        new CampaignDbMigrator(migrations).Migrate(connection, _db.Database.Backups, _db.DatabasePath);
+        if (then is not null)
+        {
+            connection.Execute(then);
+        }
+
+        return connection.Query<(string Type, string Name, string? Sql)>("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+            .Select(o => $"{o.Type} {o.Name}: {Regex.Replace(o.Sql ?? "(none)", @"\s+", " ").Trim()}")
+            .ToList();
+    }
 
     private static string[] Tables(SqliteConnection connection) =>
         connection.Query<string>(
@@ -472,10 +1049,88 @@ public sealed class CampaignDbMigratorTests : IDisposable
         return connection;
     }
 
-    private SeededCampaign SeedCampaignAtVersion1()
+    // The test database's file as a version-1 campaigns.db holding the Phase 6 world below, written through the Phase 6
+    // write path into a scratch database and copied into a real 0001 schema (Version1File).
+    private Phase6World Phase6File()
+    {
+        using var source = new WriteFixture();
+        var world = BuildPhase6World(source);
+        Version1File.CopyFrom(source.Db.DatabasePath, _db.DatabasePath, _db.Database.Backups);
+        return world;
+    }
+
+    // The Belmakor fixture (both campaigns, the cross-links, three played sessions, facts with a supersession and a
+    // visibility change in session 2, knowledge), plus through the same services: a clock ticked, a quest objective, a
+    // story-web edge, tags, a live session with a note and two logged rolls (one secret), a batch undone (undo_of rows),
+    // and one last batch, made in the live session, for the history test to undo after the upgrade.
+    private static Phase6World BuildPhase6World(WriteFixture f)
+    {
+        var fixture = BelmakorFixture.Build(f);
+        var c = fixture.Belmakor;
+        f.Apply(c,
+            new CampaignOpSpec { Op = "upsert", Kind = "clock", Name = "Kraken hunger", Clock = new ClockSpec { Segments = 4 } },
+            new CampaignOpSpec { Op = "upsert", Kind = "quest", Name = "Salvage the mithril", Visibility = "party", Tags = ["salvage", "sky"] },
+            new CampaignOpSpec { Op = "objective", Ref = "quest:salvage-the-mithril", Text = "Find the wreck", Progress = 1, ProgressMax = 3 },
+            new CampaignOpSpec { Op = "upsert", Kind = "beat", Name = "Dock fight" },
+            new CampaignOpSpec { Op = "upsert", Kind = "beat", Name = "Blood moon" },
+            new CampaignOpSpec { Op = "link", From = "beat:dock-fight", Rel = "leads_to", To = "beat:blood-moon", Mode = "any_of" });
+        f.Sessions.Start(c);
+        f.Sessions.Log(c, ["The Silver Gull docks."]);
+        f.Apply(c, new CampaignOpSpec { Op = "tick", Ref = "clock:kraken-hunger" });
+        Assert.True(f.Dice.TryLog(c.Id, [new DiceLogRoll("1d20+5", "Perception", 17, null, "{\"v\":1}")], secret: false).Logged);
+        Assert.True(f.Dice.TryLog(c.Id, [new DiceLogRoll("1d20", "Behind the screen", 3, null, "{\"v\":1}")], secret: true).Logged);
+        var undone = f.Apply(c, new CampaignOpSpec { Op = "upsert", Ref = "character:belmakor", Summary = "A passing summary." }).BatchId!;
+        f.History.Undo(c, undone, WriteContext.Default);
+        var late = f.Apply(c, new CampaignOpSpec { Op = "upsert", Kind = "character", Name = "Late Arrival", Subtype = "npc", Visibility = "party" });
+        var belmakor = f.Entity(c, "character:belmakor");
+        var lateArrival = f.Entity(c, "character:late-arrival");
+        return new Phase6World(
+            c.Id,
+            belmakor.Id,
+            belmakor.Seq,
+            lateArrival.Id,
+            lateArrival.Seq,
+            late.BatchId!,
+            f.Fact(c, "f:6").Id,
+            f.Count("SELECT count(*) FROM dice_roll"),
+            f.Count("SELECT count(DISTINCT batch_id) FROM change_log"));
+    }
+
+    // Every trigger, name and text: 0002 creates none and must drop none (a dropped FTS trigger silently stops search
+    // from seeing new text; change_log's append-only triggers are what keeps history history).
+    private static string[] Triggers(SqliteConnection connection) =>
+        connection.Query<(string Name, string Sql)>("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name")
+            .Select(t => t.Name + ": " + t.Sql).ToArray();
+
+    private long[] Hits(string match)
+    {
+        using var connection = _db.Open();
+        return connection.Query<long>("SELECT rowid FROM entity_fts WHERE entity_fts MATCH @match ORDER BY rowid", new { match }).ToArray();
+    }
+
+    private SeededCampaign SeedCampaignAtTheLatestVersion()
     {
         _db.Database.EnsureReady();
         using var connection = _db.Open();
         return new CampaignSeed(connection).Campaign();
     }
+
+    // A test migration numbered after every embedded one ("0003_notes" while 0002 is the newest).
+    private static CampaignMigration Extra(string name, string sql) =>
+        new(Next, Next.ToString("0000", System.Globalization.CultureInfo.InvariantCulture) + "_" + name, sql);
+
+    // The build's migrations plus one test migration.
+    private static CampaignDbMigrator With(CampaignMigration extra) => new([.. CampaignDbMigrator.Embedded, extra]);
 }
+
+/// <summary>What the version-1 tests need to know about the Phase 6 world they migrate.</summary>
+internal sealed record Phase6World(
+    string CampaignId,
+    string BelmakorId,
+    long BelmakorSeq,
+    string LateArrivalId,
+    long LateArrivalSeq,
+    string LateBatchId,
+    string F6Id,
+    long Rolls,
+    long Batches);

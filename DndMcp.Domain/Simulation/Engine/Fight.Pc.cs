@@ -81,7 +81,7 @@ internal sealed partial class Fight
             action = false;
         }
 
-        ctx.Target = PickTarget(pc, FirstAttackIsMelee(build));
+        ctx.Target = PickTarget(pc, FirstAttackIsMelee(state));
         ChoosePowerAttacks(pc, state, ctx, action);
 
         if (action)
@@ -112,8 +112,8 @@ internal sealed partial class Fight
         state.Acted = true;
     }
 
-    private static bool FirstAttackIsMelee(PcBuild build) =>
-        build.ActionQueue.Length > 0 ? build.Attacks[build.ActionQueue[0]].Melee : build.BonusQueue.Length > 0 && build.Attacks[build.BonusQueue[0]].Melee;
+    private static bool FirstAttackIsMelee(PcState state) =>
+        state.ActionQueue.Length > 0 ? state.Build.Attacks[state.ActionQueue[0]].Melee : state.BonusQueue.Length > 0 && state.Build.Attacks[state.BonusQueue[0]].Melee;
 
     // ------------------------------------------------------------------------------------------------------------------
     // Setup, healing, reaction draw.
@@ -130,7 +130,7 @@ internal sealed partial class Fight
         foreach (var setup in build.Setups)
         {
             var number = setup.Source.Number;
-            if (state.Active[number])
+            if (state.Active[number] || state.Blocked[number])
             {
                 continue;
             }
@@ -171,7 +171,7 @@ internal sealed partial class Fight
     private bool WorthSettingUp(Creature pc, PcState state, PcTurnContext ctx, int number, bool bonusAction)
     {
         var build = state.Build;
-        var target = PickTarget(pc, FirstAttackIsMelee(build));
+        var target = PickTarget(pc, FirstAttackIsMelee(state));
         if (target is null)
         {
             return false;
@@ -185,7 +185,7 @@ internal sealed partial class Fight
                 continue;
             }
 
-            foreach (var a in build.ActionQueue)
+            foreach (var a in state.ActionQueue)
             {
                 var attack = build.Attacks[a];
                 if (attack.Riders.Contains(r))
@@ -201,7 +201,7 @@ internal sealed partial class Fight
             value = double.PositiveInfinity; // not a rider (an extra attack, a condition): set it up again
         }
 
-        var alternative = bonusAction ? BonusQueueValue(pc, state, ctx, target) : QueueValue(pc, ctx, build.ActionQueue, LineKind.Action, target, ctx.PowerOn);
+        var alternative = bonusAction ? BonusQueueValue(pc, state, ctx, target) : QueueValue(pc, ctx, state.ActionQueue, LineKind.Action, target, ctx.PowerOn);
         return 2 * value >= alternative;
     }
 
@@ -363,8 +363,8 @@ internal sealed partial class Fight
     {
         var build = state.Build;
         var target = ctx.Target;
-        var attackValue = build.ActionQueue.Length > 0 && target is not null
-            ? QueueValue(pc, ctx, build.ActionQueue, LineKind.Action, target, ctx.PowerOn)
+        var attackValue = state.ActionQueue.Length > 0 && target is not null
+            ? QueueValue(pc, ctx, state.ActionQueue, LineKind.Action, target, ctx.PowerOn)
             : double.NegativeInfinity;
         var bestSave = -1;
         var bestSaveValue = double.NegativeInfinity;
@@ -383,15 +383,15 @@ internal sealed partial class Fight
             }
         }
 
-        if (bestSave >= 0 && (bestSaveValue > attackValue || build.ActionQueue.Length == 0))
+        if (bestSave >= 0 && (bestSaveValue > attackValue || state.ActionQueue.Length == 0))
         {
             CastSaveEffect(pc, state, bestSave);
             return;
         }
 
-        if (build.ActionQueue.Length > 0 || build.SurgeExtras.Length > 0)
+        if (state.ActionQueue.Length > 0 || build.SurgeExtras.Length > 0)
         {
-            RunAttackAction(pc, state, ctx, withAction: build.ActionQueue.Length > 0);
+            RunAttackAction(pc, state, ctx, withAction: state.ActionQueue.Length > 0);
         }
     }
 
@@ -403,7 +403,7 @@ internal sealed partial class Fight
         if (withAction)
         {
             // The Attack action is taken when the Action makes a weapon attack; spell attacks are the casting action.
-            foreach (var a in build.ActionQueue)
+            foreach (var a in state.ActionQueue)
             {
                 _queue.Add((a, LineKind.Action));
                 ctx.AttackActionTaken |= build.Attacks[a].Weapon;
@@ -443,12 +443,12 @@ internal sealed partial class Fight
             return;
         }
 
-        var target = PickCurrent(pc, ctx, FirstAttackIsMelee(build));
+        var target = PickCurrent(pc, ctx, FirstAttackIsMelee(state));
         var best = 0;
         var bestIndex = -1;
         var bestValue = 0.0;
 
-        if (build.BonusQueue.Length > 0 && target is not null)
+        if (state.BonusQueue.Length > 0 && target is not null)
         {
             var value = BonusQueueValue(pc, state, ctx, target);
             if (value > bestValue)
@@ -492,7 +492,7 @@ internal sealed partial class Fight
             case 1:
                 ctx.BonusAction = false;
                 _queue.Clear();
-                foreach (var a in build.BonusQueue)
+                foreach (var a in state.BonusQueue)
                 {
                     if (!build.Attacks[a].A.Offhand || ctx.AttackActionTaken)
                     {
@@ -983,6 +983,13 @@ internal sealed partial class Fight
             return false;
         }
 
+        // A spell with no slot left keeps working only while the concentration it already holds lasts (Call Lightning's
+        // next bolt), never cast anew (review CR03).
+        if (state.Blocked[effect.Source.Number] && pc.ConcentrationModifier != effect.Source.Number)
+        {
+            return false;
+        }
+
         return !effect.Concentration || pc.ConcentrationToken == 0 || pc.ConcentrationModifier == effect.Source.Number;
     }
 
@@ -1244,9 +1251,9 @@ internal sealed partial class Fight
     {
         var build = state.Build;
         var value = 0.0;
-        foreach (var a in build.BonusQueue)
+        foreach (var a in state.BonusQueue)
         {
-            if (!build.Attacks[a].A.Offhand || ctx.AttackActionTaken || build.ActionQueue.Any(q => build.Attacks[q].Weapon))
+            if (!build.Attacks[a].A.Offhand || ctx.AttackActionTaken || state.ActionQueue.Any(q => build.Attacks[q].Weapon))
             {
                 value += AttackValue(pc, ctx, build.Attacks[a], LineKind.BonusAction, target, ctx.PowerOn);
             }
@@ -1369,7 +1376,7 @@ internal sealed partial class Fight
         var noHit = 1.0;
         if (action)
         {
-            foreach (var a in build.ActionQueue)
+            foreach (var a in state.ActionQueue)
             {
                 Accumulate(pc, ctx, build.Attacks[a], LineKind.Action, target, on, ref value, ref noHit, ref noCrit);
             }
@@ -1389,7 +1396,7 @@ internal sealed partial class Fight
         var bonus = 0.0;
         if (ctx.BonusAction)
         {
-            foreach (var a in build.BonusQueue)
+            foreach (var a in state.BonusQueue)
             {
                 bonus += AttackValue(pc, ctx, build.Attacks[a], LineKind.BonusAction, target, on);
             }

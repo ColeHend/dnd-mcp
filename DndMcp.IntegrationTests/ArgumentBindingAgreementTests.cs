@@ -22,8 +22,8 @@ namespace DndMcp.IntegrationTests;
 /// first array parameter, and the fixture's server includes the production tools, so it is pinned here directly.
 /// </para>
 /// <para>
-/// The campaign tools have the most optional arguments of any (campaign_session has 20), and each action uses a few:
-/// a model fills the rest with null. Their rows run against <see cref="OneCampaignServer"/>, whose campaign lets every
+/// The campaign tools have the most optional arguments of any (combat has 51, campaign_character 22, campaign_session 20),
+/// and each action uses a few: a model fills the rest with null. Their rows run against <see cref="OneCampaignServer"/>, whose campaign lets every
 /// tool get past campaign resolution to the argument handling under test.
 /// </para>
 /// </summary>
@@ -249,11 +249,11 @@ public sealed class ArgumentBindingAgreementTests : IClassFixture<TestOnlyToolsS
         // round cap 20, average enemy HP, no surprise, the party's edition, the default policies, a random seed.
         var text = _server.SuccessText(await _server.CallToolJsonAsync(
             "balance_simulate",
-            $$"""{"party":{{Party}},"enemies":[{"monster":"Goblin"}],"iterations":null,"seed":null,"round_cap":null,"edition":null,"surprise":null,"enemy_hp":null,"precision":null,"replay":null,"policies":null,"compare":null,"rulings":null}"""));
+            $$"""{"party":{{Party}},"enemies":[{"monster":"Goblin"}],"encounter":null,"from_state":null,"campaign":null,"iterations":null,"seed":null,"round_cap":null,"edition":null,"surprise":null,"enemy_hp":null,"precision":null,"replay":null,"policies":null,"compare":null,"rulings":null}"""));
 
         Assert.Contains("*2024 rules · 10,000 fights · round cap 20 · enemy HP average · no surprise · seed ", text, StringComparison.Ordinal);
         Assert.Contains("- party focus_fire: ", text, StringComparison.Ordinal);
-        Assert.Contains("(drawn at random): pass \"seed\": \"", text, StringComparison.Ordinal);
+        Assert.Matches("\\(drawn at random\\): pass \"seed\": \\d+ with", text);
     }
 
     [Fact]
@@ -303,6 +303,14 @@ public sealed class ArgumentBindingAgreementTests : IClassFixture<TestOnlyToolsS
         "ingame_end", "notes", "recap_md", "next_hooks", "confidence", "status", "limit", "cursor", "perspective", "reason", "dry_run")]
     [InlineData("campaign_history", "\"action\":\"since\"", "since", "session", "targets", "ref", "refs", "detail", "batch_id", "dry_run", "reason", "limit",
         "cursor", "campaign")]
+    // get for a character with no sheet succeeds (contract §7.1), so the row reads Aria Vale's "no sheet yet".
+    [InlineData("campaign_character", "\"action\":\"get\"", "character", "campaign", "perspective", "sheet", "sim_profile", "amount", "damage_type", "slot_level",
+        "pact", "resource", "kind", "hit_dice", "rolls", "add", "remove", "level", "class", "items", "coins", "session", "reason", "dry_run")]
+    // state with no fight running succeeds (contract §6.1: the no-fight listing), so the row reads it.
+    [InlineData("combat", "\"action\":\"state\"", "campaign", "encounter", "name", "add_party", "lair", "edition", "combatants", "targets", "amount",
+        "dice", "damage_type", "parts", "critical", "magical", "half", "raw", "knock_out", "source", "secret", "temp", "item", "add", "remove", "duration",
+        "dc", "ability", "level", "round", "effect", "resource", "spell", "slot_level", "pact", "drop", "total", "face", "stable", "resistance", "rolls",
+        "surprised", "from", "perspective", "outcome", "xp", "loot", "currency", "discard", "force", "dry_run", "reason")]
     public async Task CallTool_CampaignToolNullForEveryOptionalArgument_MeansTheDefault(string tool, string given, params string[] optional)
     {
         // Models send null for "use the default" and for every argument the action does not use. The binder makes null and
@@ -377,11 +385,43 @@ public sealed class ArgumentBindingAgreementTests : IClassFixture<TestOnlyToolsS
     [InlineData("campaign_history", """{"action":"since","limit":"1"}""", """{"action":"since","limit":1}""")]
     // An empty filter list is no filter: models send [] for "none".
     [InlineData("campaign_search", """{"kinds":[],"statuses":[],"tags":[]}""", "{}")]
+    // party published untyped (checked as int[] or the word "campaign"): quoted levels bind as levels, and campaign null as
+    // "the current campaign".
+    [InlineData("encounter_difficulty", """{"party":["5","5"],"monsters":[{"cr":"1"}]}""", """{"party":[5,5],"monsters":[{"cr":"1"}]}""")]
+    [InlineData("encounter_difficulty", """{"party":[5,5],"monsters":[{"cr":"1"}],"campaign":null}""", """{"party":[5,5],"monsters":[{"cr":"1"}]}""")]
+    // campaign_character (dry runs, so the campaign is unchanged): quoted numbers inside the typed sheet bind as numbers, and
+    // so do a build's numbers inside sim_profile, published untyped, checked as a build by the guard and read by the tool
+    // itself: a reader stricter than the guard would refuse a call the guard passed. The dry run echoes the profile it
+    // would store, so the quoted step values (an attack's count, a step map's values, the ability scores, a resource's
+    // uses, an amount) must also be stored as the numbers the unquoted call stores (BuildCanonicalizer): two sheets'
+    // profiles compare as text.
+    [InlineData("campaign_character",
+        """{"action":"update","character":"character:aria-vale","sheet":{"level":"3","max_hp":"24","ac":"15"},"dry_run":true}""",
+        """{"action":"update","character":"character:aria-vale","sheet":{"level":3,"max_hp":24,"ac":15},"dry_run":true}""")]
+    [InlineData("campaign_character",
+        """{"action":"update","character":"character:aria-vale","sheet":{"level":3},"sim_profile":{"name":"Aria","level":"3","abilities":{"dex":"16","str":{"1":"10","3":"12"}},"attacks":[{"name":"Rapier","count":"1","damage":"1d8","to_hit":{"ability":"dex"}}],"modifiers":[{"kind":"extra_damage","name":"Sneak","dice":"2d6","when":"first_hit_per_turn","resource":{"uses":"2","per":"short_rest"}},{"kind":"bonus_damage","name":"Edge","amount":"+1"}]},"dry_run":true}""",
+        """{"action":"update","character":"character:aria-vale","sheet":{"level":3},"sim_profile":{"name":"Aria","level":3,"abilities":{"dex":16,"str":{"1":10,"3":12}},"attacks":[{"name":"Rapier","count":1,"damage":"1d8","to_hit":{"ability":"dex"}}],"modifiers":[{"kind":"extra_damage","name":"Sneak","dice":"2d6","when":"first_hit_per_turn","resource":{"uses":2,"per":"short_rest"}},{"kind":"bonus_damage","name":"Edge","amount":1}]},"dry_run":true}""")]
     public async Task CallTool_CampaignToolArgumentsTheBinderReadsAlike_GiveTheSameResult(string tool, string oneForm, string otherForm)
     {
         var first = _campaign.SuccessText(await _campaign.CallToolJsonAsync(tool, oneForm));
         var second = _campaign.SuccessText(await _campaign.CallToolJsonAsync(tool, otherForm));
 
         Assert.Equal(second, first);
+    }
+
+    [Theory]
+    [InlineData("\"Campaign\"")]
+    [InlineData("\" campaign \"")]
+    [InlineData("\"CAMPAIGN\"")]
+    public async Task CallTool_EncounterPartyTheWordInAnyCase_BindsAsTheWord(string party)
+    {
+        // CheckedAsAttribute.Or: the guard passes the word in any case and the tool reads exactly those spellings as the
+        // word, so a spelling the guard let through is never refused as "not a list" by the tool (or the binder). On this
+        // campaign the word reaches the party's refusal: Aria Vale has no sheet.
+        var plain = _campaign.ErrorText(await _campaign.CallToolJsonAsync("encounter_difficulty", """{"party":"campaign","monsters":[{"cr":"1"}]}"""));
+        var other = _campaign.ErrorText(await _campaign.CallToolJsonAsync("encounter_difficulty", $$"""{"party":{{party}},"monsters":[{"cr":"1"}]}"""));
+
+        Assert.Equal(plain, other);
+        Assert.Contains("party \"campaign\": the surface campaign's party levels come from the sheets", plain, StringComparison.Ordinal);
     }
 }

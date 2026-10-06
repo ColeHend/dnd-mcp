@@ -123,9 +123,9 @@ public sealed class SessionReaderTests : IDisposable
     [Theory]
     [InlineData("author", "9", "No session session:9 in this campaign. campaign_session {\"action\": \"list\", \"campaign\": \"test\"} lists the sessions.")]
     [InlineData("party", "2",
-        "No session session:2 for this perspective. campaign_session {\"action\": \"list\", \"campaign\": \"test\", \"perspective\": \"party\"} lists the sessions it can see.")]
+        "No session session:2 for this perspective. campaign_session {\"action\": \"list\", \"perspective\": \"party\", \"campaign\": \"test\"} lists the sessions it can see.")]
     [InlineData("character:belmakor", "session:9",
-        "No session session:9 for this perspective. campaign_session {\"action\": \"list\", \"campaign\": \"test\", \"perspective\": \"character:belmakor\"} lists the sessions it can see.")]
+        "No session session:9 for this perspective. campaign_session {\"action\": \"list\", \"perspective\": \"character:belmakor\", \"campaign\": \"test\"} lists the sessions it can see.")]
     public void Get_NoSuchSessionForTheView_PrintsAListCallThatWorksAsSent(string perspective, string handle, string message)
     {
         var ex = Assert.Throws<DndInputException>(() => Reader.Get(Row, handle, Perspective.Parse(perspective)));

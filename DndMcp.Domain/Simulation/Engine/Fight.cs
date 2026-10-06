@@ -58,27 +58,38 @@ internal sealed partial class Fight
     /// <summary>The harness: each round's cumulative damage dealt by creature 0, filled when set (length = round cap).</summary>
     public long[]? RoundDealt { get; set; }
 
-    /// <summary>Runs one whole fight from <paramref name="seed"/>; the creatures keep its end state for the caller's statistics.</summary>
+    /// <summary>
+    /// Runs one whole fight from <paramref name="seed"/>; the creatures keep its end state for the caller's statistics. A
+    /// resumed fight (<see cref="FightSetup.FixedOrder"/>) starts its first round at <see cref="FightSetup.StartAt"/> (the
+    /// turns before it were taken in the live fight) and counts its rounds, and the cap, from the resumed one; the log
+    /// numbers them from <see cref="FightSetup.StartRound"/>. A seeded fight whose side is already beaten ends before any
+    /// turn, in its first counted round.
+    /// </summary>
     public FightOutcome Run(ulong seed, CombatLog? log = null)
     {
         Begin(seed, log);
+        if (_over)
+        {
+            return new FightOutcome(_outcome, 1);
+        }
+
         var rounds = _setup.RoundCap;
         for (var round = 1; round <= _setup.RoundCap && !_over; round++)
         {
-            _round = round;
+            _round = _setup.StartRound + round - 1;
             if (_log is not null)
             {
-                _log.Line($"Round {round}");
+                _log.Line($"Round {_round}");
             }
 
-            foreach (var id in _order)
+            for (var position = round == 1 ? _setup.StartAt : 0; position < _order.Length; position++)
             {
                 if (_over)
                 {
                     break;
                 }
 
-                var creature = _c[id];
+                var creature = _c[_order[position]];
                 if (creature.Dead)
                 {
                     // No turn, and no legendary actions after it: only the durations counted on its turns run out.
@@ -115,6 +126,13 @@ internal sealed partial class Fight
     /// <summary>
     /// Sets up a fight without running it: every creature reset (hit points rolled or averaged), start-of-fight effects,
     /// initiative. <see cref="Run"/> starts here; the rules tests start here too and then script turns and damage.
+    ///
+    /// <para>
+    /// A creature with a start (<see cref="CombatantTemplate.Start"/>, a resumed fight) is set from it instead of its fresh
+    /// start of fight, in creature order — its HP is never rolled — and its conditions are added once every creature's
+    /// state and concentration are in place (<see cref="ApplyStartConditions"/>); a fixed order replaces the initiative roll
+    /// entirely. None of it draws a die, so the fresh creatures' rolls are the ones they always were.
+    /// </para>
     /// </summary>
     internal void Begin(ulong seed, CombatLog? log = null)
     {
@@ -130,20 +148,56 @@ internal sealed partial class Fight
         foreach (var creature in _c)
         {
             var t = creature.T;
-            var hp = t.RolledHp is { } dice ? Math.Max(1, RollFormula(dice)) : t.AverageHp;
+            var hp = t.Start is not null ? t.AverageHp : t.RolledHp is { } dice ? Math.Max(1, RollFormula(dice)) : t.AverageHp;
             creature.Reset(hp);
         }
 
         foreach (var creature in _c)
         {
-            StartOfFight(creature);
+            if (creature.T.Start is { } start)
+            {
+                ApplyStart(creature, start);
+            }
+            else
+            {
+                StartOfFight(creature);
+            }
         }
 
-        RollInitiative();
+        if (_setup.Seeded)
+        {
+            ApplyStartConditions();
+        }
+
+        if (_setup.FixedOrder is { } order)
+        {
+            UseFixedOrder(order);
+        }
+        else
+        {
+            RollInitiative();
+        }
+
+        if (_setup.Seeded)
+        {
+            // A side may already be beaten (every party member down at the resume): over before anyone acts.
+            _round = _setup.StartRound;
+            CheckOver();
+        }
     }
 
     /// <summary>The initiative order (creature ids) of the current fight.</summary>
     internal IReadOnlyList<int> Order => _order;
+
+    /// <summary>
+    /// The test seam for "seeding draws no die": the next 64 bits the fight's generator would give, read from a copy, so
+    /// the fight's own stream does not move.
+    /// </summary>
+    internal ulong PeekNextDraw()
+    {
+        var copy = _rng;
+        return copy.NextUInt64();
+    }
 
     internal bool Over => _over;
 
@@ -521,11 +575,13 @@ internal sealed partial class Fight
             }
         }
 
-        // Save-ends conditions on this creature: one save each, a success ends it.
+        // Save-ends conditions on this creature: one save each, a success ends it. A seeded save-ends whose cap has no
+        // counted turn end left runs until its source's next turn start, its save still repeated (StartPreparation.Compile);
+        // nothing else of that kind has a save, so a fresh fight rolls exactly what it always rolled.
         for (var i = 0; i < c.Conditions.Count; i++)
         {
             var active = c.Conditions[i];
-            if (active.Duration != DurationKind.SaveEnds || active.Template.SaveAbility is null)
+            if ((active.Duration != DurationKind.SaveEnds && active.Duration != DurationKind.UntilStartOfSourceTurn) || active.Template.SaveAbility is null)
             {
                 continue;
             }

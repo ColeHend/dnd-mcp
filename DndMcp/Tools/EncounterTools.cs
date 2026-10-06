@@ -5,6 +5,8 @@ using DndMcp.Domain.Core;
 using DndMcp.Domain.Encounters;
 using DndMcp.Formatting;
 using DndMcp.Hosting;
+using DndMcp.Repository.Campaign;
+using DndMcp.Repository.Campaign.Characters;
 using DndMcp.Repository.Srd;
 using DndMcp.Repository.Srd.Index;
 using Microsoft.Extensions.AI;
@@ -48,7 +50,25 @@ namespace DndMcp.Tools;
 /// campaigns.db exists but could not be read, one note says so and what was used instead. An
 /// explicit value always wins, 0 included: "book levels only" must stay expressible in a campaign whose table runs a
 /// level hot. The schema says <c>"default": null</c> for both, since a published default cannot follow a campaign that
-/// changes between calls. <c>party: "campaign"</c> waits for Phase 7 (character sheets carry the levels).
+/// changes between calls.
+/// </para>
+/// <para>
+/// <b><c>party: "campaign"</c></b> (contract D8, §15 H1): the levels are the campaign's current party's, from their sheets
+/// (<see cref="PartyRoster"/>: linked <c>member_of</c> the party now, alive and not departed), and <c>campaign</c> names
+/// the campaign (default: the current one, else the active one, else the only one: <see cref="CampaignService.Resolve"/>,
+/// which may migrate the file, as every campaign read does). A party size that is wrong changes the 2014 multiplier, so
+/// nobody is dropped silently: an empty party is refused with the link that adds members, a party larger than a list of
+/// levels may be is refused, members without a sheet level are refused together, each with the update call that gives
+/// one, and a dead or departed member left out is named in a note, beside the note that says whose levels were used.
+/// Whenever a campaign is resolved (<c>campaign</c> given, or <c>party: "campaign"</c>), the edition and offset defaults
+/// come from THAT campaign, never from the active one (<see cref="CampaignArgumentDefaults"/>, which balance_simulate's
+/// <c>campaign</c> shares): one campaign's party judged under another's ruleset is a wrong answer that looks right. Their
+/// notes are every tool's ("the active campaign's (belmakor) ruleset") when that campaign is also the current or active
+/// one, and name it otherwise ("the sky campaign's ruleset"). campaigns.db failures on that path are mapped to the
+/// store's own message (<see cref="CampaignDatabase.TryMapUnavailable"/>, through
+/// <see cref="CampaignArgumentDefaults.Mapped{T}"/>): this is not a campaign tool to the host's filter, whose
+/// SqliteException mapping for this tool would wrongly blame srd.db's failures on campaigns.db. The word is accepted by the argument guard through <see cref="CheckedAsAttribute.Or"/>, so a list of
+/// levels is checked exactly as before.
 /// </para>
 /// </summary>
 public sealed class EncounterTools
@@ -70,14 +90,17 @@ public sealed class EncounterTools
         _campaigns = campaigns;
     }
 
-    // Idempotent and closed-world: a pure function of the arguments and the vendored content this binary ships.
+    // Read-only, idempotent and closed-world: the answer follows from the arguments and the vendored content this binary
+    // ships and, for party "campaign" or campaign, from campaigns.db, which it only reads (Resolve may migrate the file, as
+    // every campaign read does); repeating the call changes nothing.
     [McpServerTool(Name = "encounter_difficulty", Title = "Encounter difficulty", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
     [Description(
         "How hard a combat encounter is for a party, computed by the rules rather than estimated. 2014 rules: the DMG's " +
         "XP thresholds (Easy, Medium, Hard, Deadly) with the group multiplier and the party-size shift. 2024 rules: the SRD " +
         "5.2.1 XP budget (Low, Moderate, High), no multiplier, plus the SRD's troubleshooting warnings. edition \"both\" shows " +
         "the two side by side and how their bands compare at the party's levels. Also gives the XP the party earns.\n" +
-        "- party: one level per character, e.g. [5, 5, 5, 5] for four level 5 characters, or [6, 5, 5, 4].\n" +
+        "- party: one level per character, e.g. [5, 5, 5, 5] for four level 5 characters, or [6, 5, 5, 4]; or \"campaign\": the " +
+        "campaign's current party, its levels from their sheets.\n" +
         "- monsters: one item per kind of monster, each with exactly one of ref, name or cr:\n" +
         "  - ref: an SRD monster's ref (\"2014/monster/ogre\"); name: an SRD monster's name (\"Ogre\", \"Adult Red Dragon\"), " +
         "looked up in both editions;\n" +
@@ -88,11 +111,13 @@ public sealed class EncounterTools
         "- effective_level_offset: optional whole number, e.g. 1 for a party that fights like one level higher (a strong " +
         "party or house rules); the result then shows both the book label and the effective-level label. Default: the " +
         "active campaign's effective_level_offset setting, else 0.\n" +
+        "- campaign: the campaign whose party (party \"campaign\") and defaults to use; default: the current campaign.\n" +
         "The tables themselves: rules_get with ref \"rules://tables\" lists them (XP by CR, 2024 budget, 2014 thresholds, " +
         "multipliers, adventuring-day XP, DMG monster statistics by CR).\n" +
         Examples)]
     public async Task<string> Difficulty(
-        [Description("One level (1-20) per character, e.g. [5, 5, 5, 5].")] int[] party,
+        [Description("One level (1-20) per character, e.g. [5, 5, 5, 5]; or campaign, for the campaign's current party from their sheets.")]
+        [CheckedAs(typeof(int[]), Or = CampaignParty)] object party,
         [Description(
             "The monsters: [{\"name\": \"Ogre\", \"count\": 3}], [{\"ref\": \"2014/monster/goblin\", \"count\": 6}] or " +
             "[{\"cr\": \"5\", \"name\": \"Homebrew brute\"}].")]
@@ -100,14 +125,20 @@ public sealed class EncounterTools
         [Description("\"2014\", \"2024\" or \"both\". Default: the active campaign's ruleset, else 2024.")] string? edition = null,
         [Description("Optional levels to add to every character for an effective-level reading, -10 to 10, e.g. 1. Default: the active campaign's effective_level_offset setting, else 0.")]
         [AIParameterName("effective_level_offset")] int? effectiveLevelOffset = null,
+        [Description("The campaign's slug for party campaign and the defaults. Default: the current campaign.")] string? campaign = null,
         IProgress<ProgressNotificationValue>? progress = null,
         CancellationToken cancellationToken = default)
     {
         var campaignNotes = new List<string>();
         var editionGiven = !string.IsNullOrWhiteSpace(edition);
         var editions = Editions(editionGiven ? edition : null);
-        var levels = party ?? [];
-        EncounterLimits.ValidateParty(levels);
+        var fromCampaign = IsCampaignParty(party);
+        IReadOnlyList<int> levels = fromCampaign ? [] : Levels(party);
+        if (!fromCampaign)
+        {
+            EncounterLimits.ValidateParty(levels);
+        }
+
         if (effectiveLevelOffset is { } given)
         {
             EncounterLimits.ValidateOffset(given);
@@ -117,7 +148,28 @@ public sealed class EncounterTools
 
         // Read campaigns.db only for what the call left out, after every argument check.
         var offset = effectiveLevelOffset ?? 0;
-        if (!editionGiven || effectiveLevelOffset is null)
+        if (fromCampaign || !string.IsNullOrWhiteSpace(campaign))
+        {
+            // A campaign the call chose (by name, or by asking for its party): its party and its defaults.
+            var (chosen, roster) = ReadCampaign(campaign, fromCampaign);
+            if (roster is not null)
+            {
+                levels = PartyLevels(chosen.Row, roster, campaignNotes);
+            }
+
+            if (!editionGiven && chosen.Edition is { } campaignEdition)
+            {
+                editions = Editions(campaignEdition);
+                campaignNotes.Add(chosen.EditionNote(campaignEdition));
+            }
+
+            if (effectiveLevelOffset is null && chosen.LevelOffset is { } campaignOffset)
+            {
+                offset = campaignOffset;
+                campaignNotes.Add(chosen.LevelOffsetNote(campaignOffset));
+            }
+        }
+        else if (!editionGiven || effectiveLevelOffset is null)
         {
             var reading = _campaigns.ReadDefaults();
             if (reading.Values is { } defaults)
@@ -172,6 +224,105 @@ public sealed class EncounterTools
 
         return EncounterMarkdown.Format(new EncounterReport(levels, effective, editions, entries, for2014, for2024) { CampaignNotes = campaignNotes });
     }
+
+    /// <summary>The word <c>party</c> takes for the campaign's current party (contract D8).</summary>
+    public const string CampaignParty = "campaign";
+
+    // The CheckedAs attribute of party: the guard's test for the word is the tool's, so the two never disagree on a spelling.
+    private static readonly CheckedAsAttribute PartyArgument = new(typeof(int[])) { Or = CampaignParty };
+
+    // party as the word "campaign" (any case, surrounding spaces ignored).
+    private static bool IsCampaignParty(object? party) => party is JsonElement element && PartyArgument.IsLiteral(element);
+
+    /// <summary>
+    /// party as levels: the guard has checked it as an <c>int[]</c> (items, ranges), so this binds it as the SDK would have
+    /// bound the typed parameter. Null (sent explicitly) is refused with what to send.
+    /// </summary>
+    private static int[] Levels(object? party)
+    {
+        if (party is not JsonElement { ValueKind: JsonValueKind.Array } element)
+        {
+            throw new DndInputException(
+                "party is required: one level per character, e.g. [5, 5, 5, 5], or \"campaign\" for the campaign's current party.");
+        }
+
+        try
+        {
+            return element.Deserialize<int[]>(McpJson.Options) ?? [];
+        }
+        catch (JsonException ex)
+        {
+            throw new DndInputException("party: give one level (1-20) per character, e.g. [5, 5, 5, 5], or \"campaign\".", ex);
+        }
+    }
+
+    /// <summary>
+    /// The campaign a call chose (<paramref name="campaign"/>, else the current one, else the active one, else the only one)
+    /// with its defaults and their notes' wording (<see cref="CampaignArgumentDefaults"/>, which balance_simulate's
+    /// <c>campaign</c> shares), and, for <c>party: "campaign"</c>, its party, read from the same campaign. A campaigns.db
+    /// failure on the way is the store's message (class summary), and "no campaigns yet" creates no file.
+    /// </summary>
+    private (ResolvedCampaignDefaults Campaign, PartyRosterResult? Roster) ReadCampaign(string? campaign, bool party) =>
+        CampaignArgumentDefaults.Mapped(_campaigns, () =>
+        {
+            var chosen = CampaignArgumentDefaults.Read(_campaigns, campaign);
+            return (chosen, party ? PartyRoster.Read(_campaigns.Database, chosen.Row) : null);
+        }, party ? "the campaign's party was not read" : "the campaign's settings were not read");
+
+    /// <summary>
+    /// The party's levels in roster order (contract D8), with the notes that say whose they are and who was left out; the
+    /// two refusals when they cannot be known: no current members, or members with no sheet level (all of them at once,
+    /// each with the call that gives one).
+    /// </summary>
+    private static IReadOnlyList<int> PartyLevels(CampaignRow campaign, PartyRosterResult roster, List<string> notes)
+    {
+        if (roster.Members.Count == 0)
+        {
+            throw new DndInputException(roster.PartyRef is { } partyRef
+                ? $"the {campaign.Slug} campaign has no current party members: link characters member_of {partyRef}, e.g. campaign_write " +
+                  $"{{\"ops\": [{{\"op\": \"link\", \"from\": \"character:…\", \"rel\": \"member_of\", \"to\": \"{partyRef}\"}}], \"campaign\": \"{campaign.Slug}\"}}." +
+                  LeftOut(roster) + " Or give party as levels, e.g. [5, 5, 5, 5]."
+                : $"the {campaign.Slug} campaign has no party, so no current party members: give party as levels, e.g. [5, 5, 5, 5].");
+        }
+
+        // The bound a list of levels has (EncounterLimits.MaxCharacters), checked before the sheets are: a roster that large
+        // is refused whatever its sheets say, so nobody is asked to give levels to members the call cannot use.
+        if (roster.Members.Count > EncounterLimits.MaxCharacters)
+        {
+            throw new DndInputException(
+                $"party \"campaign\": the {campaign.Slug} campaign's party has {Number(roster.Members.Count)} current members; at most " +
+                $"{Number(EncounterLimits.MaxCharacters)} characters are accepted. Give party as the levels of the characters in this fight, e.g. [5, 5, 5, 5].");
+        }
+
+        // The fix call is the contract's (D8) with the campaign appended, as the sheet's own reminders name it: the call that
+        // fixes a named campaign's sheet must not land in whichever campaign is current.
+        var missing = roster.WithoutLevel;
+        if (missing.Count > 0)
+        {
+            throw new DndInputException(
+                $"party \"campaign\": the {campaign.Slug} campaign's party levels come from the sheets, and " +
+                $"{(missing.Count == 1 ? "1 member has" : $"{Number(missing.Count)} members have")} no level on one: " +
+                string.Join("; ", missing.Select(m =>
+                    $"{m.Name} ({(m.Sheet is null ? "no sheet" : "a sheet with no level")}): campaign_character {{\"action\": \"update\", " +
+                    $"\"character\": \"{m.Handle}\", \"sheet\": {{\"level\": <n>}}, \"campaign\": \"{campaign.Slug}\"}}")) +
+                ". Or give party as levels, e.g. [5, 5, 5, 5].");
+        }
+
+        notes.Add($"Party: the {campaign.Slug} campaign's {Number(roster.Members.Count)} current " +
+                  $"{(roster.Members.Count == 1 ? "member" : "members")} ({PartyRoster.Names(roster.Members.Select(PartyRoster.NameAndLevel))}).");
+        if (roster.Excluded.Count > 0)
+        {
+            notes.Add(LeftOut(roster).TrimStart());
+        }
+
+        // Each level is 1-20 already: the sheet rules validate it and the column's CHECK holds it there.
+        return roster.Members.Select(m => m.Level!.Value).ToList();
+    }
+
+    // " Left out: Tristan (dead); a dead or departed member is not in the party." (empty when nobody was).
+    private static string LeftOut(PartyRosterResult roster) => roster.Excluded.Count == 0
+        ? string.Empty
+        : $" Left out: {PartyRoster.Names(roster.Excluded.Select(e => $"{e.Name} ({e.Reason})"))}; a dead or departed member is not in the party.";
 
     // A blank or omitted edition is 2024 here: the campaign's default is applied by the caller, after the argument checks.
     private static IReadOnlyList<string> Editions(string? edition)

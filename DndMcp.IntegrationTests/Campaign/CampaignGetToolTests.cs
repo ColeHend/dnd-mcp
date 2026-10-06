@@ -234,8 +234,8 @@ public sealed partial class CampaignGetToolTests : IClassFixture<BelmakorServer>
     [InlineData("""{"refs":["e:1","e:2","e:3","e:4","e:5","e:6","e:7","e:8","e:9","e:10","e:11"]}""",
         "refs has 11 handles; give at most 10 per call and page through the rest.")]
     [InlineData("""{"refs":["e:1"],"include":["relations","bogus","more"]}""",
-        "Invalid include (2 problems):\n- include item 2 (\"bogus\") is not an include; use relations, facts, knowledge, children, sessions, history.\n" +
-        "- include item 3 (\"more\") is not an include; use relations, facts, knowledge, children, sessions, history.")]
+        "Invalid include (2 problems):\n- include item 2 (\"bogus\") is not an include; use relations, facts, knowledge, children, sessions, history, sheet.\n" +
+        "- include item 3 (\"more\") is not an include; use relations, facts, knowledge, children, sessions, history, sheet.")]
     [InlineData("""{"refs":["e:1"],"detail":"verbose"}""", "detail must be \"concise\" (the default) or \"full\" (got \"verbose\").")]
     [InlineData("""{"refs":["character:nobody","::"]}""",
         "Invalid refs (2 problems):\n- refs item 1: \"character:nobody\": nothing in this campaign has that handle.")]
@@ -797,4 +797,130 @@ public sealed class CampaignGetToolWriteTests : IAsyncLifetime
 
     // "Line 001 <text>\nLine 002 <text>…": a long body with a line to cut at every 50-odd characters.
     private static string Lines(string text, int count) => string.Join('\n', Enumerable.Range(1, count).Select(i => $"Line {i:D3} {text}"));
+}
+
+/// <summary>
+/// Invariant (contract §7.3, §7.4): <c>campaign_get include: ["sheet"]</c> adds a character's sheet under its entry: the
+/// author's whole sheet (as of a session with <c>as_of_session</c>, through the change history), any other view's public
+/// line of a current party member it is shown, and nothing at all (no heading) for a character with no sheet, a character
+/// the view may not be shown a sheet for, or an entry that is not a character.
+///
+/// <para>
+/// Why it fails silently: a section printed with nothing under it, or a "no sheet" line, says a sheet exists or does not;
+/// a sheet read today under an as-of banner shows a later HP as the one the party had then.
+/// </para>
+/// </summary>
+public sealed class CampaignGetToolSheetTests : IAsyncLifetime
+{
+    private CampaignTestServer _s = null!;
+
+    public async Task InitializeAsync()
+    {
+        _s = await CampaignTestServer.StartAsync();
+        await CharacterToolSetup.CreateSkyAsync(_s.Server);
+    }
+
+    public async Task DisposeAsync() => await _s.DisposeAsync();
+
+    [Fact]
+    public async Task Get_IncludeSheet_TheAuthorReadsTheWholeSheetAfterTheEntrysOwnLines()
+    {
+        await CharacterToolSetup.BelmakorAsync(_s.Server);
+
+        var text = await _s.Call("campaign_get", """{"refs": ["character:belmakor"], "include": ["sheet"]}""");
+
+        Assert.Matches(new Regex(
+            @"\A# Belmakor \(`character:belmakor` · `e:\d+`\)\ncharacter · pc · status alive\n\n## Sheet\nlevel 12 Wizard \(Bladesinger\), 2014\n" +
+            @"`character:belmakor` · player Cole · High Elf · background Noble · source fixture\nHP 110/110 \(\+7 temp\) · AC 17 · Init \+5 · PB \+4 · Exhaustion 0\n"),
+            text);
+        Assert.Contains("- **Feats:** War Caster · Resilient (Constitution) · Fey Touched · Tough\n", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("party")]
+    [InlineData("table")]
+    [InlineData("dm")]
+    [InlineData("character:belmakor")]
+    public async Task Get_IncludeSheet_AnyOtherViewReadsThePublicLineOnly(string perspective)
+    {
+        await CharacterToolSetup.BelmakorAsync(_s.Server);
+
+        var text = await _s.Call("campaign_get", $$"""{"refs": ["character:belmakor"], "include": ["sheet"], "perspective": "{{perspective}}"}""");
+
+        Assert.EndsWith("\n\n## Sheet\n**Belmakor** (`character:belmakor`) — level 12 Wizard (Bladesinger), High Elf · HP 110/110 (+7 temp) · AC 17\n", text,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("Cole", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("War Caster", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("author")]
+    [InlineData("party")]
+    public async Task Get_IncludeSheetForACharacterWithNoSheet_HasNoSheetSection(string perspective)
+    {
+        var text = await _s.Call("campaign_get", $$"""{"refs": ["character:belmakor"], "include": ["sheet"], "perspective": "{{perspective}}"}""");
+
+        Assert.DoesNotContain("Sheet", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Get_IncludeSheetForAnNpcWithASheet_TheAuthorReadsItAndThePartyReadsNoSection()
+    {
+        await _s.Call("campaign_write", """{"ops": [{"op": "upsert", "kind": "character", "name": "Iron Guts", "subtype": "npc", "visibility": "party"}]}""");
+        await _s.Call("campaign_character", """{"action": "update", "character": "character:iron-guts", "sheet": {"level": 5, "max_hp": 40, "ac": 16}}""");
+
+        var author = await _s.Call("campaign_get", """{"refs": ["character:iron-guts"], "include": ["sheet"]}""");
+        var party = await _s.Call("campaign_get", """{"refs": ["character:iron-guts"], "include": ["sheet"], "perspective": "party"}""");
+
+        Assert.Contains("\n## Sheet\nlevel 5, 2014\n", author, StringComparison.Ordinal);
+        Assert.DoesNotContain("Sheet", party, StringComparison.Ordinal);
+        Assert.DoesNotContain("HP", party, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Get_IncludeSheetOnAnEntryThatIsNoCharacter_AddsNothing()
+    {
+        await _s.Call("campaign_write", """{"ops": [{"op": "upsert", "kind": "location", "name": "Flotsam", "visibility": "party"}]}""");
+
+        var withSheet = await _s.Call("campaign_get", """{"refs": ["location:flotsam"], "include": ["sheet"]}""");
+
+        Assert.Equal(await _s.Call("campaign_get", """{"refs": ["location:flotsam"], "include": []}"""), withSheet);
+    }
+
+    [Fact]
+    public async Task Get_IncludeSheetWithABodyLongerThanAResult_SaysIncludeEmptyMakesRoom()
+    {
+        // The sheet is an included section like relations and facts: when the body is cut beside it, the note says
+        // include [] makes room (the body is shown whole only without the sections).
+        await CharacterToolSetup.BelmakorAsync(_s.Server);
+        var body = string.Join("\\n", Enumerable.Range(1, 800).Select(i => $"Line {i:D3} of the long life, one paragraph after another."));
+        await _s.Call("campaign_write", $$"""{"ops": [{"op": "upsert", "ref": "character:belmakor", "body_md": "{{body}}"}]}""");
+
+        var withSheet = await _s.Call("campaign_get", """{"refs": ["character:belmakor"], "include": ["sheet"], "detail": "full"}""");
+        var bare = await _s.Call("campaign_get", """{"refs": ["character:belmakor"], "include": [], "detail": "full"}""");
+
+        Assert.Contains("\n## Sheet\n", withSheet, StringComparison.Ordinal);
+        Assert.Matches(new Regex(
+            "\n\n_… [\\d,]+ more characters that do not fit in one result beside the rest of this entry; include \\[\\] leaves out the relations, " +
+            "facts and other sections to make room\\._\n"), withSheet);
+        Assert.Matches(new Regex("\n\n_… [\\d,]+ more characters that do not fit in one result\\._\n"), bare);
+    }
+
+    [Fact]
+    public async Task Get_IncludeSheetAsOfASession_IsTheSheetAsItStoodThen()
+    {
+        await _s.Call("campaign_session", """{"action": "record_past", "session": 1, "played_on": "2026-08-01"}""");
+        await _s.Call("campaign_character", """{"action": "update", "session": 1, "sheet": {"level": 11, "max_hp": 100, "ac": 17}}""");
+        await _s.Call("campaign_session", """{"action": "record_past", "session": 2, "played_on": "2026-08-08"}""");
+        await _s.Call("campaign_character", """{"action": "damage", "session": 2, "amount": 30}""");
+        await _s.Call("campaign_character", """{"action": "update", "session": 2, "sheet": {"level": 12}}""");
+
+        var then = await _s.Call("campaign_get", """{"refs": ["character:belmakor"], "include": ["sheet"], "as_of_session": 1}""");
+        var now = await _s.Call("campaign_get", """{"refs": ["character:belmakor"], "include": ["sheet"]}""");
+
+        Assert.Contains("\n## Sheet\nlevel 11, 2014\n", then, StringComparison.Ordinal);
+        Assert.Contains("HP 100/100 · AC 17", then, StringComparison.Ordinal);
+        Assert.Contains("\n## Sheet\nlevel 12, 2014\n", now, StringComparison.Ordinal);
+        Assert.Contains("HP 70/100 · AC 17", now, StringComparison.Ordinal);
+    }
 }

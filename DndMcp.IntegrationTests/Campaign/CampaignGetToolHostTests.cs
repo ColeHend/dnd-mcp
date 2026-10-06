@@ -69,7 +69,7 @@ public sealed partial class CampaignGetToolHostTests : IAsyncLifetime
 
         Assert.Matches("_… and \\d+ more; read the other end with campaign_get\\._", author);
         var call = RelationsHintRegex().Match(party).Groups[1].Value;
-        Assert.Equal("{\"campaign\": \"sky\", \"refs\": [...], \"perspective\": \"party\"}", call);
+        Assert.Equal("{\"refs\": [...], \"perspective\": \"party\", \"campaign\": \"sky\"}", call);
         var read = await _s.Call("campaign_get", call.Replace("[...]", "[\"location:isle-45\"]", StringComparison.Ordinal));
         Assert.StartsWith("# Isle 45 (`location:isle-45`)\n_Perspective: party.", read, StringComparison.Ordinal);
     }
@@ -110,14 +110,14 @@ public sealed partial class CampaignGetToolHostTests : IAsyncLifetime
         var text = await _s.Call("campaign_get",
             $$"""{"campaign": "sky", "refs": ["character:aria"], "include": ["facts", "knowledge", "children", "sessions"], "perspective": "{{perspective}}"{{asOf}}}""");
 
-        var view = $"\"perspective\": \"{perspective}\"{asOf}}}";
-        var sessionList = $"\"perspective\": \"{perspective}\"}}";
+        var view = $"\"perspective\": \"{perspective}\"{asOf}, \"campaign\": \"sky\"}}";
+        var sessionList = $"\"perspective\": \"{perspective}\", \"campaign\": \"sky\"}}";
         Assert.Equal(
             [
-                $"campaign_search {{\"campaign\": \"sky\", \"query\": ..., {view} finds more",
-                $"campaign_search {{\"campaign\": \"sky\", \"kinds\": [...], {view} lists them all",
-                $"campaign_session {{\"campaign\": \"sky\", \"action\": \"list\", {sessionList} shows every session",
-                $"campaign_search {{\"campaign\": \"sky\", \"query\": ..., {view} finds the rest by words",
+                $"campaign_search {{\"query\": ..., {view} finds more",
+                $"campaign_search {{\"kinds\": [...], {view} lists them all",
+                $"campaign_session {{\"action\": \"list\", {sessionList} shows every session",
+                $"campaign_search {{\"query\": ..., {view} finds the rest by words",
             ],
             MoreHintRegex().Matches(text).Select(m => m.Groups[1].Value).ToArray());
         Assert.DoesNotContain("ledger", text, StringComparison.Ordinal);

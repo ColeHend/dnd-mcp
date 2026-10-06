@@ -49,6 +49,14 @@ namespace DndMcp.Hosting;
 /// schema of the type it names, generated with the server's JSON options. Without either, an untyped value would reach
 /// the tool unchecked, and a misspelt field in it would be ignored.
 /// </para>
+/// <para>
+/// A <see cref="CheckedAsAttribute"/> parameter with a literal (<see cref="CheckedAsAttribute.Or"/>:
+/// <c>encounter_difficulty</c>'s <c>party</c>, levels or <c>"campaign"</c>) lets that word through unchecked and checks
+/// every other value exactly as without it, so the messages for a list of levels stay what they were; a required one
+/// refuses null as its typed form did ("should be array but was null"), since an untyped parameter's schema allows null;
+/// and the accepted-parameters list names the word beside the type (<c>party (array of integer or "campaign",
+/// required)</c>), the only place a model that sent another word learns it.
+/// </para>
 /// </summary>
 internal static partial class ToolArgumentGuard
 {
@@ -119,9 +127,15 @@ internal static partial class ToolArgumentGuard
                     continue;
                 }
 
-                if (checkedAs?.GetValueOrDefault(name) is { } checkedType)
+                if (checkedAs?.GetValueOrDefault(name) is { } checkedAttribute)
                 {
-                    problems.AddRange(SameShapeProblems(name, value, SchemaOf(checkedType), checkedType));
+                    if (!checkedAttribute.IsLiteral(value))
+                    {
+                        problems.AddRange(value.ValueKind == JsonValueKind.Null && IsRequired(inputSchema, name)
+                            ? [$"argument '{name}' should be {string.Join(" or ", AllowedTypes(SchemaOf(checkedAttribute.Type)).Where(t => t != "null"))} but was null"]
+                            : SameShapeProblems(name, value, SchemaOf(checkedAttribute.Type), checkedAttribute.Type));
+                    }
+
                     continue;
                 }
 
@@ -167,7 +181,7 @@ internal static partial class ToolArgumentGuard
         if (problems.Count > 0)
         {
             throw new McpException(
-                $"Invalid arguments: {string.Join("; ", problems)}. {toolName} accepts: {DescribeParameters(inputSchema, properties, UntypedSchemas(properties, sameShapes, checkedAs))}.");
+                $"Invalid arguments: {string.Join("; ", problems)}. {toolName} accepts: {DescribeParameters(inputSchema, properties, UntypedSchemas(properties, sameShapes, checkedAs), checkedAs)}.");
         }
     }
 
@@ -603,20 +617,28 @@ internal static partial class ToolArgumentGuard
         return shapes;
     }
 
-    /// <summary>The parameters marked <see cref="CheckedAsAttribute"/>, by schema name, each with its type; null when none.</summary>
-    private static Dictionary<string, Type>? CheckedAsParameters(MethodInfo? method)
+    /// <summary>
+    /// The parameters marked <see cref="CheckedAsAttribute"/>, by schema name, each with its attribute (the type, and the
+    /// literal accepted in its place); null when none.
+    /// </summary>
+    private static Dictionary<string, CheckedAsAttribute>? CheckedAsParameters(MethodInfo? method)
     {
-        Dictionary<string, Type>? types = null;
+        Dictionary<string, CheckedAsAttribute>? attributes = null;
         foreach (var parameter in method?.GetParameters() ?? [])
         {
             if (parameter.GetCustomAttribute<CheckedAsAttribute>() is { } attribute && SchemaName(parameter) is { } name)
             {
-                (types ??= new Dictionary<string, Type>(StringComparer.Ordinal))[name] = attribute.Type;
+                (attributes ??= new Dictionary<string, CheckedAsAttribute>(StringComparer.Ordinal))[name] = attribute;
             }
         }
 
-        return types;
+        return attributes;
     }
+
+    // Whether the schema lists the parameter as required.
+    private static bool IsRequired(JsonElement schema, string name) =>
+        schema.TryGetProperty("required", out var required) && required.ValueKind == JsonValueKind.Array &&
+        required.EnumerateArray().Any(r => r.GetString() == name);
 
     private static readonly ConcurrentDictionary<Type, JsonElement> Schemas = new();
 
@@ -632,7 +654,7 @@ internal static partial class ToolArgumentGuard
     /// <see cref="SameShapeAsAttribute"/>, the type's for <see cref="CheckedAsAttribute"/>.
     /// </summary>
     private static Dictionary<string, JsonElement>? UntypedSchemas(
-        JsonElement properties, Dictionary<string, string>? sameShapes, Dictionary<string, Type>? checkedAs)
+        JsonElement properties, Dictionary<string, string>? sameShapes, Dictionary<string, CheckedAsAttribute>? checkedAs)
     {
         if (sameShapes is null && checkedAs is null)
         {
@@ -648,9 +670,9 @@ internal static partial class ToolArgumentGuard
             }
         }
 
-        foreach (var (name, type) in checkedAs ?? [])
+        foreach (var (name, attribute) in checkedAs ?? [])
         {
-            schemas[name] = SchemaOf(type);
+            schemas[name] = SchemaOf(attribute.Type);
         }
 
         return schemas;
@@ -674,8 +696,10 @@ internal static partial class ToolArgumentGuard
         _ => value.ValueKind.ToString(),
     };
 
-    // An untyped parameter's schema is untyped on purpose (SameShapeAsAttribute, CheckedAsAttribute); the list says what it takes.
-    private static string DescribeParameters(JsonElement schema, JsonElement properties, Dictionary<string, JsonElement>? untyped)
+    // An untyped parameter's schema is untyped on purpose (SameShapeAsAttribute, CheckedAsAttribute); the list says what it
+    // takes, and a CheckedAs literal beside its type: party (array of integer or "campaign", required).
+    private static string DescribeParameters(
+        JsonElement schema, JsonElement properties, Dictionary<string, JsonElement>? untyped, Dictionary<string, CheckedAsAttribute>? checkedAs = null)
     {
         var required = schema.TryGetProperty("required", out var r) && r.ValueKind == JsonValueKind.Array
             ? r.EnumerateArray().Select(x => x.GetString()).OfType<string>().ToHashSet()
@@ -690,6 +714,11 @@ internal static partial class ToolArgumentGuard
                 TypeText(items) is var itemText and not "any")
             {
                 typeText = $"array of {itemText}";
+            }
+
+            if (checkedAs?.GetValueOrDefault(p.Name)?.Or is { } literal)
+            {
+                typeText += $" or \"{literal}\"";
             }
 
             return $"{p.Name} ({typeText}, {(required.Contains(p.Name) ? "required" : "optional")})";

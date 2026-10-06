@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using DndMcp.Domain.Characters;
 using DndMcp.Domain.Core;
 using DndMcp.Domain.Encounters;
 using DndMcp.Formatting.Srd;
@@ -10,7 +11,9 @@ namespace DndMcp.Formatting;
 
 /// <summary>
 /// The rules tables this server serves whole: the encounter-building tables of both editions, the tables keyed by
-/// Challenge Rating, and the tables the DPR tools cite (<see cref="BalanceRulesTables"/>). Each is a
+/// Challenge Rating, character advancement (XP and proficiency bonus by level, <see cref="Advancement"/>: the one part of
+/// the 2024 Character Creation chapter served, which the rules tools' descriptions except from the missing chapters), and
+/// the tables the DPR tools cite (<see cref="BalanceRulesTables"/>). Each is a
 /// <c>rules://tables/&lt;slug&gt;</c> resource and is also reachable through <c>rules_get</c> (by that URI or by the
 /// table's name), because Claude Desktop attaches resources only by hand.
 ///
@@ -101,8 +104,25 @@ internal static class RulesTables
             ["SRD Monster Statistics by Challenge Rating", "Empirical Monster Statistics", "Empirical Monster Stats by CR",
              "Monster Stats by CR (Empirical)"],
             MonsterStatsEmpiricalPage),
+        new(
+            AdvancementSlug,
+            "Character Advancement",
+            "2014 and 2024",
+            Advancement.Source,
+            "The XP each character level needs (1–20) and the proficiency bonus at each level, the same in the 2014 and 2024 " +
+            "rules: the one part of the 2024 Character Creation chapter this server has.",
+            ["Character Advancement", "Character Advancement Table", "Level Advancement", "XP by Level", "Experience Points by Level",
+             "Proficiency Bonus by Level"],
+            CharacterAdvancement),
         .. BalanceRulesTables.All,
     ];
+
+    /// <summary>
+    /// The character advancement table's slug (contract D21): XP thresholds and proficiency bonus by level, served from
+    /// <see cref="Advancement"/>, the table <c>campaign_character</c>'s xp and level_up reminders and a sheet's next XP
+    /// threshold use, so what the model reads and what the sheet says cannot differ.
+    /// </summary>
+    public const string AdvancementSlug = "character-advancement";
 
     /// <summary>The empirical monster statistics' slug (<see cref="MonsterStatsEmpirical"/>).</summary>
     public const string EmpiricalSlug = "monster-stats-by-cr-empirical";
@@ -327,6 +347,21 @@ internal static class RulesTables
             "\"combatant\" shows one), and a test recomputes every cell from the shipped data, so the table cannot drift from it. " +
             "The DMG columns are the 2014 design targets (`" + UriPrefix + "monster-stats-by-cr-2014`), not SRD text.");
     }
+
+    /// <summary>
+    /// Character Advancement (SRD 5.1 "Beyond 1st Level", SRD 5.2 "Character Creation", CC-BY): one row per level with its
+    /// XP and proficiency bonus, from <see cref="Advancement.Rows"/>. Its notes say how a level is reached, that a class's
+    /// own table gives its features, and where a sheet's XP is tracked; they quote no rule beyond the table.
+    /// </summary>
+    private static string CharacterAdvancement(RulesTable table) => Page(
+        table,
+        SrdMarkdownText.Table(
+            ["Level", "Experience Points", "Proficiency Bonus"],
+            Advancement.Rows.Select(row => (IReadOnlyList<string>)[Number(row.Level), Number(row.Xp), SrdMarkdownText.Signed(row.ProficiencyBonus)])),
+        "\"When your XP total equals or exceeds a number in the Experience Points column, you reach the corresponding level\" " +
+        "(SRD 5.2). A class's own table (rules_get, e.g. name \"Wizard\") gives what each level brings; a level counts every " +
+        "class a character has.",
+        "campaign_character keeps a sheet's XP (action \"xp\") and says when a level is due; level_up applies one.");
 
     // 14.5 → "14.5", 12 → "12", an interpolated 13.67 → "13.67".
     private static string Median(double value) => value.ToString("0.##", CultureInfo.InvariantCulture);

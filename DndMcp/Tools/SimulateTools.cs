@@ -3,11 +3,17 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text.Json;
+using DndMcp.Domain.Campaign;
+using DndMcp.Domain.Characters;
+using DndMcp.Domain.Combat;
 using DndMcp.Domain.Core;
 using DndMcp.Domain.Features;
 using DndMcp.Domain.Simulation;
 using DndMcp.Formatting;
+using DndMcp.Formatting.Campaign;
 using DndMcp.Hosting;
+using DndMcp.Repository.Campaign.Characters;
+using DndMcp.Repository.Campaign.Combat;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol;
@@ -43,11 +49,11 @@ namespace DndMcp.Tools;
 /// campaign active nothing is filled, so that pre-campaign behaviour (and every answer) is unchanged.
 /// </para>
 /// <para>
-/// <b>Not idempotent, deliberately.</b> Without a seed each call draws a fresh 64-bit seed from the OS
+/// <b>Not idempotent, deliberately.</b> Without a seed each call draws a fresh seed below 2^53 from the OS
 /// (<see cref="RandomNumberGenerator"/>: the host, never the Domain, which only ever sees the seed) and echoes it with how
-/// to pass it back; with a seed the result is identical at any thread count. The seed is a JSON number or a decimal
-/// string, because a JavaScript-based client reads numbers as doubles and silently rounds a seed above 2^53; the echo
-/// gives it as a string for that reason.
+/// to pass it back, as a JSON number; with a seed the result is identical at any thread count. A given seed is a JSON
+/// number or a decimal string, because a JavaScript-based client reads numbers as doubles and silently rounds a seed above
+/// 2^53: a drawn seed is kept below that so the number it is echoed as comes back exactly (<see cref="RandomSeed"/>).
 /// </para>
 /// <para>
 /// <b>Schema size.</b> <c>party</c> carries the full entry schema (the build DSL inside it is most of it); <c>enemies</c>
@@ -75,8 +81,7 @@ namespace DndMcp.Tools;
 public sealed class SimulateTools
 {
     private const string Example =
-        "{\"party\": [{\"archetype\": \"fighter\", \"level\": 5, \"count\": 2}, {\"archetype\": \"cleric\", \"level\": 5}, " +
-        "{\"archetype\": \"wizard\", \"level\": 5}], \"enemies\": [{\"monster\": \"ogre\", \"count\": 3}], \"seed\": 42}";
+        "{\"party\": [{\"archetype\": \"fighter\", \"level\": 5, \"count\": 4}], \"enemies\": [{\"monster\": \"ogre\", \"count\": 3}], \"seed\": 42}";
 
     private const string EntryExample = "{\"monster\": \"Ogre\", \"count\": 3}";
 
@@ -149,39 +154,47 @@ public sealed class SimulateTools
     // Not idempotent: without a seed the same call draws new dice. Closed-world: the SRD data this binary ships.
     [McpServerTool(Name = "balance_simulate", Title = "Simulate a fight", ReadOnly = true, Destructive = false, Idempotent = false, OpenWorld = false)]
     [Description(
-        "Monte Carlo simulation of a D&D 5e fight (2014 or 2024 rules): a party vs enemies, fought thousands of times with the " +
-        "dice rolled. Gives P(party wins) with a 95% CI, P(defeat), P(draw), P(a party member dies), rounds (mean, median, " +
-        "p90) and per combatant: dropped to 0, dead, still dying, HP lost, damage dealt and taken, kills, resources used; what the SRD " +
-        "stat blocks' simulation leaves out; the assumptions. Exact damage per round: balance_dpr; the books' XP " +
-        "difficulty: encounter_difficulty.\n" +
-        "- party, enemies (required): lists of entries, each exactly one of:\n" +
+        "Monte Carlo simulation of a D&D 5e fight: a party vs enemies, fought thousands of times. Gives P(party wins) with a 95% " +
+        "CI, P(defeat), P(draw), P(a party member dies), rounds and per combatant: dropped, dead, HP lost, damage dealt and taken, " +
+        "kills, resources used; what the simulation leaves out; the assumptions. Exact damage per round: balance_dpr; the books' " +
+        "XP difficulty: encounter_difficulty.\n" +
+        "- encounter: a stored fight (\"current\", \"last\" or its name): its combatants are the sides (party, enemies append); " +
+        "from_state: true resumes the live fight from its HP, slots, conditions and turn.\n" +
+        "- party, enemies: lists of entries, each exactly one of:\n" +
         "  - archetype: fighter, barbarian, paladin, ranger, rogue, monk, cleric, druid, wizard, sorcerer, warlock or bard " +
-        "(simple, subclass-free), with level 1-20 and edition;\n" +
-        "  - monster: an SRD monster by name or ref (\"Ogre\", \"2014/monster/lich\");\n" +
-        "  - build: a build as balance_dpr takes it (PC, NPC, homebrew creature), with hp and ac (save_proficiencies optional).\n" +
-        "  Per entry also: count (copies, 1-20), name, hp, ac, saves, initiative_bonus, position (\"front\" or \"back\"), death_saves.\n" +
-        "- iterations: default 10,000 (max 100,000); or precision: run until P(win)'s 95% half-width is at most this, e.g. 0.01.\n" +
-        "- seed: repeats a result exactly (number or decimal string); without one a random seed is drawn and shown.\n" +
-        "- round_cap (default 20, then a draw), edition (the fight's rules; default the party's, else the campaign's), " +
-        "surprise (\"party\" or \"enemies\"), enemy_hp (\"average\" or \"roll\").\n" +
+        "(subclass-free), with level 1-20 and edition;\n" +
+        "  - monster: an SRD monster's name or ref (\"Ogre\");\n" +
+        "  - build: a build as balance_dpr takes it, with hp and ac (save_proficiencies optional);\n" +
+        "  - character: a campaign character with a sheet (\"character:torch\").\n" +
+        "  Per entry also: count (1-20), name, hp, ac, saves, initiative_bonus, position (\"front\" or \"back\"), death_saves.\n" +
+        "- campaign: whose encounter and characters (default the active one).\n" +
+        "- iterations: default 10,000 (max 100,000); or precision: run until P(win)'s 95% half-width is at most this.\n" +
+        "- seed: repeats a result exactly (default: random, shown).\n" +
+        "- round_cap (default 20, then a draw), edition (default the party's, else the campaign's), surprise (\"party\" or " +
+        "\"enemies\"), enemy_hp (\"average\" or \"roll\").\n" +
         "- policies: {party: focus_fire|spread|threat, enemies: spread|focus_fire|threat|healer_first|break_concentration, " +
         "legendary_resistance, healing, finish_downed, pcs_win_ties}.\n" +
         "- replay: one fight's number, shown turn by turn.\n" +
-        "- compare: {member: a party entry's position (1-based), feature: as balance_compare's}: the same fights with and " +
-        "without it, paired.\n" +
+        "- compare: {member: a party entry's position (1-based), feature: as balance_compare's}: the fights with and without it.\n" +
         "- rulings: as balance_dpr's.\n" +
         "Example: " + Example)]
     public async Task<string> Simulate(
-        [Description("The party: entries with archetype (+ level), monster or build (+ hp, ac), and count, e.g. " +
-                     "[{\"archetype\": \"fighter\", \"level\": 5, \"count\": 4}].")]
-        CombatantSpec[] party,
-        [Description("The enemies: entries with the same fields as party, e.g. [" + EntryExample + "].")]
-        [SameShapeAs("party")] object enemies,
+        [Description("The party: entries with archetype (+ level), monster, build (+ hp, ac) or character, and count, e.g. " +
+                     "[{\"archetype\": \"fighter\", \"level\": 5, \"count\": 4}]. With encounter: added to its party.")]
+        CombatantSpec[]? party = null,
+        [Description("The enemies: entries with the same fields as party, e.g. [" + EntryExample + "]. With encounter: added to its enemies.")]
+        [SameShapeAs("party")] object? enemies = null,
+        [Description("A stored fight of the campaign as the sides: current (the active one), last (the last ended) or its name. Instead of party and enemies, or with them.")]
+        string? encounter = null,
+        [Description("With encounter (default current): resume the running fight from its live HP, slots, conditions, concentration and turn. Default false.")]
+        [AIParameterName("from_state")] bool? fromState = null,
+        [Description("The campaign of encounter and of character entries, whose ruleset fills editions. Default: the current campaign.")]
+        string? campaign = null,
         [Description("Fights to run, 1-100,000. Default 10,000 (P(win) to about ±1%).")] int? iterations = null,
-        [Description("A seed, 0 to 18446744073709551615, as a number or a decimal string, to repeat a result exactly. Default: a random seed, shown in the result.")]
+        [Description("A seed to repeat a result exactly, 0 to 18446744073709551615 (number or decimal string). Default: a random one, shown in the result.")]
         ulong? seed = null,
         [Description("Rounds before a fight still going is called a draw, 1-100. Default 20.")][AIParameterName("round_cap")] int? roundCap = null,
-        [Description("The fight's rules: \"2014\" or \"2024\" (surprise, exhaustion, concentration). Default: the party's. With a campaign active, entries naming no edition follow this, else the first party entry's, else the active campaign's ruleset.")] string? edition = null,
+        [Description("The fight's rules: \"2014\" or \"2024\" (surprise, exhaustion, concentration). Default: the party's (an encounter's own). With a campaign active, entries naming no edition follow this, else the first party entry's, else the active campaign's ruleset.")] string? edition = null,
         [Description("Who is surprised: \"none\" (default), \"party\" or \"enemies\".")] string? surprise = null,
         [Description("Enemy hit points: \"average\" (default, the stat block's) or \"roll\" (from the hit dice each fight).")]
         [AIParameterName("enemy_hp")] string? enemyHp = null,
@@ -210,7 +223,10 @@ public sealed class SimulateTools
         try
         {
             var work = SimulateAsync(
-                party, enemies, iterations, seed, roundCap, edition, surprise, enemyHp, precision, replay, policies, compare, rulings, pump, call.Token);
+                new SimulateCall(party, enemies, encounter, fromState, campaign, iterations, seed, roundCap, edition, surprise, enemyHp, precision,
+                    replay, policies, compare, rulings),
+                pump,
+                call.Token);
             if (SessionEnded is { } ended && await Task.WhenAny(work, ended) != work)
             {
                 await call.CancelAsync();
@@ -236,31 +252,64 @@ public sealed class SimulateTools
         }
     }
 
+    /// <summary>One call's arguments, as bound.</summary>
+    private sealed record SimulateCall(
+        CombatantSpec[]? Party, object? Enemies, string? Encounter, bool? FromState, string? Campaign, int? Iterations, ulong? Seed, int? RoundCap,
+        string? Edition, string? Surprise, string? EnemyHp, double? Precision, int? Replay, PolicySpec? Policies, object? Compare, RulingsSpec? Rulings);
+
     /// <summary>
-    /// The call itself: resolve the monsters, check the run, wait for the fight threads (<see cref="FightGate"/>), run the
-    /// fights on <see cref="FightThreads"/> threads, render.
+    /// The call itself: read the campaign's part (the encounter, the <c>character</c> entries' sheets) when the call names
+    /// one, resolve the monsters, check the run, wait for the fight threads (<see cref="FightGate"/>), run the fights on
+    /// <see cref="FightThreads"/> threads, render.
     /// </summary>
-    private async Task<string> SimulateAsync(
-        CombatantSpec[] party, object enemies, int? iterations, ulong? seed, int? roundCap, string? edition, string? surprise, string? enemyHp,
-        double? precision, int? replay, PolicySpec? policies, object? compare, RulingsSpec? rulings, ProgressPump? progress,
-        CancellationToken cancellationToken)
+    private async Task<string> SimulateAsync(SimulateCall call, ProgressPump? progress, CancellationToken cancellationToken)
     {
         var sinceCall = System.Diagnostics.Stopwatch.StartNew();
-        var partyEntries = party ?? [];
-        var enemyEntries = Enemies(enemies);
-        var fightEdition = Edition(edition);
-        var campaign = new CampaignEditionFill(_campaigns);
+        var resume = call.FromState ?? false;
+        var fight = string.IsNullOrWhiteSpace(call.Encounter) ? resume ? EncounterResolver.Current : null : call.Encounter;
+        CheckSides(call, fight, resume);
 
-        // With a campaign active, an entry that names no edition takes the call's own first (the fight's, else the first
-        // party entry's) and only then the campaign's ruleset. An edition that is not one is left for the Domain to refuse.
+        var partyEntries = call.Party ?? [];
+        var enemyEntries = Enemies(call.Enemies);
+        var edition = call.Edition;
+        var fightEdition = Edition(edition);
+
+        // The campaign is read only when the call names a part of one (contract §6.11, D7): an encounter, a character entry,
+        // or the campaign itself. Then everything the call takes from a campaign comes from THAT campaign
+        // (CampaignArgumentDefaults), never the active one; otherwise the ambient defaults stand as before.
+        var chosen = fight is not null || HasCharacters(partyEntries) || HasCharacters(enemyEntries) || !string.IsNullOrWhiteSpace(call.Campaign)
+            ? CampaignArgumentDefaults.Mapped(_campaigns, () => CampaignArgumentDefaults.Read(_campaigns, call.Campaign), "the campaign's settings were not read")
+            : null;
+
+        var simulation = fight is null ? null : CallsNameTheCampaign(chosen!, () => new EncounterSimulationLoader(_campaigns.Database).Load(chosen!.Row, fight, resume, call.Rulings));
+
+        // character entries become the build or archetype entries of their sheets (D7) before anything reads an edition: the
+        // fight edition then follows the sheet, as it follows any other first party entry. A sheet that names no ruleset
+        // fights in the encounter's when the call has one (as the encounter's own members do), else in the campaign's. Every
+        // entry's problems are reported together, as the Domain's are.
+        var sheetAssumptions = new List<string>();
+        if (chosen is not null)
+        {
+            var characterEdition = simulation?.Edition ?? SheetFallbackEdition(chosen, fightEdition);
+            var problems = new List<string>();
+            partyEntries = Expand(chosen, partyEntries, "party", characterEdition, sheetAssumptions, problems);
+            enemyEntries = Expand(chosen, enemyEntries, "enemies", characterEdition, sheetAssumptions, problems);
+            DslProblems.ThrowIfAny(problems, "simulation");
+        }
+
+        var campaign = chosen is null ? new CampaignEditionFill(_campaigns) : new CampaignEditionFill(chosen);
+
+        // With a campaign active, an entry that names no edition takes the call's own first (the fight's, else the encounter's,
+        // else the first party entry's) and only then the campaign's ruleset. An edition that is not one is left for the Domain
+        // to refuse.
         if (edition is null || fightEdition is not null)
         {
-            var given = fightEdition ?? PartyEdition(partyEntries);
+            var given = fightEdition ?? simulation?.Edition ?? PartyEdition(partyEntries);
             partyEntries = campaign.Fill(partyEntries, given);
             enemyEntries = campaign.Fill(enemyEntries, given);
         }
 
-        var partyEdition = PartyEdition(partyEntries);
+        var partyEdition = simulation?.Edition ?? PartyEdition(partyEntries);
 
         var sides = new[] { (List: "party", Entries: partyEntries), (List: "enemies", Entries: enemyEntries) };
         var requests = new List<(int Side, int Item, StatBlockRequest Request)>();
@@ -297,26 +346,38 @@ public sealed class SimulateTools
             notes.AddRange(resolved[i].Notes);
         }
 
+        // The encounter's own entries first, then the call's (appended, §6.11); a side left with nobody is refused with the
+        // encounter's notes (who was left out and why) only now, so "this prepared fight against X" works.
+        IReadOnlyList<SimulationCombatant> party = [.. simulation?.Party ?? [], .. Combatants(partyEntries, 0, blocks)];
+        IReadOnlyList<SimulationCombatant> enemies = [.. simulation?.Enemies ?? [], .. Combatants(enemyEntries, 1, blocks)];
+        if (simulation is not null)
+        {
+            CallsNameTheCampaign(chosen!, () => TrackerSimulation.RequireBothSides(party, enemies, simulation.Notes, resume));
+            RefuseTooManyForTheEncounterForm(simulation, party, enemies, resume);
+        }
+
         var spec = new SimulationSpec
         {
-            Party = Combatants(partyEntries, 0, blocks),
-            Enemies = Combatants(enemyEntries, 1, blocks),
-            Iterations = iterations ?? SimulationLimits.DefaultIterations,
-            RoundCap = roundCap ?? SimulationLimits.DefaultRoundCap,
-            Edition = edition,
-            Surprise = surprise,
-            EnemyHp = enemyHp,
-            Precision = precision,
-            Replay = replay,
-            Policies = policies,
-            Compare = Compare(compare),
-            Rulings = rulings,
+            Party = party,
+            Enemies = enemies,
+            Iterations = call.Iterations ?? SimulationLimits.DefaultIterations,
+            RoundCap = call.RoundCap ?? SimulationLimits.DefaultRoundCap,
+            Edition = edition ?? simulation?.Edition,
+            Surprise = call.Surprise,
+            EnemyHp = call.EnemyHp,
+            Precision = call.Precision,
+            Replay = call.Replay,
+            Policies = call.Policies,
+            Compare = Compare(call.Compare),
+            Rulings = call.Rulings,
+            Lair = simulation?.Lair ?? false,
+            Resume = simulation?.Resume,
         };
 
         // Bad input and an oversized run are refused now, not after waiting for another call's fights.
         var prepared = Simulator.Prepare(spec);
-        var seedGiven = seed is not null;
-        var masterSeed = seed ?? RandomSeed();
+        var seedGiven = call.Seed is not null;
+        var masterSeed = call.Seed ?? RandomSeed();
         await WaitForTheFightThreadsAsync(progress, sinceCall, cancellationToken);
         SimulationReport report;
         try
@@ -328,7 +389,219 @@ public sealed class SimulateTools
             FightGate.Release();
         }
 
-        return SimulationMarkdown.Format(report, seedGiven, campaign.WithNote(notes.Distinct(StringComparer.Ordinal).ToList()));
+        // The sheets' own assumption lines (D7: which members used an archetype, how a multiclass was read) go first, in entry
+        // order, whichever form named the character: the encounter's (the loader's) then the call's.
+        IReadOnlyList<string> assumptions = [.. simulation?.Assumptions ?? [], .. sheetAssumptions];
+        if (assumptions.Count > 0)
+        {
+            report = report with { Assumptions = [.. assumptions, .. report.Assumptions] };
+        }
+
+        var resolutionNotes = campaign.WithNote(notes.Distinct(StringComparer.Ordinal).ToList());
+        if (simulation is null)
+        {
+            return SimulationMarkdown.Format(report, seedGiven, resolutionNotes);
+        }
+
+        return SimulationMarkdown.FormatEncounter(report, seedGiven, resolutionNotes, simulation, chosen!.Row.Slug, resume);
+    }
+
+    /// <summary>
+    /// The 40-creature cap (<see cref="SimulationLimits.MaxCombatants"/>) of an encounter form, refused with that form's fix
+    /// (fix F1, review C09). The Domain's own refusal ends "Lower some counts", the explicit call's fix: in the encounter
+    /// form the fight's combatants are the input (no count to lower), and under <c>from_state</c> nothing can be appended
+    /// or left out. The fix there is an explicit call with fewer entries (or, appending, fewer appended). Counted exactly as
+    /// the Domain counts (each entry's count, 1 to 20), so a run this lets through is never refused for its size after.
+    /// </summary>
+    private static void RefuseTooManyForTheEncounterForm(
+        EncounterSimulation simulation, IReadOnlyList<SimulationCombatant> party, IReadOnlyList<SimulationCombatant> enemies, bool resume)
+    {
+        static int Count(IEnumerable<SimulationCombatant?> entries) => entries.Sum(c => Math.Clamp(c?.Spec?.Count ?? 1, 1, SimulationLimits.MaxCount));
+        static string N(int value) => value.ToString(CultureInfo.InvariantCulture);
+
+        var total = Count(party) + Count(enemies);
+        if (total <= SimulationLimits.MaxCombatants)
+        {
+            return;
+        }
+
+        var name = EncounterResolver.Json(simulation.EncounterName);
+        var max = N(SimulationLimits.MaxCombatants);
+        if (resume)
+        {
+            throw DslProblems.Exception(
+                [
+                    $"the live fight {name} has {N(total)} creatures to resume; at most {max} are simulated, and from_state resumes every one of them. " +
+                    "Simulate part of it with an explicit call instead: party and enemies with no encounter or from_state (a fresh fight: a character " +
+                    "entry starts at its sheet's maximum HP).",
+                ],
+                "simulation");
+        }
+
+        var fromEncounter = Count(simulation.Party) + Count(simulation.Enemies);
+        var appended = total - fromEncounter;
+        throw DslProblems.Exception(
+            [
+                $"the fight {name} has {N(total)} combatants to simulate (counting copies" +
+                (appended > 0 ? $": {N(fromEncounter)} from the encounter, {N(appended)} appended" : string.Empty) +
+                $"); at most {max} are simulated, and the encounter form simulates every one of the encounter's. " +
+                (appended > 0 ? "Append fewer, or simulate" : "Simulate") +
+                " part of it with an explicit call instead: party and enemies with no encounter (a character entry plays its sheet).",
+            ],
+            "simulation");
+    }
+
+    /// <summary>
+    /// Runs the encounter's own refusals (the loader's, <see cref="TrackerSimulation.RequireBothSides"/>'s) with every call
+    /// they print naming the campaign last (<see cref="CombatMarkdown.CampaignLastIn"/>): "give hp with combat set (combat
+    /// {…})" is the tracker's, which never knows the slug, and a call sent while another campaign is current must still
+    /// reach this encounter.
+    /// </summary>
+    private static T CallsNameTheCampaign<T>(ResolvedCampaignDefaults chosen, Func<T> read)
+    {
+        try
+        {
+            return read();
+        }
+        catch (DndInputException ex) when (CombatMarkdown.CampaignLastIn(ex.Message, chosen.Row.Slug) is var message && message != ex.Message)
+        {
+            throw new DndInputException(message, ex);
+        }
+    }
+
+    private static void CallsNameTheCampaign(ResolvedCampaignDefaults chosen, Action check) =>
+        CallsNameTheCampaign(chosen, () =>
+        {
+            check();
+            return true;
+        });
+
+    /// <summary>
+    /// The sides the call gives (contract §6.11): <c>party</c> and <c>enemies</c>, or an <c>encounter</c> (to which they are
+    /// appended), never neither; with <c>from_state</c> the fight is resumed exactly as it stands, so nothing is appended and
+    /// nobody is surprised.
+    /// </summary>
+    private static void CheckSides(SimulateCall call, string? fight, bool resume)
+    {
+        var enemiesGiven = call.Enemies is not null and not JsonElement { ValueKind: JsonValueKind.Null or JsonValueKind.Undefined };
+        if (fight is null && (call.Party is null || !enemiesGiven))
+        {
+            throw new DndInputException(
+                $"give party and enemies, or encounter (a stored fight: \"current\", \"last\" or its name); {(call.Party is null && !enemiesGiven ? "neither was given" : call.Party is null ? "party is missing" : "enemies is missing")}. " +
+                $"Example: {Example}");
+        }
+
+        if (resume && (call.Party is not null || enemiesGiven))
+        {
+            throw new DndInputException(
+                "from_state resumes the fight exactly as it stands, so party and enemies cannot be added to it: leave them out, or simulate the encounter " +
+                "without from_state (a fresh fight) to add them.");
+        }
+
+        if (resume && call.Surprise is not null)
+        {
+            throw new DndInputException("from_state resumes a fight already under way, so nobody is surprised: leave surprise out.");
+        }
+    }
+
+    private static bool HasCharacters(CombatantSpec?[] entries) => entries.Any(e => e?.Character is not null);
+
+    /// <summary>
+    /// The edition a sheet that names none is simulated in (D7: the campaign's ruleset); in a mixed campaign, which has
+    /// none, the call's fight edition, else 2024.
+    /// </summary>
+    private static string SheetFallbackEdition(ResolvedCampaignDefaults chosen, string? fightEdition) =>
+        chosen.Edition ?? fightEdition ?? DslValues.Editions.Default;
+
+    /// <summary>
+    /// Each <c>character</c> entry as its sheet's entry (contract D7, P's <see cref="SheetSimulation.Entry"/>): its
+    /// sim_profile as a build, else its main class's archetype at its level, with the sheet's HP, AC, saves and initiative;
+    /// <c>character</c> cleared and <c>name</c> filled (the entity's name unless the call gave one), so the Domain never
+    /// sees a campaign reference. The fields a call gives beside it (level, hp, ac, save_proficiencies, saves,
+    /// initiative_bonus, position, death_saves) replace the sheet's: the call's word wins, as everywhere else, and the
+    /// entry's assumption line names each one as the call gave it, never the sheet's value it replaced (P lays them over,
+    /// so the line and the entry cannot disagree). Each problem goes to <paramref name="problems"/>, naming the item: a
+    /// character beside another source, more than one copy, an edition (the sheet decides), no such character, no sheet,
+    /// and every sheet D7 refuses (with its fix).
+    /// </summary>
+    private CombatantSpec[] Expand(
+        ResolvedCampaignDefaults chosen, CombatantSpec[] entries, string list, string fallbackEdition, List<string> assumptions, List<string> problems)
+    {
+        if (!HasCharacters(entries))
+        {
+            return entries;
+        }
+
+        var expanded = entries.ToArray();
+        var reader = new SheetReader(_campaigns.Database);
+        for (var item = 0; item < entries.Length; item++)
+        {
+            if (entries[item] is not { Character: { } character } entry)
+            {
+                continue;
+            }
+
+            var position = (item + 1).ToString(CultureInfo.InvariantCulture);
+            if (string.IsNullOrWhiteSpace(character))
+            {
+                problems.Add($"{list} item {position}: character is empty; give a campaign character's handle, e.g. \"character:torch\".");
+                continue;
+            }
+
+            var where = $"{list} item {position} ({Echo(character.Trim())})";
+            var before = problems.Count;
+            if (entry.Monster is not null || entry.Build is not null || entry.Archetype is not null)
+            {
+                problems.Add($"{where}: give only one of monster, build, archetype and character.");
+            }
+
+            if (entry.Count is { } count && count != 1)
+            {
+                problems.Add($"{where}: a character is one creature; leave count out.");
+            }
+
+            if (entry.Edition is not null)
+            {
+                problems.Add($"{where}: a character fights under its sheet's ruleset; leave edition out (edition at the top level is the fight's).");
+            }
+
+            if (problems.Count > before)
+            {
+                continue;
+            }
+
+            CharacterSheetRead read;
+            try
+            {
+                read = CampaignArgumentDefaults.Mapped(_campaigns, () => reader.Get(chosen.Row, character.Trim(), Perspective.Author).Characters.Single(),
+                    "the character's sheet was not read");
+            }
+            catch (DndInputException ex)
+            {
+                problems.Add($"{where}: {ex.Message}");
+                continue;
+            }
+
+            if (read.Author?.Sheet is not { } sheet)
+            {
+                problems.Add($"{where}: {read.Name} has no sheet to simulate yet; make one with {SheetMarkdown.UpdateCall(chosen.Row.Slug, read.Ref)}, or leave {read.Name} out.");
+                continue;
+            }
+
+            var name = string.IsNullOrWhiteSpace(entry.Name) ? read.Name : entry.Name.Trim();
+            try
+            {
+                var simulated = SheetSimulation.Entry(sheet, name, fallbackEdition, entry);
+                assumptions.AddRange(simulated.Assumptions);
+                expanded[item] = simulated.Entry with { Character = null };
+            }
+            catch (DndInputException ex)
+            {
+                problems.Add($"{where}: {ex.Message}");
+            }
+        }
+
+        return expanded;
     }
 
     /// <summary>
@@ -364,8 +637,16 @@ public sealed class SimulateTools
         return Math.Max(1, Environment.ProcessorCount - 1);
     }
 
-    /// <summary>A 64-bit seed from the OS's cryptographic generator: the one source of randomness a seedless call has.</summary>
-    internal static ulong RandomSeed() => BinaryPrimitives.ReadUInt64LittleEndian(RandomNumberGenerator.GetBytes(sizeof(ulong)));
+    /// <summary>
+    /// A seed from the OS's cryptographic generator, below 2^53: the one source of randomness a seedless call has. Below 2^53
+    /// because the result tells the model to pass it back as a JSON number, and a JavaScript-based client reads numbers as
+    /// doubles: a drawn 64-bit seed came back rounded (13275752732527329221 as 13275752732527330000) and the "(given)" rerun
+    /// was another set of fights (fix F1, review U10). 53 bits are plenty of seeds; a given seed may still be any 64-bit one.
+    /// </summary>
+    internal static ulong RandomSeed() => BinaryPrimitives.ReadUInt64LittleEndian(RandomNumberGenerator.GetBytes(sizeof(ulong))) & MaxDrawnSeed;
+
+    /// <summary>The largest seed <see cref="RandomSeed"/> draws: 2^53 − 1, the largest integer a double holds exactly.</summary>
+    internal const ulong MaxDrawnSeed = (1UL << 53) - 1;
 
     /// <summary>
     /// <c>enemies</c> as entries. It is published untyped (<see cref="SameShapeAsAttribute"/>) and binds as a
@@ -454,7 +735,7 @@ public sealed class SimulateTools
     /// <summary>"enemies item 1 (Orge)": the item as the Domain's messages and the argument guard count it.</summary>
     private static string Where(string list, int item, CombatantSpec entry)
     {
-        var name = new[] { entry.Name, entry.Monster, entry.Build?.Name, entry.Archetype }.FirstOrDefault(n => !string.IsNullOrWhiteSpace(n));
+        var name = new[] { entry.Name, entry.Character, entry.Monster, entry.Build?.Name, entry.Archetype }.FirstOrDefault(n => !string.IsNullOrWhiteSpace(n));
         var position = (item + 1).ToString(CultureInfo.InvariantCulture);
         return name is null ? $"{list} item {position}" : $"{list} item {position} ({Echo(name.Trim())})";
     }

@@ -576,7 +576,7 @@ public sealed partial class CampaignHistoryToolTests : IAsyncLifetime
     }
 
     private const string HistoryUndoHint =
-        "_To reverse one batch: campaign_history {\"action\": \"undo\", \"batch_id\": \"<batch id>\", \"campaign\": \"sky\", \"dry_run\": true} shows " +
+        "_To reverse one batch: campaign_history {\"action\": \"undo\", \"batch_id\": \"<batch id>\", \"dry_run\": true, \"campaign\": \"sky\"} shows " +
         "what it would change; run it again without dry_run to apply it. An undo is itself a batch (undo it to redo)._";
 
     private WriteResult Upsert(string name, string status) =>

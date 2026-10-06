@@ -1,4 +1,5 @@
 using System.Text.Json;
+using DndMcp.Domain.Characters;
 using DndMcp.Domain.Core;
 using DndMcp.Domain.Features;
 using DndMcp.Domain.Simulation.Archetypes;
@@ -34,6 +35,86 @@ public sealed class ArchetypeCatalogTests
         ["warlock"] = (8, ["wis", "cha"], "back"),
         ["bard"] = (8, ["dex", "cha"], "back"),
     };
+
+    [Theory]
+    [MemberData(nameof(AllMembers))]
+    public void SlotFunded_EachModifiersUsesAreExactlyTheSlotsThatFundIt_AtEveryLevel(string name, string edition, int level)
+    {
+        // C03/U01: a fight resumed from the tracker turns the slots left into these modifiers' uses, so the metadata must be
+        // the archetype's own split of its class table (a slot never counted twice), level by level.
+        var resolved = ArchetypeTestKit.Resolve(name, edition, level);
+        var limited = resolved.SaveEffects.Select(e => (e.Source.Label, e.Resource))
+            .Concat(resolved.Riders.Select(r => (r.Source.Label, r.Resource)))
+            .Concat(resolved.Heals.Select(h => (h.Source.Label, h.Resource)))
+            .ToList();
+        var table = name == "paladin" ? SpellSlotTables.Half(level, edition) : SpellSlotTables.Full(level);
+        var counted = new HashSet<int>();
+
+        foreach (var use in ArchetypeCatalog.SlotFunded(name, edition))
+        {
+            var (_, resource) = limited.SingleOrDefault(l => l.Label == use.Modifier);
+            var slots = table.Select((count, i) => (Level: i + 1, Count: count)).Where(s => use.Funds(s.Level)).ToList();
+            if (resource is null)
+            {
+                continue; // not gained yet at this level
+            }
+
+            Assert.Equal(slots.Sum(s => s.Count) + use.ExtraUses, resource.Uses);
+            Assert.All(slots.Where(s => s.Count > 0), s => Assert.True(counted.Add(s.Level), $"{name} {edition} {level}: the {s.Level} slots fund two modifiers"));
+        }
+    }
+
+    [Theory]
+    [InlineData("cleric")]
+    [InlineData("druid")]
+    [InlineData("warlock")]
+    [InlineData("ranger")]
+    public void SlotCast_EverySpellCastOnceAFight_IsAModifierOrAttackOfTheArchetype_AtSomeLevel(string name)
+    {
+        // CR03: the tracker's loader marks these names unavailable when no slot of their level is left; a name that is no
+        // modifier or attack of the build would silently leave the spell cast.
+        foreach (var edition in new[] { "2014", "2024" })
+        {
+            foreach (var spell in ArchetypeCatalog.SlotCast(name, edition))
+            {
+                var levels = Enumerable.Range(1, 20).Select(level => ArchetypeTestKit.Resolve(name, edition, level))
+                    .Where(r => r.Attacks.Any(a => a.Name == spell.Name) || r.SaveEffects.Any(e => e.Source.Label == spell.Name) ||
+                                r.Riders.Any(x => x.Source.Label == spell.Name) || r.SetupCosts.Any(x => x.Source.Label == spell.Name));
+                Assert.True(levels.Any(), $"{name} {edition}: {spell.Name}");
+            }
+        }
+    }
+
+    [Fact]
+    public void SlotCast_TheOnceAFightSpells_ByClassAndEdition_TheirMainSpellFirst()
+    {
+        // CR03: 2024's Hunter's Mark is Favored Enemy's free cast, so only the 2014 ranger needs a slot for it.
+        Assert.Equal([new SlotCastSpell("Spirit Guardians", 3), new SlotCastSpell("Spiritual Weapon", 2)], ArchetypeCatalog.SlotCast("cleric", "2024"));
+        Assert.Equal([new SlotCastSpell("Call Lightning", 3)], ArchetypeCatalog.SlotCast("Druid", "2014"));
+        Assert.Equal([new SlotCastSpell("Hex", 1)], ArchetypeCatalog.SlotCast("warlock", "2024"));
+        Assert.Equal([new SlotCastSpell("Hunter's Mark", 1)], ArchetypeCatalog.SlotCast("ranger", "2014"));
+        Assert.Empty(ArchetypeCatalog.SlotCast("ranger", "2024"));
+        Assert.Empty(ArchetypeCatalog.SlotCast("wizard", "2014"));
+        Assert.Empty(ArchetypeCatalog.SlotCast("artificer", "2014"));
+        Assert.Equal(["Call Lightning", "Hex", "Hunter's Mark", "Spirit Guardians", "Spiritual Weapon"], ArchetypeCatalog.SlotCastSpells("2014").Select(u => u.Name));
+        Assert.Equal(["Call Lightning", "Hex", "Spirit Guardians", "Spiritual Weapon"], ArchetypeCatalog.SlotCastSpells("2024").Select(u => u.Name));
+    }
+
+    [Fact]
+    public void SlotFunded_TheCastersAndThePaladin_ByName_SimProfileSpellsAreTheirUnion()
+    {
+        Assert.Equal([new SlotFundedUse("Fireball", 3, true)], ArchetypeCatalog.SlotFunded("Wizard", "2014"));
+        Assert.Equal([new SlotFundedUse("Divine Smite", 1, true, 1)], ArchetypeCatalog.SlotFunded("paladin", "2024"));
+        Assert.Equal([new SlotFundedUse("Divine Smite", 1, true)], ArchetypeCatalog.SlotFunded("paladin", "2014"));
+        Assert.Equal([new SlotFundedUse("Shatter", 2, true), new SlotFundedUse("Healing Word", 1, false)], ArchetypeCatalog.SlotFunded("bard", "2024"));
+        Assert.Empty(ArchetypeCatalog.SlotFunded("warlock", "2024"));
+        Assert.Empty(ArchetypeCatalog.SlotFunded("ranger", "2014"));
+        Assert.Empty(ArchetypeCatalog.SlotFunded("artificer", "2014"));
+        Assert.Equal(
+            ["Cure Wounds", "Divine Smite", "Fireball", "Healing Word", "Lightning Bolt", "Shatter"],
+            ArchetypeCatalog.SlotFundedSpells.Select(u => u.Modifier));
+        Assert.All(ArchetypeCatalog.SlotFundedSpells, u => Assert.Equal(0, u.ExtraUses));
+    }
 
     [Fact]
     public void Names_AreTheTwelveClasses_InTheContractsOrder()

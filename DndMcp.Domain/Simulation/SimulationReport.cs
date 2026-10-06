@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace DndMcp.Domain.Simulation;
 
 /// <summary>
@@ -106,6 +108,17 @@ public sealed record SimulationReport
 
     /// <summary>The comparison, when one was asked for.</summary>
     public CompareReport? Compare { get; init; }
+
+    /// <summary>
+    /// The fight was picked up from a live state (<see cref="SimulationSpec.Resume"/>, or an entry's
+    /// <see cref="SimulationCombatant.Start"/>): each combatant's <see cref="CombatantReport.MaxHp"/> is its HP at the start
+    /// rather than its maximum (the host heads the column "HP at start"), hit points lost are counted from there, and with a
+    /// resume the rounds count from the resumed round as round 1 (the assumptions say where it resumed). Left out of the
+    /// JSON when false, so a fresh fight's report serializes exactly as it did before seeding existed
+    /// (<c>SimulationGoldenTests</c> pins that byte for byte).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Resumed { get; init; }
 }
 
 /// <summary>One policy echoed: its field, its value and what the value means.</summary>
@@ -134,7 +147,10 @@ public sealed record CombatantReport
     /// <summary>"monster 2024/monster/ogre", "build \"L5 Fighter\" (level 5)".</summary>
     public required string Source { get; init; }
 
-    /// <summary>Hit points at the start of a fight (the average when enemy HP is rolled).</summary>
+    /// <summary>
+    /// Hit points at the start of a fight (the average when enemy HP is rolled): the maximum in a fresh fight, the live HP
+    /// in a resumed one (<see cref="SimulationReport.Resumed"/>).
+    /// </summary>
     public required double MaxHp { get; init; }
 
     /// <summary>Armor class as compiled (a build's ac modifiers included, cover not).</summary>
@@ -143,7 +159,7 @@ public sealed record CombatantReport
     /// <summary>Makes death saves at 0 HP.</summary>
     public required bool DeathSaves { get; init; }
 
-    /// <summary>Dropped to 0 HP at least once in the fight.</summary>
+    /// <summary>Dropped to 0 HP at least once in the fight (in a resumed fight, starting at 0 HP counts).</summary>
     public required CreatureShare DroppedToZero { get; init; }
 
     /// <summary>Dead at the end of the fight.</summary>
@@ -155,7 +171,7 @@ public sealed record CombatantReport
     /// </summary>
     public required CreatureShare DyingAtEnd { get; init; }
 
-    /// <summary>Hit points lost by the end (all of them when dead), per fight.</summary>
+    /// <summary>Hit points lost by the end (all of them when dead), per fight, from the HP it started with.</summary>
     public required MeanEstimate HpLost { get; init; }
 
     /// <summary>The median of <see cref="HpLost"/>.</summary>
@@ -205,7 +221,7 @@ public sealed record CreatureShare(long Count, long Total)
 }
 
 /// <summary>A limited resource and how much of it a fight used on average.</summary>
-/// <param name="Available">Uses per fight ("recharge" for a recharge action: 0).</param>
+/// <param name="Available">Uses per fight ("recharge" for a recharge action: 0); in a resumed fight, what was left at the resume.</param>
 public sealed record ResourceUsage(string Name, int Available, double MeanUsed);
 
 /// <summary>A stat block's normalization warnings, shown with every result that uses it.</summary>

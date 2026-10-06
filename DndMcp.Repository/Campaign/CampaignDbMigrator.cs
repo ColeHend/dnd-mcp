@@ -28,7 +28,7 @@ public sealed record CampaignMigration(int Version, string Name, string Sql)
 /// <param name="FromVersion">user_version before.</param>
 /// <param name="ToVersion">user_version after.</param>
 /// <param name="Applied">The versions this call applied (empty when current, or when another process did it first).</param>
-/// <param name="Backups">The pre-migration backups this call took.</param>
+/// <param name="Backups">The pre-migration backups this call took (or the identical earlier ones: <see cref="CampaignBackups.PreMigrate"/>).</param>
 /// <param name="JournalMode">What <c>PRAGMA journal_mode=WAL</c> answered ("wal" unless the file system cannot do WAL).</param>
 public sealed record MigrationResult(
     int FromVersion,
@@ -48,7 +48,10 @@ public sealed record MigrationResult(
 /// Why each step:
 /// <list type="bullet">
 /// <item>The backup comes first because <c>VACUUM INTO</c> cannot run inside a transaction, and a failed backup stops
-/// the migration: an update is never attempted without a copy to go back to. A brand-new file has nothing to back up.</item>
+/// the migration: an update is never attempted without a copy to go back to. A brand-new file has nothing to back up. An
+/// attempt that failed after its backup (the write lock held past busy_timeout) leaves it; the next attempt copies the file
+/// again and keeps its copy only when it differs from that one (<see cref="CampaignBackups.PreMigrate"/>), so refused
+/// attempts on an unchanged file leave one backup and the newest one always holds every committed write.</item>
 /// <item>The re-read after BEGIN IMMEDIATE: two server processes often start together (each Claude session spawns one),
 /// both see the same pending version before either takes the write lock, and the second would re-run a script whose
 /// CREATE TABLEs already exist. Holding the lock, the second sees the new version and stops.</item>
@@ -145,7 +148,7 @@ public sealed partial class CampaignDbMigrator
             {
                 try
                 {
-                    taken.Add(backups.Create(CampaignBackups.PreMigrateReason(next.Version), applyRetention: false));
+                    taken.Add(backups.PreMigrate(next.Version));
                 }
                 catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException)
                 {

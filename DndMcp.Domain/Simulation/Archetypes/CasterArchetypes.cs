@@ -82,6 +82,8 @@ internal static class CasterArchetypes
                     action: V.AttackActions.BonusAction, fromLevel: 3, untilLevel: e2024 ? 4 : null),
             ],
             Modifiers = modifiers,
+            SlotFunded = [FirstLevelSlotsFund(HealingWordName)],
+            SlotCast = [new SlotCastSpell("Spirit Guardians", 3), new SlotCastSpell("Spiritual Weapon", 2)],
             Routine = $"Sacred Flame{(e2024 ? " (+Wis from 7)" : string.Empty)}, Spiritual Weapon from 3{(e2024 ? " to 4" : string.Empty)}, " +
                       $"Spirit Guardians from 5, Healing Word ({(e2024 ? "2d4" : "1d4")} + Wis)",
             Notes =
@@ -177,6 +179,8 @@ internal static class CasterArchetypes
             SaveProficiencies = [V.Abilities.Int, V.Abilities.Wis],
             Attacks = [SpellAttack("Produce Flame", V.Abilities.Wis, "1d8", "fire", ranged: true, cantrip: V.Cantrips.Dice)],
             Modifiers = modifiers,
+            SlotFunded = [FirstLevelSlotsFund("Cure Wounds")],
+            SlotCast = [new SlotCastSpell("Call Lightning", 3)],
             Routine = $"Produce Flame{(e2024 ? " (+Wis from 7)" : string.Empty)}, Call Lightning from 5, Cure Wounds ({(e2024 ? "2d8" : "1d8")} + Wis)",
             Notes =
             [
@@ -318,6 +322,7 @@ internal static class CasterArchetypes
                     Setup = V.Setup.BonusAction,
                 },
             ],
+            SlotCast = [new SlotCastSpell("Hex", 1)],
             Routine = "Eldritch Blast (beams 1/2/3/4 at 1/5/11/17) with Agonizing Blast from 2 and Hex (Bonus Action in round 1)",
             Notes =
             [
@@ -385,6 +390,7 @@ internal static class CasterArchetypes
             SaveProficiencies = [V.Abilities.Dex, V.Abilities.Cha],
             Attacks = e2024 ? [SpellAttack("Starry Wisp", V.Abilities.Cha, "1d8", "radiant", ranged: true, cantrip: V.Cantrips.Dice)] : [],
             Modifiers = modifiers,
+            SlotFunded = [new SlotFundedUse("Shatter", 2, OrHigher: true), FirstLevelSlotsFund(HealingWordName)],
             Routine = $"{(e2024 ? "Starry Wisp" : "Vicious Mockery")}, Shatter from 3, Healing Word ({(e2024 ? "2d4" : "1d4")} + Cha)",
             Notes =
             [
@@ -403,6 +409,9 @@ internal static class CasterArchetypes
         string edition, string name, string title, string ability, ModifierSpec area, IReadOnlyList<string> saves, string routine,
         IReadOnlyList<string> notes, IReadOnlyList<ModifierSpec>? extra = null) => new()
     {
+        // The area spell's uses are every slot of 3rd level or higher (its Resource above): the same slots, said once more
+        // for a resumed fight to count down.
+        SlotFunded = [new SlotFundedUse(area.Name!, 3, OrHigher: true)],
         Name = name,
         Title = title,
         Edition = edition,
@@ -440,10 +449,12 @@ internal static class CasterArchetypes
         ],
     };
 
+    private const string HealingWordName = "Healing Word";
+
     private static ModifierSpec HealingWord(bool e2024, string ability) => new()
     {
         Kind = V.Kinds.Heal,
-        Name = "Healing Word",
+        Name = HealingWordName,
         Dice = Lv.Of(e2024 ? "2d4" : "1d4"),
         Amount = Lv.Of(ability),
         ActionCost = V.ActionCosts.BonusAction,
@@ -452,4 +463,7 @@ internal static class CasterArchetypes
 
     // The 1st-level slots of a full caster: 2, 3 at 2, 4 from 3.
     private static ResourceSpec FirstLevelSlots() => Resource(1, l => SpellSlots.FullExactly(l, 1), V.Rests.LongRest);
+
+    // The heal that FirstLevelSlots funds: exactly the 1st-level slots.
+    private static SlotFundedUse FirstLevelSlotsFund(string modifier) => new(modifier, 1, OrHigher: false);
 }

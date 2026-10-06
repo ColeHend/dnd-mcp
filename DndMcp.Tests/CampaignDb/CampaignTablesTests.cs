@@ -139,6 +139,10 @@ public sealed class CampaignTablesTests : IDisposable
     [InlineData("objective", "quest_id", null)]
     [InlineData("clock", "entity_id", null)]
     [InlineData("beat_edge", "from_beat_id", "to_beat_id")]
+    [InlineData("character_sheet", "entity_id", null)]
+    [InlineData("holding", "holder_id", "item_id")]
+    [InlineData("currency_txn", "holder_id", "session_id")]
+    [InlineData("award", "recipient_id", "session_id")]
     public void Catalogue_EntityColumns_FollowTheContract(string table, string? entity, string? other)
     {
         var meta = CampaignTables.Get(table);
@@ -147,17 +151,81 @@ public sealed class CampaignTablesTests : IDisposable
         Assert.Equal(other, meta.OtherEntityColumn);
     }
 
-    /// <summary>Only the free-form objects log per key; only updated_at and the live log go unlogged.</summary>
+    /// <summary>
+    /// Only the free-form objects and the sheet's keyed trackers log per key; only updated_at and the live log go unlogged.
+    /// A sheet tracker logged whole would make a later rest that touched the 1st-level slots block undoing the fight that
+    /// spent a 3rd-level one; an updated_at logged would make every write to a sheet or holding conflict with every other.
+    /// </summary>
     [Fact]
     public void Catalogue_PerKeyAndUnloggedColumns_AreExactlyTheIntendedOnes()
     {
         var perKey = CampaignTables.All.SelectMany(t => t.Columns.Where(c => c.LoggedPerKey).Select(c => $"{t.Name}.{c.Name}"));
         var unlogged = CampaignTables.All.SelectMany(t => t.Columns.Where(c => !c.Logged).Select(c => $"{t.Name}.{c.Name}"));
 
-        Assert.Equal(new[] { "campaign.settings", "entity.data", "relation.data", "session.data" }, perKey);
         Assert.Equal(
-            new[] { "campaign.updated_at", "entity.updated_at", "relation.updated_at", "fact.updated_at", "knowledge.updated_at", "session.live_log", "objective.updated_at" },
+            new[]
+            {
+                "campaign.settings", "entity.data", "relation.data", "session.data", "character_sheet.abilities", "character_sheet.hit_dice",
+                "character_sheet.spell_slots", "character_sheet.resources",
+            },
+            perKey);
+        Assert.Equal(
+            new[]
+            {
+                "campaign.updated_at", "entity.updated_at", "relation.updated_at", "fact.updated_at", "knowledge.updated_at", "session.live_log",
+                "objective.updated_at", "character_sheet.updated_at", "holding.updated_at",
+            },
             unlogged);
+    }
+
+    /// <summary>
+    /// The combat tracker's tables are deliberately unlogged (HP ticks are not history; the write-back is one logged batch),
+    /// and the four Phase 7 tables that are history are logged: a table on the wrong list either floods change_log with
+    /// every hit point or loses the loot an undo should take back.
+    /// </summary>
+    [Theory]
+    [InlineData("character_sheet", true)]
+    [InlineData("holding", true)]
+    [InlineData("currency_txn", true)]
+    [InlineData("award", true)]
+    [InlineData("encounter", false)]
+    [InlineData("combatant", false)]
+    [InlineData("combat_log", false)]
+    public void Catalogue_Phase7Tables_AreLoggedExactlyWhenTheyAreHistory(string table, bool logged)
+    {
+        Assert.Equal(logged, CampaignTables.TryGet(table, out _));
+        Assert.Equal(!logged, CampaignTables.NotLogged.Contains(table));
+    }
+
+    /// <summary>
+    /// Undo, the recorder and replay bind keys as strings: a logged table keyed by an INTEGER (research's currency_txn seq)
+    /// could never be undone. Every logged table's key columns are TEXT.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(LoggedTables))]
+    public void Catalogue_KeyColumns_AreText(string table)
+    {
+        var meta = CampaignTables.Get(table);
+
+        Assert.All(meta.KeyColumns, k => Assert.Equal(CampaignColumnType.Text, meta.Column(k).Type));
+    }
+
+    /// <summary>
+    /// Undo reverses one logged column at a time, so a CHECK spanning two columns of a logged table could refuse a state
+    /// on the way back that never existed. 0002's logged tables have none; the combatant's hp &lt;= max_hp is fine because
+    /// combatants are not logged (and shows the pattern finds a table-level CHECK when there is one).
+    /// </summary>
+    [Theory]
+    [InlineData("character_sheet", false)]
+    [InlineData("holding", false)]
+    [InlineData("currency_txn", false)]
+    [InlineData("award", false)]
+    [InlineData("combatant", true)]
+    public void Schema_TableLevelCheck_OnlyOnTheUnloggedCombatant(string table, bool expected)
+    {
+        var sql = _connection.ExecuteScalar<string>("SELECT sql FROM sqlite_master WHERE name = @table", new { table })!;
+
+        Assert.Equal(expected, Regex.IsMatch(sql, @"(?m)^\s*CHECK\s*\("));
     }
 
     [Theory]
@@ -174,11 +242,14 @@ public sealed class CampaignTablesTests : IDisposable
         Assert.Equal(key, meta.ParseTargetId(targetId));
     }
 
-    [Fact]
-    public void Get_UnknownTable_ThrowsNamingTheTables()
+    [Theory]
+    [InlineData("dice_roll")]
+    [InlineData("combatant")]
+    public void Get_UnknownTable_ThrowsNamingTheTables(string table)
     {
-        var error = Assert.Throws<ArgumentException>(() => CampaignTables.Get("dice_roll"));
+        var error = Assert.Throws<ArgumentException>(() => CampaignTables.Get(table));
 
         Assert.Contains("entity", error.Message);
+        Assert.Contains("character_sheet", error.Message);
     }
 }

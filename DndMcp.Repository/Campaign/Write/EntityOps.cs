@@ -118,6 +118,7 @@ internal static class EntityOps
             ["source"] = s.Source?.Trim(),
         }, o.Op);
         var entity = b.EntityById((string)row["id"]!)!;
+        SheetShadow(b, o, entity);
         b.PlayerText.EntityCreated(entity.Id, o.Index);
         var fields = CampaignOpFields.All.Where(f => f.IsGiven(s) && f.Name is not ("op" or "known_by" or "aliases" or "remove_aliases" or "tags" or "remove_tags" or "clock"))
             .Select(f => f.Name).ToList();
@@ -231,6 +232,7 @@ internal static class EntityOps
         if (data is not null)
         {
             changes["data"] = data;
+            SheetShadow(b, o, e);
         }
 
         if (e.Kind == CV.Kinds.Rule && subtype == CV.Subtypes.RevealRule && (s.Data is not null || s.Subtype is not null))
@@ -252,6 +254,38 @@ internal static class EntityOps
 
         b.Applied.Add(new AppliedOp(o.Index, o.Op, WriteBatch.Ref(updated), fields.Count == 0 ? WriteOutcomes.Unchanged : WriteOutcomes.Updated,
             fields.Distinct().ToList(), updated.Code));
+    }
+
+    /// <summary>
+    /// The data keys a character sheet owns (Phase 7): written into a character's <c>data</c> they shadow the sheet, which
+    /// <c>campaign_character</c> keeps typed and checked; nothing reads them from data.
+    /// </summary>
+    public static readonly IReadOnlyList<string> SheetShadowKeys = ["level", "hp", "max_hp", "ac", "xp", "classes", "spell_slots"];
+
+    /// <summary>
+    /// The advisory warning when an upsert's data on a character sets a key a sheet owns (<see cref="SheetShadowKeys"/>;
+    /// a key set to null, which removes it, is not one), pointing at the call that sets the sheet instead. The write is
+    /// applied: data stays the author's to fill.
+    /// </summary>
+    private static void SheetShadow(WriteBatch b, OpScope o, EntityRow entity)
+    {
+        if (entity.Kind != CV.Kinds.Character || o.Spec.Data is not { } data)
+        {
+            return;
+        }
+
+        var keys = SheetShadowKeys
+            .Where(k => data.Any(p => string.Equals(p.Key, k, StringComparison.OrdinalIgnoreCase) && p.Value.ValueKind != JsonValueKind.Null))
+            .ToList();
+        if (keys.Count == 0)
+        {
+            return;
+        }
+
+        b.Warnings.Add(new WriteWarning(WarningKinds.SheetShadow, WarningSeverities.Advisory,
+            $"{string.Join(", ", keys.Select(k => "data." + k))} on {WriteBatch.Ref(entity)} shadow{(keys.Count == 1 ? "s" : string.Empty)} its character sheet: data " +
+            "is notes that no tool reads as the sheet. Set the sheet with campaign_character {\"action\": \"update\", \"character\": " +
+            $"\"{WriteBatch.Ref(entity)}\", \"sheet\": {{\"{keys[0]}\": …}}, \"campaign\": \"{b.Campaign.Slug}\"}}.", o.Index));
     }
 
     /// <summary>Soft-deletes or restores an entity or a fact (its handles, slug and code stay reserved).</summary>

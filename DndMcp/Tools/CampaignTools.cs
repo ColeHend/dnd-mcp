@@ -82,7 +82,7 @@ public sealed class CampaignTools
             [ActionUpdate] = new(
                 ["campaign", "name", "status", "ruleset", "dm_name", "settings", "summary_md", "current_location", "current_ingame", "my_character",
                     "reason", "session", "dry_run"],
-                [], "{\"action\": \"update\", \"campaign\": \"belmakor\", \"current_ingame\": \"3rd of Frostmoon\"}"),
+                [], "{\"action\": \"update\", \"current_ingame\": \"3rd of Frostmoon\", \"campaign\": \"belmakor\"}"),
             [ActionUse] = new(["campaign"], ["campaign"], "{\"action\": \"use\", \"campaign\": \"belmakor\"}"),
         };
 

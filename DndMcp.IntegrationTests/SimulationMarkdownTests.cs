@@ -25,13 +25,14 @@ public sealed class SimulationMarkdownTests
     }
 
     [Fact]
-    public void Format_WithoutASeed_SaysHowToReproduceWithTheSeedAsAString()
+    public void Format_WithoutASeed_SaysHowToReproduceWithTheSeedAsANumber()
     {
-        var text = SimulationMarkdown.Format(Report(5, 10, seed: 18_446_744_073_709_551_615), seedGiven: false, notes: []);
+        // A drawn seed is below 2^53 (fix F1, U10), so it is passed back as the JSON number the schema takes.
+        var text = SimulationMarkdown.Format(Report(5, 10, seed: 9_007_199_254_740_991), seedGiven: false, notes: []);
 
-        Assert.Contains("seed 18446744073709551615 (random)*", text, StringComparison.Ordinal);
+        Assert.Contains("seed 9007199254740991 (random)*", text, StringComparison.Ordinal);
         Assert.EndsWith(
-            "Seed 18446744073709551615 (drawn at random): pass \"seed\": \"18446744073709551615\" with the same arguments to reproduce " +
+            "Seed 9007199254740991 (drawn at random): pass \"seed\": 9007199254740991 with the same arguments to reproduce " +
             "this result exactly.\n", text, StringComparison.Ordinal);
     }
 

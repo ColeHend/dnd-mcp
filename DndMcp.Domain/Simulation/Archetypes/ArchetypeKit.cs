@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using DndMcp.Domain.Characters;
 using DndMcp.Domain.Features;
 using V = DndMcp.Domain.Features.DslValues;
 
@@ -228,8 +229,13 @@ internal sealed class AbilityTrack
 /// </summary>
 internal static class ArchetypeHitPoints
 {
+    /// <summary>
+    /// The archetype's maximum: <see cref="LevelHitPoints.FixedTotal"/> for one class, which is the sheet's derivation
+    /// too, with no 2024 per-level minimum (an archetype's Con is never low enough for it to matter, and an archetype's HP
+    /// must not change with the edition).
+    /// </summary>
     public static int At(int hitDie, int level, int conModifier) =>
-        hitDie + (level - 1) * (hitDie / 2 + 1) + level * conModifier;
+        LevelHitPoints.FixedTotal([(hitDie, level)], conModifier, minimumOnePerLevel: false);
 }
 
 /// <summary>Armour weight categories (training decides which a class may wear).</summary>
@@ -328,36 +334,18 @@ internal sealed record ArmorPlan(
 }
 
 /// <summary>
-/// Spell slots by class level (the SRD class tables; identical in 2014 and 2024 for full casters, and for half casters
-/// from level 2 — the 2024 paladin also has two 1st-level slots at level 1). The DSL has no shared slot pool, so each
-/// spell modifier gets its own uses from these counts, split so no slot is counted twice (see each archetype).
+/// Spell slots by class level for the archetypes, read from <see cref="SpellSlotTables"/> (the SRD class tables, which the
+/// character sheet uses too, so an archetype and a sheet of the same class and level have the same slots). The DSL has no
+/// shared slot pool, so each spell modifier gets its own uses from these counts, split so no slot is counted twice (see
+/// each archetype).
 /// </summary>
 internal static class SpellSlots
 {
-    // Rows: class level 1–20; columns: slot levels 1–9.
-    private static readonly int[][] Full =
-    [
-        [2], [3], [4, 2], [4, 3], [4, 3, 2], [4, 3, 3], [4, 3, 3, 1], [4, 3, 3, 2], [4, 3, 3, 3, 1], [4, 3, 3, 3, 2],
-        [4, 3, 3, 3, 2, 1], [4, 3, 3, 3, 2, 1], [4, 3, 3, 3, 2, 1, 1], [4, 3, 3, 3, 2, 1, 1], [4, 3, 3, 3, 2, 1, 1, 1],
-        [4, 3, 3, 3, 2, 1, 1, 1], [4, 3, 3, 3, 2, 1, 1, 1, 1], [4, 3, 3, 3, 3, 1, 1, 1, 1], [4, 3, 3, 3, 3, 2, 1, 1, 1],
-        [4, 3, 3, 3, 3, 2, 2, 1, 1],
-    ];
-
-    // Paladin and ranger from level 2; the empty level 1 row only keeps the index (level 1 differs by edition: none in
-    // 2014, two 1st-level slots in 2024; HalfTotal refuses it).
-    private static readonly int[][] Half =
-    [
-        [], [2], [3], [3], [4, 2], [4, 2], [4, 3], [4, 3], [4, 3, 2], [4, 3, 2],
-        [4, 3, 3], [4, 3, 3], [4, 3, 3, 1], [4, 3, 3, 1], [4, 3, 3, 2], [4, 3, 3, 2], [4, 3, 3, 3, 1], [4, 3, 3, 3, 1],
-        [4, 3, 3, 3, 2], [4, 3, 3, 3, 2],
-    ];
-
     /// <summary>A full caster's slots of <paramref name="slotLevel"/> or higher at <paramref name="classLevel"/>.</summary>
-    public static int FullAtOrAbove(int classLevel, int slotLevel) => Full[classLevel - 1].Skip(slotLevel - 1).Sum();
+    public static int FullAtOrAbove(int classLevel, int slotLevel) => SpellSlotTables.Full(classLevel).Skip(slotLevel - 1).Sum();
 
     /// <summary>A full caster's slots of exactly <paramref name="slotLevel"/>.</summary>
-    public static int FullExactly(int classLevel, int slotLevel) =>
-        Full[classLevel - 1].Length >= slotLevel ? Full[classLevel - 1][slotLevel - 1] : 0;
+    public static int FullExactly(int classLevel, int slotLevel) => new SlotRow(SpellSlotTables.Full(classLevel), null).At(slotLevel);
 
     /// <summary>
     /// A half caster's slots of every level, from class level 2, where the editions' tables agree. Level 1 is refused
@@ -369,6 +357,6 @@ internal static class SpellSlots
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(classLevel, 2);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(classLevel, DslLimits.MaxLevel);
-        return Half[classLevel - 1].Sum();
+        return SpellSlotTables.Half(classLevel, V.Editions.E2024).Sum();
     }
 }

@@ -80,15 +80,39 @@ public sealed partial class SimulateToolTests : IClassFixture<McpServerHarness>
         var drawn = await Simulate(arguments + "}");
         var seed = SeedHintRegex().Match(drawn);
         Assert.True(seed.Success, drawn);
-        var again = await Simulate(arguments + $$""", "seed": "{{seed.Groups[1].Value}}"}""");
+
+        // Fix F1, U10: the drawn seed is printed as a JSON number below 2^53, so a client that reads numbers as doubles
+        // passes back the very seed it was shown (a 64-bit one came back rounded: another fight set, "(given)").
+        Assert.True(ulong.Parse(seed.Groups[1].Value, CultureInfo.InvariantCulture) < 1UL << 53, drawn);
+        var again = await Simulate(arguments + $$""", "seed": {{seed.Groups[1].Value}}}""");
 
         // Everything but the seed's own wording is identical: the headline, every table cell, the assumptions.
         Assert.Equal(WithoutSeedLines(drawn), WithoutSeedLines(again));
         Assert.Contains($"seed {seed.Groups[1].Value} (random)*", drawn, StringComparison.Ordinal);
+        Assert.Contains($"Seed {seed.Groups[1].Value} (given)", again, StringComparison.Ordinal);
     }
 
-    [GeneratedRegex("""pass "seed": "(\d+)" with the same arguments to reproduce this result exactly\.""")]
+    [GeneratedRegex("""pass "seed": (\d+) with the same arguments to reproduce this result exactly\.""")]
     private static partial Regex SeedHintRegex();
+
+    [Fact]
+    public void RandomSeed_EveryDraw_IsBelowTwoToThe53()
+    {
+        // A JSON number above 2^53 is rounded by a JavaScript client: a drawn seed must survive the trip back exactly.
+        for (var i = 0; i < 10_000; i++)
+        {
+            Assert.InRange(Tools.SimulateTools.RandomSeed(), 0UL, (1UL << 53) - 1);
+        }
+    }
+
+    [Fact]
+    public async Task SeedSchema_SaysANumberOrADecimalString()
+    {
+        var seed = (await _server.Client.ListToolsAsync()).Single(t => t.Name == Tool).JsonSchema.GetProperty("properties").GetProperty("seed");
+
+        Assert.StartsWith("A seed to repeat a result exactly, 0 to 18446744073709551615 (number or decimal string).", seed.GetProperty("description").GetString(),
+            StringComparison.Ordinal);
+    }
 
     private static string WithoutSeedLines(string text) =>
         string.Join("\n", text.Split('\n').Where(l => !l.Contains("seed", StringComparison.OrdinalIgnoreCase)));
@@ -632,5 +656,596 @@ public sealed partial class SimulateToolTests : IClassFixture<McpServerHarness>
                 _reports.Add(value);
             }
         }
+    }
+}
+
+/// <summary>
+/// Invariant: <c>balance_simulate {encounter}</c> fights a stored fight (contract §6.11): its party-side combatants from
+/// their CURRENT sheets (D7) and its enemies from their snapshots, the call's own <c>party</c> and <c>enemies</c>
+/// appended, and the report after the encounter's notes block equals, byte for byte, the report of the equivalent explicit
+/// call (the same seed and entries, each sheet-seeded member as a <c>character</c> entry named by its tracker name);
+/// <c>from_state</c> resumes the running fight from its live state, deterministically; a <c>character</c> entry is its
+/// sheet's entry (the Domain never sees a campaign reference), refused with the fix when the sheet cannot fight; and the
+/// tool stays read-only throughout.
+/// </summary>
+public sealed class SimulateToolEncounterTests : IAsyncLifetime
+{
+    private const string Report = "# Fight simulation: ";
+
+    private readonly McpServerHarness _server = new();
+
+    public async Task InitializeAsync()
+    {
+        await _server.InitializeAsync();
+        await Campaign.CharacterToolSetup.CreateDeepAsync(_server);
+    }
+
+    public Task DisposeAsync() => _server.DisposeAsync();
+
+    private Task<string> Simulate(string argumentsJson) => SimulateToolTests.SimulateAsync(_server, argumentsJson);
+
+    private async Task<string> Refused(string argumentsJson) => _server.ErrorText(await _server.CallToolJsonAsync("balance_simulate", argumentsJson));
+
+    private Task<string> Combat(string argumentsJson) => Campaign.ScenarioCalls.Call(_server, "combat", argumentsJson);
+
+    // The report an encounter-form result carries, its notes block dropped (contract §6.11: "tests strip it").
+    private static string ReportOf(string text)
+    {
+        var at = text.IndexOf(Report, StringComparison.Ordinal);
+        Assert.True(at > 0, text);
+        return text[at..];
+    }
+
+    private async Task ReefAsync(bool initiative = false)
+    {
+        await Combat("""{"action": "start", "name": "Reef", "campaign": "deep", "combatants": [{"srd": "2024/monster/ogre", "count": 2}, {"srd": "Ogre", "name": "Grumm"}]}""");
+        if (initiative)
+        {
+            await Combat("""
+                {"action": "initiative", "rolls": [{"combatant": "bjorn-mountainfell", "face": 15}, {"combatant": "kaz", "total": 12},
+                  {"combatant": "ogre", "total": 10}, {"combatant": "grumm", "total": 3}]}
+                """);
+        }
+    }
+
+    [Fact]
+    public async Task Encounter_FreshFight_IsTheExplicitCallsReportAfterItsNotes()
+    {
+        await ReefAsync();
+
+        var encounter = await Simulate("""{"encounter": "current", "iterations": 300, "seed": 7}""");
+        var explicitCall = await Simulate("""
+            {"party": [{"character": "character:bjorn-mountainfell"}], "enemies": [{"monster": "2024/monster/ogre", "count": 3}],
+             "iterations": 300, "seed": 7, "campaign": "deep"}
+            """);
+
+        Assert.Equal(
+            "# Encounter \"Reef\" as a simulation\n\n" +
+            "deep · active · 2024 rules · as a fresh fight from its combatants. The report below is the one an explicit call with the same " +
+            "entries and seed gives; these notes are this encounter's own.\n\n" +
+            "- Kaz is left out: it has no sheet in the fight and no stat block (give character:kaz a sheet with campaign_character update, then re-seed it: " +
+            "combat {\"action\": \"add\", \"combatants\": [{\"character\": \"character:kaz\"}], \"campaign\": \"deep\"}; or add it with srd).\n\n",
+            encounter[..encounter.IndexOf(Report, StringComparison.Ordinal)]);
+        Assert.Equal(explicitCall, ReportOf(encounter));
+        Assert.StartsWith("# Fight simulation: Björn Mountainfell vs Ogre ×3\n", explicitCall, StringComparison.Ordinal);
+        Assert.Contains("| Björn Mountainfell | party | archetype barbarian (level 8, 2024) | 15 | 85.0 |", explicitCall, StringComparison.Ordinal);
+        Assert.Contains(
+            "### Assumptions\n\n- Björn Mountainfell: no sim_profile, simulated as the level 8 barbarian archetype (2024), with the sheet's HP 85, AC 15, " +
+            "save proficiencies Str, Con; its attacks follow the archetype's ability plan (store a sim_profile for the character's own).\n",
+            explicitCall, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Encounter_TrackerNameUnlikeTheEntitys_EqualsTheExplicitCallThatNamesTheCharacterSo()
+    {
+        await Combat("""{"action": "start", "name": "Den", "campaign": "deep", "add_party": false, "combatants": [{"character": "character:bjorn-mountainfell", "name": "The Bear"}, {"srd": "2024/monster/ogre"}]}""");
+
+        var encounter = await Simulate("""{"encounter": "Den", "iterations": 200, "seed": 3}""");
+        var explicitCall = await Simulate("""
+            {"party": [{"character": "character:bjorn-mountainfell", "name": "The Bear"}], "enemies": [{"monster": "2024/monster/ogre"}],
+             "iterations": 200, "seed": 3, "campaign": "deep"}
+            """);
+
+        Assert.Equal(explicitCall, ReportOf(encounter));
+        Assert.Contains("- The Bear: no sim_profile, simulated as the level 8 barbarian archetype (2024)", explicitCall, StringComparison.Ordinal);
+        Assert.Contains("\nEvery combatant of the encounter is in the fight below.\n\n# Fight simulation: The Bear vs Ogre\n", encounter, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Encounter_TheCallsPartyAndEnemies_AreAppendedAfterTheEncounters()
+    {
+        await ReefAsync();
+
+        var encounter = await Simulate("""
+            {"encounter": "current", "party": [{"archetype": "cleric", "level": 8}], "enemies": [{"monster": "Ogre", "name": "Late ogre"}],
+             "iterations": 200, "seed": 5}
+            """);
+        var explicitCall = await Simulate("""
+            {"party": [{"character": "character:bjorn-mountainfell"}, {"archetype": "cleric", "level": 8}],
+             "enemies": [{"monster": "2024/monster/ogre", "count": 3}, {"monster": "Ogre", "name": "Late ogre"}],
+             "iterations": 200, "seed": 5, "campaign": "deep"}
+            """);
+
+        Assert.Equal(explicitCall, ReportOf(encounter));
+        Assert.StartsWith("# Fight simulation: Björn Mountainfell, Cleric vs Ogre ×3, Late ogre\n", explicitCall, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Encounter_APlannedFightWithNoParty_FightsTheCampaignsCurrentParty()
+    {
+        await Combat("""{"action": "prepare", "name": "Ambush", "campaign": "deep", "combatants": [{"srd": "2024/monster/ogre", "count": 2}]}""");
+
+        var text = await Simulate("""{"encounter": "Ambush", "campaign": "deep", "iterations": 200, "seed": 1}""");
+
+        Assert.StartsWith("# Encounter \"Ambush\" as a simulation\n\ndeep · planned · 2024 rules · as a fresh fight from its combatants.", text, StringComparison.Ordinal);
+        Assert.Contains("\n- The party is the campaign's current party (Björn Mountainfell, Kaz): the encounter has no party combatants yet.\n", text,
+            StringComparison.Ordinal);
+        Assert.Contains("\n- Kaz is left out: no sheet (give it one with campaign_character update).\n", text, StringComparison.Ordinal);
+        Assert.Contains("\n# Fight simulation: Björn Mountainfell vs Ogre ×2\n", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Encounter_ASideLeftEmpty_IsRefusedWithTheNotes_UntilTheCallGivesIt()
+    {
+        await Combat("""{"action": "start", "name": "Lone", "campaign": "deep", "add_party": false, "combatants": [{"srd": "2024/monster/ogre"}, {"name": "Crab", "hp": 5, "ac": 10, "side": "ally"}]}""");
+
+        var refused = await Refused("""{"encounter": "Lone", "seed": 1, "iterations": 100}""");
+        var given = await Simulate("""{"encounter": "Lone", "party": [{"archetype": "fighter", "level": 5}], "seed": 1, "iterations": 100}""");
+
+        Assert.Equal(
+            "An error occurred invoking 'balance_simulate': The encounter has no party to simulate (Crab is left out: a custom combatant has no stat " +
+            "block (add it with srd to simulate it).): add party members with sheets (combat add with character), or give party in the call.",
+            refused);
+        Assert.Contains("\n# Fight simulation: Fighter vs Ogre\n", given, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Encounter_TheFightsEdition_IsTheEncounters_NotItsFirstSheets()
+    {
+        // Björn's sheet follows the 2014 rules; the fight he is in was started under deep's 2024 rules: the fight is 2024.
+        await Campaign.ScenarioCalls.Call(_server, "campaign_character", """{"action": "update", "campaign": "deep", "character": "character:bjorn-mountainfell", "sheet": {"ruleset": "2014"}}""");
+        await Combat("""{"action": "start", "name": "Den", "campaign": "deep", "add_party": false, "combatants": [{"character": "character:bjorn-mountainfell"}, {"srd": "2024/monster/ogre"}]}""");
+
+        var text = await Simulate("""{"encounter": "Den", "iterations": 100, "seed": 3}""");
+
+        Assert.Contains("| Björn Mountainfell | party | archetype barbarian (level 8, 2014) |", text, StringComparison.Ordinal);
+        Assert.Contains("*2024 rules · 100 fights", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Encounter_ACharacterTheCallAppends_FightsUnderTheEncountersRuleset()
+    {
+        // deep is a 2024 campaign; this fight runs under the 2014 rules, and Björn's sheet names no ruleset: appended to it, he
+        // fights as the encounter's own members would, in 2014.
+        await Combat("""{"action": "start", "name": "Old road", "campaign": "deep", "edition": "2014", "add_party": false, "combatants": [{"srd": "Ogre"}]}""");
+
+        var text = await Simulate("""{"encounter": "Old road", "party": [{"character": "character:bjorn-mountainfell"}], "iterations": 100, "seed": 3}""");
+
+        Assert.Contains("| Björn Mountainfell | party | archetype barbarian (level 8, 2014) |", text, StringComparison.Ordinal);
+        Assert.Contains("| Ogre | enemy | monster 2014/monster/ogre |", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Encounter_FoughtInALair_SimulatesTheInLairCountsAndSaysSo()
+    {
+        await Combat("""{"action": "start", "name": "Station", "campaign": "deep", "lair": true, "combatants": [{"srd": "2024/monster/aboleth"}]}""");
+
+        var text = await Simulate("""{"encounter": "current", "iterations": 100, "seed": 2}""");
+
+        Assert.StartsWith("# Encounter \"Station\" as a simulation\n\ndeep · active · 2024 rules · in a lair · as a fresh fight", text, StringComparison.Ordinal);
+        Assert.Contains("\n- Fought in a lair: in-lair legendary counts are simulated; lair actions are not.\n", text, StringComparison.Ordinal);
+        Assert.Contains("- In a lair: legendary action and Legendary Resistance counts are the in-lair ones where the stat block has them", text,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A lair fight has no explicit form (contract §6.11: "A lair encounter is pinned in the encounter form only"):
+    /// balance_simulate takes no lair, so the same entries given explicitly fight outside it, with other legendary counts and
+    /// another report. Its notes say so, worded as from_state's are, and never claim the explicit call's report, which would
+    /// send the model after a report no call it can make reproduces (stage-5 X2 finding).
+    /// </summary>
+    [Fact]
+    public async Task Encounter_FoughtInALair_ClaimsNoExplicitForm_TheSameEntriesGivenExplicitlyReportOtherwise()
+    {
+        await Combat("""
+            {"action": "start", "name": "Station", "campaign": "deep", "lair": true, "add_party": false,
+             "combatants": [{"character": "character:bjorn-mountainfell"}, {"srd": "2024/monster/aboleth"}]}
+            """);
+
+        var encounter = await Simulate("""{"encounter": "current", "iterations": 300, "seed": 2}""");
+        var explicitCall = await Simulate("""
+            {"party": [{"character": "character:bjorn-mountainfell"}], "enemies": [{"monster": "2024/monster/aboleth"}], "iterations": 300, "seed": 2, "campaign": "deep"}
+            """);
+
+        Assert.Equal(
+            "# Encounter \"Station\" as a simulation\n\n" +
+            "deep · active · 2024 rules · in a lair · as a fresh fight from its combatants. No explicit call can put a fight in a lair, so this report has " +
+            "no explicit form; the same call with the same seed repeats it. These notes are this encounter's own.\n\n" +
+            "- Fought in a lair: in-lair legendary counts are simulated; lair actions are not.\n\n",
+            encounter[..encounter.IndexOf(Report, StringComparison.Ordinal)]);
+        Assert.NotEqual(explicitCall, ReportOf(encounter));
+        Assert.Contains("- In a lair: legendary action and Legendary Resistance counts are the in-lair ones", ReportOf(encounter), StringComparison.Ordinal);
+        Assert.Contains("- No lair actions: the fight is not in a lair", explicitCall, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FromState_ResumesTheLiveFight_FromItsHitPointsAndTurn_TheSameSeedTwiceAlike()
+    {
+        await ReefAsync(initiative: true);
+        await Combat("""{"action": "damage", "targets": ["ogre"], "amount": 30, "source": "bjorn-mountainfell"}""");
+
+        var first = await Simulate("""{"from_state": true, "iterations": 300, "seed": 7}""");
+        var second = await Simulate("""{"encounter": "current", "from_state": true, "iterations": 300, "seed": 7}""");
+
+        Assert.Equal(first, second);
+        Assert.StartsWith("# Encounter \"Reef\" as a simulation\n\ndeep · active · 2024 rules · resumed from its live state (HP, conditions, concentration, " +
+                          "uses left, the turn). No explicit call can resume a fight, so this report has no explicit form; the same call with the same " +
+                          "seed repeats it. These notes are this encounter's own.\n", first, StringComparison.Ordinal);
+        Assert.DoesNotContain("an explicit call with the same entries and seed gives", first, StringComparison.Ordinal);
+        Assert.Contains("| Combatant | Side | From | AC | HP at start | Dropped to 0 |", first, StringComparison.Ordinal);
+        Assert.Contains("| Ogre | enemy | monster 2024/monster/ogre | 11 | 38.0 |", first, StringComparison.Ordinal);
+        Assert.Contains("- Resumed from a live fight in round 1 at Björn Mountainfell's turn, in its order:", first, StringComparison.Ordinal);
+    }
+
+    // A fight too big to simulate: Björn and 40 enemies (Kaz has no sheet, so the simulation leaves him out).
+    private async Task HordeAsync(bool initiative)
+    {
+        await Combat("""{"action": "start", "name": "Horde", "campaign": "deep", "combatants": [{"srd": "goblin warrior", "count": 20}, {"srd": "2024/monster/ogre", "count": 20}]}""");
+        if (initiative)
+        {
+            await Combat("""
+                {"action": "initiative", "rolls": [{"combatant": "bjorn-mountainfell", "total": 15}, {"combatant": "kaz", "total": 12},
+                  {"combatant": "goblin-warrior", "total": 10}, {"combatant": "ogre", "total": 3}]}
+                """);
+        }
+    }
+
+    [Fact]
+    public async Task Encounter_MoreThanFortyCreatures_IsRefusedWithTheEncounterFormsFix()
+    {
+        // Fix F1, C09: "Lower some counts" is the explicit call's fix; an encounter's combatants are not counts the call gives.
+        await HordeAsync(initiative: false);
+
+        var text = await Refused("""{"encounter": "current", "iterations": 100, "seed": 1}""");
+
+        Assert.Equal(
+            "An error occurred invoking 'balance_simulate': Invalid simulation: the fight \"Horde\" has 41 combatants to simulate (counting copies); at most 40 are " +
+            "simulated, and the encounter form simulates every one of the encounter's. Simulate part of it with an explicit call instead: party and enemies with " +
+            "no encounter (a character entry plays its sheet).",
+            text);
+    }
+
+    [Fact]
+    public async Task Encounter_MoreThanFortyWithTheCallsOwn_SaysHowManyTheCallAppended()
+    {
+        await Combat("""{"action": "start", "name": "Horde", "campaign": "deep", "combatants": [{"srd": "goblin warrior", "count": 20}, {"srd": "2024/monster/ogre", "count": 19}]}""");
+
+        var text = await Refused("""{"encounter": "current", "enemies": [{"monster": "Ogre", "count": 2}], "iterations": 100, "seed": 1}""");
+
+        Assert.Contains("the fight \"Horde\" has 42 combatants to simulate (counting copies: 40 from the encounter, 2 appended); at most 40 are simulated, " +
+                        "and the encounter form simulates every one of the encounter's. Append fewer, or simulate part of it with an explicit call instead",
+            text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FromState_MoreThanFortyCreatures_IsRefusedWithTheResumesFix()
+    {
+        await HordeAsync(initiative: true);
+
+        var text = await Refused("""{"from_state": true, "iterations": 100, "seed": 1}""");
+
+        Assert.Equal(
+            "An error occurred invoking 'balance_simulate': Invalid simulation: the live fight \"Horde\" has 41 creatures to resume; at most 40 are simulated, and " +
+            "from_state resumes every one of them. Simulate part of it with an explicit call instead: party and enemies with no encounter or from_state " +
+            "(a fresh fight: a character entry starts at its sheet's maximum HP).",
+            text);
+    }
+
+    [Fact]
+    public async Task Explicit_MoreThanFortyCreatures_KeepsTheExplicitFix()
+    {
+        var text = await Refused("""{"party": [{"archetype": "fighter", "level": 5}], "enemies": [{"monster": "Ogre", "count": 20}, {"monster": "Ogre", "count": 20}]}""");
+
+        Assert.Contains("the fight has 41 combatants (counting copies); at most 40 are simulated. Lower some counts.", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FromState_ABatchThatChangesNothing_TheFreshFormKeepsTheHpHeader()
+    {
+        await ReefAsync();
+
+        var text = await Simulate("""{"encounter": "current", "iterations": 100, "seed": 7}""");
+
+        Assert.Contains("| Combatant | Side | From | AC | HP | Dropped to 0 |", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("""{"from_state": true, "party": [{"archetype": "fighter", "level": 5}]}""",
+        "from_state resumes the fight exactly as it stands, so party and enemies cannot be added to it: leave them out, or simulate the encounter without " +
+        "from_state (a fresh fight) to add them.")]
+    [InlineData("""{"from_state": true, "enemies": [{"monster": "Ogre"}]}""", "from_state resumes the fight exactly as it stands")]
+    [InlineData("""{"from_state": true, "surprise": "party"}""", "from_state resumes a fight already under way, so nobody is surprised: leave surprise out.")]
+    [InlineData("""{"from_state": true}""", "from_state resumes a running fight (round 1 or later): roll initiative first, or simulate the encounter without from_state.")]
+    [InlineData("""{"encounter": "No such fight"}""", "No such fight")]
+    public async Task FromState_WhatItCannotResume_IsRefused(string call, string message)
+    {
+        await ReefAsync();
+
+        var text = await Refused(call);
+
+        Assert.StartsWith("An error occurred invoking 'balance_simulate': ", text, StringComparison.Ordinal);
+        Assert.Contains(message, text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Character_IsTheSheetsEntry_TheReportOfTheSameEntryGivenOutright()
+    {
+        // D7: no sim_profile, so the barbarian archetype at the sheet's level with its HP, AC and saves. The same entry given
+        // by hand reports alike apart from the sheet's assumption line.
+        var character = await Simulate("""{"party": [{"character": "character:bjorn-mountainfell"}], "enemies": [{"monster": "Ogre"}], "iterations": 200, "seed": 9, "campaign": "deep"}""");
+        var byHand = await Simulate("""
+            {"party": [{"name": "Björn Mountainfell", "archetype": "barbarian", "level": 8, "edition": "2024", "hp": 85, "ac": 15, "save_proficiencies": ["str", "con"]}],
+             "enemies": [{"monster": "Ogre"}], "iterations": 200, "seed": 9, "campaign": "deep"}
+            """);
+
+        var line = "- Björn Mountainfell: no sim_profile, simulated as the level 8 barbarian archetype (2024), with the sheet's HP 85, AC 15, save " +
+                   "proficiencies Str, Con; its attacks follow the archetype's ability plan (store a sim_profile for the character's own).\n";
+        Assert.Contains(line, character, StringComparison.Ordinal);
+        Assert.Equal(byHand, character.Replace(line, string.Empty, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Character_FieldsGivenBesideIt_AreLaidOverTheSheets_AndTheLineSaysSo()
+    {
+        var text = await Simulate("""
+            {"party": [{"character": "bjorn-mountainfell", "name": "Bear", "hp": 50, "ac": 18, "level": 5, "position": "back"}], "enemies": [{"monster": "Ogre"}],
+             "iterations": 100, "seed": 9, "campaign": "deep"}
+            """);
+
+        // The line describes the entry as simulated: each field the call gave is named as the call's, never the sheet's
+        // value it replaced (level 8, HP 85, AC 15).
+        Assert.Contains("| Bear | party | archetype barbarian (level 5, 2024) | 18 | 50.0 |", text, StringComparison.Ordinal);
+        Assert.Contains(
+            "- Bear: no sim_profile, simulated as the level 5 barbarian archetype (2024), with the call's level 5, HP 50, AC 18, position back; the sheet's " +
+            "save proficiencies Str, Con; its attacks follow the archetype's ability plan (store a sim_profile for the character's own).\n",
+            text, StringComparison.Ordinal);
+        foreach (var stale in new[] { "level 8", "HP 85", "AC 15" })
+        {
+            Assert.DoesNotContain(stale, text, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task Character_PositionGivenBesideIt_ReachesTheFight()
+    {
+        // Behind a standing fighter, the ogre's melee cannot reach Björn: the same seed fights differently for him.
+        const string Rest = """, {"archetype": "fighter", "level": 8}], "enemies": [{"monster": "Ogre"}], "iterations": 300, "seed": 4, "campaign": "deep"}""";
+        var back = await Simulate("""{"party": [{"character": "character:bjorn-mountainfell", "position": "back"}""" + Rest);
+        var front = await Simulate("""{"party": [{"character": "character:bjorn-mountainfell"}""" + Rest);
+
+        static string Row(string text) => text.Split('\n').First(l => l.StartsWith("| Björn Mountainfell | party |", StringComparison.Ordinal));
+        Assert.NotEqual(Row(front), Row(back));
+        Assert.Contains("with the call's position back; the sheet's HP 85", back, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Character_ASheetWithNoRuleset_FightsUnderTheCampaignsNotTheCallsEdition()
+    {
+        // D7: "in the sheet's ruleset (else the campaign's)": a 2014 campaign's ruleset-less sheet is the 2014 archetype even
+        // in a fight the call puts under the 2024 rules.
+        await Campaign.ScenarioCalls.Call(_server, "campaign", """{"action": "create", "name": "Old", "role": "dm", "ruleset": "2014", "slug": "old"}""");
+        await Campaign.ScenarioCalls.Call(_server, "campaign_write", """{"campaign": "old", "ops": [{"op": "upsert", "kind": "character", "name": "Torch", "subtype": "pc", "visibility": "party"}]}""");
+        await Campaign.ScenarioCalls.Call(_server, "campaign_character",
+            """{"action": "update", "campaign": "old", "character": "character:torch", "sheet": {"classes": [{"class": "fighter", "level": 5}], "ac": 16, "max_hp": 44}}""");
+
+        var text = await Simulate("""
+            {"party": [{"character": "character:torch"}], "enemies": [{"monster": "Ogre"}], "edition": "2024", "iterations": 100, "seed": 9, "campaign": "old"}
+            """);
+
+        Assert.Contains("| Torch | party | archetype fighter (level 5, 2014) | 16 | 44.0 |", text, StringComparison.Ordinal);
+        Assert.Contains("- Torch: no sim_profile, simulated as the level 5 fighter archetype (2014)", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Character_SeveralEntriesWrong_AreReportedTogether()
+    {
+        var text = await Refused("""
+            {"party": [{"character": "character:kaz"}, {"character": "character:bjorn-mountainfell", "count": 2, "edition": "2014"}],
+             "enemies": [{"character": "character:nobody"}, {"monster": "Ogre"}], "campaign": "deep", "seed": 1}
+            """);
+
+        Assert.StartsWith("An error occurred invoking 'balance_simulate': Invalid simulation (4 problems):\n" +
+                          "- party item 1 (character:kaz): Kaz has no sheet to simulate yet;", text, StringComparison.Ordinal);
+        Assert.Contains("\n- party item 2 (character:bjorn-mountainfell): a character is one creature; leave count out.\n" +
+                        "- party item 2 (character:bjorn-mountainfell): a character fights under its sheet's ruleset;", text, StringComparison.Ordinal);
+        Assert.Contains("\n- enemies item 1 (character:nobody): ", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Character_AsAnEnemy_IsExpandedToo()
+    {
+        var text = await Simulate("""
+            {"party": [{"archetype": "fighter", "level": 8}], "enemies": [{"character": "character:bjorn-mountainfell"}], "iterations": 100, "seed": 9, "campaign": "deep"}
+            """);
+
+        Assert.StartsWith("# Fight simulation: Fighter vs Björn Mountainfell\n", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("""{"character": "character:bjorn-mountainfell", "monster": "Ogre"}""", "party item 1 (character:bjorn-mountainfell): give only one of monster, build, archetype and character.")]
+    [InlineData("""{"character": "character:bjorn-mountainfell", "count": 2}""", "party item 1 (character:bjorn-mountainfell): a character is one creature; leave count out.")]
+    [InlineData("""{"character": "character:bjorn-mountainfell", "edition": "2014"}""", "party item 1 (character:bjorn-mountainfell): a character fights under its sheet's ruleset")]
+    [InlineData("""{"character": "character:nobody"}""", "party item 1 (character:nobody): ")]
+    [InlineData("""{"character": "character:kaz"}""",
+        "party item 1 (character:kaz): Kaz has no sheet to simulate yet; make one with campaign_character {\"action\": \"update\", \"character\": \"character:kaz\", " +
+        "\"sheet\": {\"level\": …}, \"campaign\": \"deep\"}, or leave Kaz out.")]
+    [InlineData("""{"character": "character:harbour-master"}""",
+        "party item 1 (character:harbour-master): Harbour Master's sheet has no classes (only level 4), so there is no archetype to simulate: give the sheet " +
+        "a sim_profile (and classes) or leave Harbour Master out.")]
+    [InlineData("""{"character": " "}""", "party item 1: character is empty")]
+    public async Task Character_ASheetThatCannotFight_IsRefusedNamingTheItemAndTheFix(string entry, string message)
+    {
+        var text = await Refused($$"""{"party": [{{entry}}], "enemies": [{"monster": "Ogre"}], "campaign": "deep", "seed": 1}""");
+
+        // One problem, in the Domain's own words for a simulation's problems (DslProblems).
+        Assert.StartsWith("An error occurred invoking 'balance_simulate': Invalid simulation: " + message, text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Encounter_MoreNotesThanTheBlockHolds_AreCutWithACount_AndTheResultStaysUnderTheCap()
+    {
+        // 20 allies and 20 neutrals with no stat block (70-character names): twenty "left out" notes and one neutral note of
+        // some 1,500 characters, more than the block's 3,000.
+        string Name(string side) => side + " " + new string('n', 70 - side.Length - 1);
+        await Combat($$"""
+            {"action": "start", "name": "Crowd", "campaign": "deep", "combatants": [{"srd": "2024/monster/ogre"},
+              {"name": "{{Name("Friend")}}", "count": 20, "hp": 9, "ac": 10, "side": "ally"},
+              {"name": "{{Name("Bystander")}}", "count": 20, "hp": 9, "ac": 10, "side": "neutral"}]}
+            """);
+
+        var text = await Simulate("""{"encounter": "current", "iterations": 100, "seed": 1}""");
+
+        var block = text[..text.IndexOf(Report, StringComparison.Ordinal)];
+        Assert.InRange(block.Length, 2_000, SimulationMarkdown.MaxEncounterNotesChars);
+        Assert.Matches(@"\n- … and \d+ more notes?\.\n\n$", block);
+        Assert.All(block.Split('\n'), line => Assert.True(line.Length <= SimulationMarkdown.MaxEncounterNoteChars + 2, line));
+        Assert.True(text.Length <= SimulationMarkdown.MaxChars, $"{text.Length} characters");
+        Assert.StartsWith("# Fight simulation: Björn Mountainfell vs Ogre\n", ReportOf(text), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FromState_AnEnemyWithUnknownHp_IsRefusedWithACallThatNamesTheCampaign()
+    {
+        await Combat("""{"action": "start", "name": "Fog", "campaign": "deep", "add_party": false, "combatants": [{"srd": "2024/monster/ogre", "name": "Wraith", "hp": "unknown"}, {"character": "character:bjorn-mountainfell"}]}""");
+        await Combat("""{"action": "initiative", "rolls": [{"combatant": "wraith", "total": 9}, {"combatant": "bjorn-mountainfell", "total": 12}]}""");
+
+        var text = await Refused("""{"from_state": true, "seed": 1}""");
+
+        Assert.Equal(
+            "An error occurred invoking 'balance_simulate': from_state needs the enemies' hit points; Wraith has none: give hp with combat set " +
+            "(combat {\"action\": \"set\", \"combatants\": [{\"name\": \"Wraith\", \"hp\": …}], \"campaign\": \"deep\"}).",
+            text);
+    }
+
+    [Fact]
+    public async Task Encounter_TypicalAndLargest_StayUnderTheirCeilings()
+    {
+        await ReefAsync();
+        var typical = await Simulate("""{"encounter": "current", "iterations": 200, "seed": 1}""");
+        await Combat("""{"action": "end", "discard": true}""");
+
+        // 20 allies and 20 enemies from stat blocks (no two enemies alike, so 40 entries), 10 custom combatants left out
+        // with 80-character names (the notes block's longest), a 100-round cap and a replay.
+        string Name(string side, int i) => $"{side} {i:00} " + new string('n', 80 - side.Length - 4);
+        var allies = Enumerable.Range(1, 20).Select(i => $$"""{"srd": "2024/monster/ogre", "name": "{{Name("Ally", i)}}", "side": "ally"}""");
+        var enemies = Enumerable.Range(1, 20).Select(i => $$"""{"srd": "2024/monster/ogre", "name": "{{Name("Foe", i)}}", "hp": {{40 + i}}}""");
+        var customs = Enumerable.Range(1, 10).Select(i => $$"""{"name": "{{Name("Odd", i)}}", "hp": 9, "ac": 10}""");
+        await Combat($$"""{"action": "start", "name": "{{new string('W', 80)}}", "add_party": false, "combatants": [{{string.Join(", ", allies.Concat(enemies))}}]}""");
+        await Combat($$"""{"action": "add", "combatants": [{{string.Join(", ", customs)}}]}""");
+
+        var largest = await Simulate("""{"encounter": "current", "iterations": 50, "round_cap": 100, "seed": 3, "replay": 1}""");
+
+        Assert.True(typical.Length < 8_000, $"{typical.Length} characters");
+        Assert.True(largest.Length <= SimulationMarkdown.MaxChars, $"{largest.Length} characters");
+        Assert.StartsWith("# Encounter \"" + new string('W', 80) + "\" as a simulation\n", largest, StringComparison.Ordinal);
+        Assert.Contains("\n# Fight simulation: ", largest, StringComparison.Ordinal);
+        Assert.Equal(0, largest.Split('\n').Count(l => l.StartsWith("```", StringComparison.Ordinal)) % 2);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public async Task Character_ACountBesideIt_IsRefused_ACharacterIsOneCreature(int count)
+    {
+        // Review M (mutant S05): only a count above 1 was pinned; with "count > 1" a count of 0 was silently one creature
+        // (the sheet's overlay carries no count).
+        var text = await Refused($$"""
+            {"campaign": "deep", "party": [{"character": "character:bjorn-mountainfell", "count": {{count}}}], "enemies": [{"monster": "Ogre"}], "iterations": 100, "seed": 1}
+            """);
+
+        Assert.Contains("a character is one creature; leave count out", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Encounter_WithAnAppendedCharacter_TheAssumptionsAreInEntryOrder()
+    {
+        // Review M (mutant S07): the encounter's own sheet assumptions come before those of the call's appended entries, as
+        // the entries do; swapped, nothing failed.
+        await Campaign.ScenarioCalls.Call(_server, "campaign_character",
+            """{"action": "update", "campaign": "deep", "character": "character:harbour-master", "sheet": {"classes": [{"class": "fighter", "level": 4}]}}""");
+        await ReefAsync();
+
+        var text = await Simulate("""{"encounter": "Reef", "campaign": "deep", "party": [{"character": "character:harbour-master"}], "iterations": 100, "seed": 7}""");
+
+        var assumptions = text[text.IndexOf("### Assumptions", StringComparison.Ordinal)..];
+        var bjorn = assumptions.IndexOf("Björn Mountainfell", StringComparison.Ordinal);
+        var master = assumptions.IndexOf("Harbour Master", StringComparison.Ordinal);
+        Assert.True(bjorn >= 0 && master > bjorn, assumptions);
+    }
+}
+
+/// <summary>
+/// Invariant: an encounter's notes block (<see cref="SimulationMarkdown.EncounterNotes"/>) never passes
+/// <see cref="SimulationMarkdown.MaxEncounterNotesChars"/>, whatever the encounter holds — many notes are cut with a count,
+/// one huge note is excerpted, a long name is shortened — so the report after it always has its room and the result can
+/// never pass the cap (a block left unbounded made the report's reserve too large to honour).
+/// </summary>
+public sealed class SimulationMarkdownEncounterNotesTests
+{
+    private static Repository.Campaign.Combat.EncounterSimulation Encounter(string name, IReadOnlyList<string> notes) =>
+        new(name, "2024", "active", [], [], null, false, notes, []);
+
+    public static TheoryData<string, int, int> Shapes => new()
+    {
+        // name length, notes, each note's length
+        { "Short", 1, 50_000 },
+        { "Short", 2_000, 100 },
+        { new string('N', 5_000), 40, 2_000 },
+        { "Short", 0, 0 },
+    };
+
+    [Theory]
+    [MemberData(nameof(Shapes))]
+    public void EncounterNotes_AnyEncounter_StaysWithinItsBound(string name, int count, int length)
+    {
+        var notes = Enumerable.Range(0, count).Select(i => $"{i} " + new string('x', Math.Max(0, length - 6))).ToList();
+
+        var block = SimulationMarkdown.EncounterNotes(Encounter(name, notes), "deep", fromState: count % 2 == 0);
+
+        Assert.InRange(block.Length, 1, SimulationMarkdown.MaxEncounterNotesChars);
+        Assert.EndsWith("\n\n", block, StringComparison.Ordinal);
+        if (count > 1)
+        {
+            Assert.Matches(@"\n- … and [\d,]+ more notes?\.\n\n$", block);
+        }
+
+        if (count == 1)
+        {
+            Assert.Contains("…\n", block, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The block claims the explicit call's report only for a fresh fight out of a lair (contract §6.11): a resumed fight
+    /// has no explicit form (no call carries a live state), nor has a lair fight (balance_simulate takes no lair); each says
+    /// so in the same words, the resumed one winning when both hold.
+    /// </summary>
+    [Theory]
+    [InlineData(false, false, "The report below is the one an explicit call with the same entries and seed gives; these notes are this encounter's own.")]
+    [InlineData(false, true,
+        "No explicit call can put a fight in a lair, so this report has no explicit form; the same call with the same seed repeats it. These notes are this encounter's own.")]
+    [InlineData(true, false,
+        "No explicit call can resume a fight, so this report has no explicit form; the same call with the same seed repeats it. These notes are this encounter's own.")]
+    [InlineData(true, true,
+        "No explicit call can resume a fight, so this report has no explicit form; the same call with the same seed repeats it. These notes are this encounter's own.")]
+    public void EncounterNotes_TheExplicitFormClaim_IsMadeOnlyForAFreshFightOutOfALair(bool fromState, bool lair, string sentence)
+    {
+        var block = SimulationMarkdown.EncounterNotes(new("Station", "2024", "active", [], [], null, lair, [], []), "deep", fromState);
+
+        var how = fromState ? "resumed from its live state (HP, conditions, concentration, uses left, the turn)" : "as a fresh fight from its combatants";
+        Assert.Equal(
+            $"# Encounter \"Station\" as a simulation\n\ndeep · active · 2024 rules{(lair ? " · in a lair" : string.Empty)} · {how}. {sentence}\n\n" +
+            "Every combatant of the encounter is in the fight below.\n\n",
+            block);
     }
 }

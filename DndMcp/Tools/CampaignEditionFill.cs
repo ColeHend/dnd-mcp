@@ -35,15 +35,30 @@ namespace DndMcp.Tools;
 /// </summary>
 internal sealed class CampaignEditionFill
 {
-    private readonly CampaignService _campaigns;
+    private readonly CampaignService? _campaigns;
+    private readonly ResolvedCampaignDefaults? _chosen;
     private bool _read;
     private string? _edition;
     private string? _campaignSlug;
     private string? _unreadablePath;
 
+    /// <summary>The AMBIENT campaign's ruleset (the current one, else the active one), read lazily: a call that chose none.</summary>
     public CampaignEditionFill(CampaignService campaigns)
     {
         _campaigns = campaigns;
+    }
+
+    /// <summary>
+    /// The ruleset of the campaign the call CHOSE (<see cref="CampaignArgumentDefaults"/>: named with <c>campaign</c>, or
+    /// resolved for an encounter or a <c>character</c> entry), never the active one: an encounter of one campaign filled
+    /// with another's rules is a wrong answer that looks right. Its note is that campaign's
+    /// (<see cref="ResolvedCampaignDefaults.EditionNote"/>: the shared wording when it is also the ambient campaign, else
+    /// naming it); a mixed campaign fills nothing, as the ambient form does.
+    /// </summary>
+    public CampaignEditionFill(ResolvedCampaignDefaults chosen)
+    {
+        ArgumentNullException.ThrowIfNull(chosen);
+        _chosen = chosen;
     }
 
     /// <summary>The campaign supplied at least one edition in this call.</summary>
@@ -53,7 +68,7 @@ internal sealed class CampaignEditionFill
     /// The note naming the campaign, when it supplied an edition; the note that its settings could not be read, when the
     /// call asked for them (some spec named no edition) and campaigns.db failed; else null.
     /// </summary>
-    public string? Note => Used ? CampaignDefaultNotes.Edition(_edition!, _campaignSlug!)
+    public string? Note => Used ? (_chosen is { } chosen ? chosen.EditionNote(_edition!) : CampaignDefaultNotes.Edition(_edition!, _campaignSlug!))
         : _unreadablePath is { } path ? CampaignDefaultNotes.Unreadable(path, DslValues.Editions.Default)
         : null;
 
@@ -102,9 +117,15 @@ internal sealed class CampaignEditionFill
 
     private string? Campaign()
     {
+        if (!_read && _chosen is { } chosen)
+        {
+            (_edition, _campaignSlug) = (chosen.Edition, chosen.Row.Slug);
+            _read = true;
+        }
+
         if (!_read)
         {
-            var reading = _campaigns.ReadDefaults();
+            var reading = _campaigns!.ReadDefaults();
             if (reading.Edition is { } edition)
             {
                 (_edition, _campaignSlug) = (edition, reading.Values!.Slug);

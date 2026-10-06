@@ -54,6 +54,19 @@ public sealed record UndoResult(
 /// conflict like any other, so those batches are undone first; otherwise they would point at a missing session, history
 /// "since" that session would find nothing, and point-in-time replay would treat them as timeless. Either way the
 /// message says to keep the session (and end it, if it is live) instead.</item>
+/// <item><b>The combat tracker uses something the batch created</b> (Phase 7). Encounters, combatants, the combat log and
+/// the rolls a fight made are not in change_log either, so the conflict scan cannot see them, and the hard delete undo
+/// makes of a created row would change them through foreign-key actions with no history row and no way back (a redo
+/// re-creates the row, but never re-links the fight). Refused: a created campaign that has encounters (the cascade would
+/// delete them and their rolls); a created session an encounter was run in; a created entity that is a combatant, or an
+/// encounter's scene or session; a created character sheet that a combatant of a not-yet-ended encounter was seeded from
+/// (the end-of-combat write-back would have no sheet to write to); a created holding that a combatant of a not-yet-ended
+/// encounter draws on (an <c>item:&lt;holding id&gt;</c> key in its resources: the write-back would have no holding to take
+/// the used quantity from). Only creates count: undoing an update or a soft delete of something a fight uses writes the
+/// old value back and unlinks nothing. Each message names the entity by handle and the encounters by name (an encounter
+/// has no handle; its name is how the combat tool addresses it) and says what to do instead, with every call it needs
+/// ready to send: one end call per blocking encounter, and the campaign named in each (the undo may be for a campaign
+/// that is not the current one).</item>
 /// <item>A row the batch updated no longer exists, or re-creating a row it deleted collides with one that exists now
 /// (an entity created since with the same slug or code). Existence is checked before anything is reversed; a collision
 /// shows only when the row is re-inserted.</item>
@@ -64,7 +77,8 @@ public sealed record UndoResult(
 /// </para>
 /// <para>
 /// Messages name batches, campaigns (by slug, for another campaign's cross_link batch), tables, fields and
-/// <c>e:</c>/<c>f:</c> handles only, never entity names or text: whoever drives the client reads them.
+/// <c>e:</c>/<c>f:</c> handles only, never entity names or text: whoever drives the client reads them. The one exception
+/// is an encounter's name, which the author typed as a tracker name and which is the only way to address it.
 /// </para>
 /// </summary>
 public static partial class UndoEngine
@@ -131,6 +145,7 @@ public static partial class UndoEngine
         RefuseIfUndone(connection, transaction, campaignId, batchId);
         var sessions = CreatedSessions(rows);
         RefuseIfDiceWereRolled(connection, transaction, campaignId, batchId, sessions);
+        RefuseIfAnEncounterUsesIt(connection, transaction, campaignId, batchId, rows, sessions);
         RefuseIfConflicts(connection, transaction, campaignId, batchId, rows, sessions);
         RefuseIfMissing(connection, transaction, batchId, rows);
 
@@ -263,6 +278,196 @@ public static partial class UndoEngine
             }
         }
     }
+
+    // Phase 7: the combat tracker's tables are outside change_log (HP ticks are not history), so nothing in the conflict
+    // scan sees them, and undo's hard delete of a row the batch created reaches them only through foreign-key actions:
+    // deleting a campaign cascades its encounters (and their combatants, combat log and rolls); deleting a session or an
+    // entity sets encounter.session_id / scene_id and combatant.entity_id to NULL. Either way a fight would change with no
+    // history row, and a redo, which re-creates the row under the same id, would not re-link it. A created sheet or holding
+    // is the other case: a combatant seeded from the sheet, or drawing on the holding (resources key "item:<holding id>",
+    // which no foreign key guards), still has a write-back to make, and the end would find no row to write to.
+    // Undo deletes exactly the rows the batch created (Reverse turns each create into a delete), so only creates matter:
+    // undoing an update or a soft delete writes an old value back and unlinks nothing.
+    // Encounters are listed oldest first by created_at, then rowid (insertion order): two created in the same millisecond
+    // have UUIDv7 ids in no particular order, and the message, with its calls, must read the same on every run.
+    private static void RefuseIfAnEncounterUsesIt(SqliteConnection connection, SqliteTransaction transaction, string campaignId,
+        string batchId, IReadOnlyList<ChangeRow> rows, IReadOnlyDictionary<string, long> sessions)
+    {
+        var created = rows.Where(r => r.Op == CampaignValues.ChangeOps.Create).ToList();
+        foreach (var row in created.Where(r => r.TargetTable == CampaignTables.Campaign.Name))
+        {
+            var encounters = connection.ExecuteScalar<long>(
+                "SELECT count(*) FROM encounter WHERE campaign_id = @id", new { id = row.TargetId }, transaction);
+            if (encounters > 0)
+            {
+                var slug = connection.ExecuteScalar<string?>("SELECT slug FROM campaign WHERE id = @id", new { id = row.TargetId }, transaction);
+                var count = encounters == 1 ? "an encounter was" : $"{encounters.ToString(CultureInfo.InvariantCulture)} encounters were";
+                throw new DndInputException(
+                    $"Batch {batchId} cannot be undone: it created campaign {slug ?? "(this campaign)"}, and {count} run in it. " +
+                    "Encounters and the dice they rolled are not in history, so deleting the campaign would delete them for " +
+                    "good. Keep the campaign instead. Nothing was changed.");
+            }
+        }
+
+        foreach (var (sessionId, number) in sessions)
+        {
+            var names = EncounterNames(connection, transaction,
+                "SELECT name FROM encounter WHERE session_id = @id ORDER BY created_at, rowid", sessionId);
+            if (names.Count > 0)
+            {
+                throw new DndInputException(
+                    $"Batch {batchId} cannot be undone: it created {SessionHandle(number)}, and {Listed(names)} {(names.Count == 1 ? "was" : "were")} " +
+                    "run in it. Encounters are not in history, so undoing the session would cut them loose from it for good " +
+                    "(a redo could not re-attach them). Keep the session instead (end it with " +
+                    $"{EndCall(connection, transaction, campaignId)} if it is live). Nothing was changed.");
+            }
+        }
+
+        foreach (var row in created.Where(r => r.TargetTable == CampaignTables.Entity.Name && !sessions.ContainsKey(r.TargetId)))
+        {
+            var uses = new List<string>();
+            var combatants = EncounterNames(connection, transaction,
+                "SELECT e.name FROM combatant c JOIN encounter e ON e.id = c.encounter_id WHERE c.entity_id = @id " +
+                "GROUP BY e.id ORDER BY min(e.created_at), min(e.rowid)", row.TargetId);
+            if (combatants.Count > 0)
+            {
+                uses.Add($"it is a combatant in {Listed(combatants)}");
+            }
+
+            var scenes = EncounterNames(connection, transaction,
+                "SELECT name FROM encounter WHERE scene_id = @id ORDER BY created_at, rowid", row.TargetId);
+            if (scenes.Count > 0)
+            {
+                uses.Add($"it is the scene of {Listed(scenes)}");
+            }
+
+            var filed = EncounterNames(connection, transaction,
+                "SELECT name FROM encounter WHERE session_id = @id ORDER BY created_at, rowid", row.TargetId);
+            if (filed.Count > 0)
+            {
+                uses.Add($"{Listed(filed)} {(filed.Count == 1 ? "was" : "were")} run in it");
+            }
+
+            if (uses.Count == 0)
+            {
+                continue;
+            }
+
+            var handle = SeqHandle(connection, transaction, "entity", "e", row);
+            var kind = connection.ExecuteScalar<string?>("SELECT kind FROM entity WHERE id = @id", new { id = row.TargetId }, transaction);
+            var retire = handle is null || kind == CampaignValues.Kinds.Session
+                ? string.Empty
+                : $"; to retire it, delete it with campaign_write {{\"ops\": [{{\"op\": \"delete\", \"ref\": \"{handle}\"}}]" +
+                  $"{CampaignArgument(connection, transaction, campaignId)}}} (a delete is soft: the encounters keep their link)";
+            throw new DndInputException(
+                $"Batch {batchId} cannot be undone: it created {(handle is null ? "an entity" : "entity " + handle)}, and " +
+                $"{string.Join("; ", uses)}. Encounters are not in history, so deleting it would unlink them for good (a redo " +
+                $"could not re-link them). Keep it instead{retire}. Nothing was changed.");
+        }
+
+        foreach (var row in created.Where(r => r.TargetTable == CampaignTables.CharacterSheet.Name))
+        {
+            var fights = UnendedEncountersWith(connection, transaction, "c.entity_id = @id AND c.sheet_snapshot IS NOT NULL", row.TargetId);
+            if (fights.Count == 0)
+            {
+                continue;
+            }
+
+            var handle = connection.ExecuteScalar<long?>("SELECT seq FROM entity WHERE id = @id", new { id = row.TargetId }, transaction) is { } seq
+                ? "e:" + seq.ToString(CultureInfo.InvariantCulture)
+                : "a character";
+            throw new DndInputException(
+                $"Batch {batchId} cannot be undone: it created the character sheet of {handle}, and {ListedWithStatus(fights)} " +
+                "seeded a combatant from it: the end-of-combat write-back would have no sheet to write to. " +
+                $"{EndThemFirst(connection, transaction, campaignId, fights)} Nothing was changed.");
+        }
+
+        foreach (var row in created.Where(r => r.TargetTable == CampaignTables.Holding.Name))
+        {
+            var key = ItemResourcePrefix + row.TargetId;
+            var fights = UnendedEncountersWith(connection, transaction,
+                "EXISTS (SELECT 1 FROM json_each(c.resources) r WHERE r.key = @id)", key);
+            if (fights.Count == 0)
+            {
+                continue;
+            }
+
+            var holder = connection.ExecuteScalar<long?>(
+                "SELECT e.seq FROM holding h JOIN entity e ON e.id = h.holder_id WHERE h.id = @id", new { id = row.TargetId }, transaction) is { } seq
+                ? "e:" + seq.ToString(CultureInfo.InvariantCulture)
+                : "a holder";
+            throw new DndInputException(
+                $"Batch {batchId} cannot be undone: it created a holding of {holder} (combat resource {Quoted(key)}), and a " +
+                $"combatant in {ListedWithStatus(fights)} draws on it: the end-of-combat write-back would have no holding to " +
+                $"take the used quantity from. {EndThemFirst(connection, transaction, campaignId, fights)} Nothing was changed.");
+        }
+    }
+
+    // The names of the encounters a query (one @id parameter) returns, in its order.
+    private static List<string> EncounterNames(SqliteConnection connection, SqliteTransaction transaction, string sql, string id) =>
+        connection.Query<string>(sql, new { id }, transaction).ToList();
+
+    // The encounters not yet ended with a combatant c that meets a condition (one @id parameter), oldest first, with status.
+    private static List<(string Name, string Status)> UnendedEncountersWith(SqliteConnection connection, SqliteTransaction transaction,
+        string combatantCondition, string id) =>
+        connection.Query<(string Name, string Status)>(
+            "SELECT e.name, e.status FROM combatant c JOIN encounter e ON e.id = c.encounter_id " +
+            $"WHERE e.status <> @ended AND {combatantCondition} GROUP BY e.id ORDER BY min(e.created_at), min(e.rowid)",
+            new { id, ended = CampaignValues.EncounterStatuses.Ended }, transaction).ToList();
+
+    // 'encounter "The crypt"' / 'encounters "A", "B" and 2 more': names quoted as JSON strings, so one holding a quote
+    // still reads (and pastes) unambiguously.
+    private static string Listed(IReadOnlyList<string> names, bool quote = true)
+    {
+        var shown = names.Take(MaxEncountersListed).Select(n => quote ? Quoted(n) : n).ToList();
+        var more = names.Count > MaxEncountersListed
+            ? $" and {(names.Count - MaxEncountersListed).ToString(CultureInfo.InvariantCulture)} more"
+            : string.Empty;
+        return (names.Count == 1 ? "encounter " : "encounters ") + string.Join(", ", shown) + more;
+    }
+
+    // 'encounters "Ambush" (planned), "The crypt" (active)': a planned fight blocks as an active one does.
+    private static string ListedWithStatus(IReadOnlyList<(string Name, string Status)> encounters) =>
+        Listed(encounters.Select(e => $"{Quoted(e.Name)} ({e.Status})").ToList(), quote: false);
+
+    // What clears a sheet or holding refusal: every blocking encounter ended with no write-back, each by its own ready call
+    // (one call for several fights would clear only the first, and the next undo would be refused again), up to
+    // MaxEncountersListed of them, the rest counted. Each call names the campaign, since the undo may be for one that is not
+    // current. discard, because the write-back would land on the very sheet or holding being undone (and a planned
+    // encounter never ran: ending it writes nothing either way).
+    private static string EndThemFirst(SqliteConnection connection, SqliteTransaction transaction, string campaignId,
+        IReadOnlyList<(string Name, string Status)> encounters)
+    {
+        var campaign = CampaignArgument(connection, transaction, campaignId);
+        var calls = encounters.Take(MaxEncountersListed)
+            .Select(e => $"combat {{\"action\": \"end\", \"encounter\": {Quoted(e.Name)}, \"discard\": true{campaign}}}")
+            .ToList();
+        if (encounters.Count == 1)
+        {
+            return $"End that encounter first ({calls[0]} ends it writing nothing back), then undo again.";
+        }
+
+        var more = encounters.Count > MaxEncountersListed
+            ? $"; and {(encounters.Count - MaxEncountersListed).ToString(CultureInfo.InvariantCulture)} more, which the next undo names"
+            : string.Empty;
+        return $"End each of those encounters first, writing nothing back ({string.Join("; ", calls)}{more}), then undo again.";
+    }
+
+    // ', "campaign": "belmakor"' closing a ready call's arguments: the campaign named last, as every printed call names it
+    // (nothing when the campaign row is gone).
+    private static string CampaignArgument(SqliteConnection connection, SqliteTransaction transaction, string campaignId) =>
+        connection.ExecuteScalar<string?>("SELECT slug FROM campaign WHERE id = @campaignId", new { campaignId }, transaction) is { } slug
+            ? $", \"campaign\": {Quoted(slug)}"
+            : string.Empty;
+
+    private static string Quoted(string text) => JsonValue.Create(text).ToJsonString(CampaignLogJson.Options);
+
+    // At most this many encounters are named (and given an end call) in one refusal; the rest are counted.
+    private const int MaxEncountersListed = 5;
+
+    // A combatant's resources key for a holding it consumes from (contract §4: "item:<holding id>"). The combat tracker
+    // writes it; the holding guard reads it, so the two must agree on this spelling.
+    private const string ItemResourcePrefix = "item:";
 
     // The call that ends a live session, naming the campaign (the undo may be for a campaign that is not the current one).
     private static string EndCall(SqliteConnection connection, SqliteTransaction transaction, string campaignId)

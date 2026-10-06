@@ -189,7 +189,7 @@ public sealed class CampaignCliTests : IDisposable
                 $"campaigns.db restored from {backup}.",
                 $"  path:      {DatabasePath}",
                 $"  previous:  {previous}",
-                "  schema:    version 1",
+                "  schema:    version 2",
                 "  campaigns: belmakor",
                 RestartLine + " To undo this restore, restore the previous file above.",
                 "",

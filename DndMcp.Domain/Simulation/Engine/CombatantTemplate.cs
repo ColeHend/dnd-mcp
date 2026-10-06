@@ -178,6 +178,12 @@ internal sealed class CombatantTemplate
     /// <summary>Starts the fight at 0 HP and dying (the death-save test's creature left alone).</summary>
     public bool StartsDown { get; set; }
 
+    /// <summary>
+    /// Where a resumed fight finds this creature (<see cref="CombatantStart"/>, compiled), or null for a fresh one. Set once
+    /// by the preparation after every creature is compiled (its conditions name other creatures' ids), then only read.
+    /// </summary>
+    public CompiledStart? Start { get; set; }
+
     public static int AbilityIndex(string ability) => ability switch
     {
         V.Abilities.Str => 0,

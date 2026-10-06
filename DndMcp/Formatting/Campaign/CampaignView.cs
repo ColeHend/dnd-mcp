@@ -39,6 +39,20 @@ internal sealed record CampaignView(Perspective Perspective, bool AuthorView, st
     public static CampaignView Author { get; } = new(Perspective.Author, true, null);
 
     /// <summary>
+    /// The live-fight line of each character in the active fight from its sheet, by handle (<see cref="SheetLiveFight"/>):
+    /// set by the tools that read an AUTHOR sheet now (fix F1, U04), so every sheet the read prints carries its line; null
+    /// for every other read (another view, a past session, no sheet asked for).
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? LiveFight { get; init; }
+
+    /// <summary>
+    /// This view with the live-fight lines of <paramref name="campaign"/> when it is the author's view of now; itself
+    /// otherwise (a non-author view never reads the fight's numbers, contract §7.4, and a past read has no live fight).
+    /// </summary>
+    public CampaignView WithLiveFight(CampaignDatabase database, CampaignRow campaign) =>
+        AuthorView && AsOfSession is null ? this with { LiveFight = SheetLiveFight.Read(database, campaign) } : this;
+
+    /// <summary>
     /// The arguments that read this view again, for the calls a non-author result prints: the perspective, and the session
     /// when the read is as of one (<c>"perspective": "party", "as_of_session": 2</c>).
     /// </summary>

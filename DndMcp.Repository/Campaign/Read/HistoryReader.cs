@@ -335,6 +335,9 @@ public sealed class HistoryReader
 
 /// <summary>
 /// Renders change_log rows (<see cref="HistoryReader"/>): ids to handles, values to short text. Author-facing only.
+/// Phase 7's logged tables read as what they are about: "character:belmakor sheet", "character:bjorn-mountainfell holding
+/// "Potion of Healing"", "faction:the-party coins", "character:vars award (xp)"; their entity columns (holder, item,
+/// recipient, the session a holding was gained in) print as handles, never as raw ids.
 /// </summary>
 internal sealed class HistoryRenderer
 {
@@ -347,6 +350,7 @@ internal sealed class HistoryRenderer
         "established_session_id", "entity_id", "knower_id", "learned_session_id", "via_entity_id", "valid_until_session_id",
         "arc_id", "session_id", "character_id", "quest_id", "resolved_session_id", "front_id", "from_beat_id", "to_beat_id",
         "my_character_id", "party_id", "current_location_id", "a_id", "b_id",
+        "holder_id", "item_id", "recipient_id", "acquired_session_id",
     };
 
     private static readonly HashSet<string> FactIdColumns = new(StringComparer.Ordinal) { "fact_id", "depends_on", "superseded_by" };
@@ -478,6 +482,10 @@ internal sealed class HistoryRenderer
             "objective" => $"{EntityRef(S("quest_id"))} objective {Quote(Cut(S("text"), 60))}",
             "clock" => $"{EntityRef(S("entity_id"))} clock",
             "beat_edge" => $"{EntityRef(S("from_beat_id"))} leads_to {EntityRef(S("to_beat_id"))} ({S("mode")})",
+            "character_sheet" => $"{EntityRef(S("entity_id"))} sheet",
+            "holding" => $"{EntityRef(S("holder_id"))} holding {Quote(Cut(S("name"), 60))}",
+            "currency_txn" => $"{EntityRef(S("holder_id"))} coins",
+            "award" => $"{EntityRef(S("recipient_id"))} award ({S("kind")})",
             _ => meta.Name,
         };
     }
@@ -546,6 +554,33 @@ internal sealed class HistoryRenderer
             case "clock":
                 parts.Add($"{r.GetValueOrDefault("filled")}/{r.GetValueOrDefault("segments")} {r.GetValueOrDefault("unit")}");
                 break;
+            case "character_sheet":
+                Add("level");
+                Add("max_hp");
+                Add("ruleset");
+                break;
+            case "holding":
+                parts.Add("quantity " + Number(r.GetValueOrDefault("quantity")));
+                Add("srd_ref");
+                Add("item_id");
+                break;
+            case "currency_txn":
+                var coins = new[] { "pp", "gp", "ep", "sp", "cp" }
+                    .Where(c => r.GetValueOrDefault(c) is long n && n != 0)
+                    .Select(c => $"{((long)r[c]!).ToString("+#;-#", CultureInfo.InvariantCulture)} {c}")
+                    .ToList();
+                if (coins.Count > 0)
+                {
+                    parts.Add(string.Join(" ", coins));
+                }
+
+                Add("note", quote: true);
+                break;
+            case "award":
+                Add("amount");
+                Add("source", quote: true);
+                Add("note", quote: true);
+                break;
         }
 
         return string.Join(", ", parts);
@@ -582,6 +617,14 @@ internal sealed class HistoryRenderer
             ? Quote(text)
             : text;
     }
+
+    // A REAL as the ledger prints it: 2, not 2.0; 0.5 as is.
+    private static string Number(object? value) => value switch
+    {
+        double d => d.ToString("0.###", CultureInfo.InvariantCulture),
+        null => "(none)",
+        _ => Convert.ToString(value, CultureInfo.InvariantCulture)!,
+    };
 
     private string EntityLabel(string id, string kind, string slug)
     {

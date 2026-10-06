@@ -9,7 +9,10 @@ namespace DndMcp.Repository.Campaign.Write;
 /// <param name="Label">The call's label, if any.</param>
 /// <param name="Total">The roll's total.</param>
 /// <param name="Outcome">A trailing comparison's result; null when the expression has none.</param>
-/// <param name="DetailJson">The faces and groups as a JSON object (the host's shape, contract §3.11 and understand-change-sites §1.4).</param>
+/// <param name="DetailJson">
+/// The faces and groups as a JSON object: <see cref="DndMcp.Domain.Dice.DiceLogDetail.Json"/>'s shape (contract §3.11 and
+/// understand-change-sites §1.4), the same one the combat tracker writes for its own rolls, so a session's roll log reads alike.
+/// </param>
 public sealed record DiceLogRoll(string Expression, string? Label, long Total, bool? Outcome, string DetailJson);
 
 /// <summary>A logged roll: its <c>dice_roll.seq</c> and id.</summary>
@@ -105,7 +108,7 @@ public sealed class DiceLogWriter
                     var id = CampaignDatabase.NewId();
                     var seq = DiceRollLog.Append(connection, transaction, new DiceRollRow(0, id, campaign.Id, live.EntityId, roll.Expression.Trim(),
                         string.IsNullOrWhiteSpace(roll.Label) ? null : roll.Label.Trim(), roll.Total,
-                        roll.Outcome switch { null => null, true => 1L, false => 0L }, roll.DetailJson, secret ? 1 : 0, at));
+                        roll.Outcome switch { null => null, true => 1L, false => 0L }, roll.DetailJson, secret ? 1 : 0, at, EncounterId: null));
                     logged.Add(new LoggedRoll(seq, id));
                 }
 

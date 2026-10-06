@@ -22,6 +22,11 @@ namespace DndMcp.Tools;
 /// <b>Concise by default</b>: bodies and secret text are cut to their first lines; <c>detail: "full"</c> shows them whole
 /// (within the output cap, shared between the refs asked for).
 /// </para>
+/// <para>
+/// <b><c>include: ["sheet"]</c></b> (contract §7.3, §7.4) adds a character's sheet: the author's whole sheet (with
+/// <c>as_of_session</c>, as it stood then), or for any other view the public line of a current party member it is shown,
+/// and nothing for any other character, so a sheet a view may not see reads exactly as no sheet.
+/// </para>
 /// <para>Hints: read-only, idempotent, closed-world (campaigns.db only).</para>
 /// </summary>
 public sealed class CampaignGetTools
@@ -43,9 +48,10 @@ public sealed class CampaignGetTools
         "campaign_search.\n" +
         "- refs (required): 1-10 handles: \"character:belmakor\" (kind:slug), \"belmakor\" (slug), \"e:12\", \"f:7\" (a fact), " +
         "a register code (\"Q22\", \"F36\") or \"session:3\".\n" +
-        "- include: what to add, from relations, facts, knowledge, children, sessions, history. Default relations, facts, " +
+        "- include: what to add, from relations, facts, knowledge, children, sessions, history, sheet. Default relations, facts, " +
         "children; [] for none. knowledge: the view's verdict on the entry and each fact (the author sees every knower); " +
-        "history (author only): the change batches that touched it.\n" +
+        "history (author only): the change batches that touched it; sheet: a character's sheet (the author's whole sheet; " +
+        "another view, a party member's public line only).\n" +
         "- detail: \"concise\" (default: bodies cut to their opening) or \"full\" (whole bodies and, for the author, secret text).\n" +
         "- perspective: \"author\" (default: everything, secret text and author-only names included), \"dm\", \"table\", " +
         "\"party\", \"public\" or \"character:<slug>\". Other views see only what they know, under the names they know: an entry " +
@@ -55,7 +61,7 @@ public sealed class CampaignGetTools
         "Example: " + Example)]
     public string Get(
         [Description("1-10 handles, e.g. [\"character:belmakor\", \"f:12\", \"Q22\"].")] string[] refs,
-        [Description("What to add: relations, facts, knowledge, children, sessions, history. Default [\"relations\", \"facts\", \"children\"].")]
+        [Description("What to add: relations, facts, knowledge, children, sessions, history, sheet. Default [\"relations\", \"facts\", \"children\"].")]
         string[]? include = null,
         [Description("\"concise\" (default) or \"full\" (whole bodies and secret text).")] string? detail = null,
         [Description("Whose view: \"author\" (default), \"dm\", \"table\", \"party\", \"public\" or \"character:<slug>\".")] string? perspective = null,
@@ -67,7 +73,7 @@ public sealed class CampaignGetTools
         var row = _campaigns.Resolve(string.IsNullOrWhiteSpace(campaign) ? null : campaign);
         var view = CampaignView.Resolve(_campaigns.Database, row, perspective, asOfSession);
         var result = new EntityReader(_campaigns.Database).Get(row, refs ?? [], includes, view.Perspective, asOfSession);
-        return EntityMarkdown.Format(result, view, row.Slug, full);
+        return EntityMarkdown.Format(result, includes.Sheet ? view.WithLiveFight(_campaigns.Database, row) : view, row.Slug, full);
     }
 
     /// <summary>detail as a flag: false for concise (the default), true for full.</summary>

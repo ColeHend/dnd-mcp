@@ -7,7 +7,8 @@ namespace DndMcp.Domain.Simulation;
 
 /// <summary>One entry as compiled: its label, side, where it came from, and its creatures' ids.</summary>
 /// <param name="Where">The entry as messages name it ("party item 2 (Fighter)"), for a problem found after compiling (the comparison's variant).</param>
-internal sealed record PreparedEntry(string Label, int Side, string Source, int[] Ids, bool DeathSaves, string Where);
+/// <param name="Placeholder">A resumed fight's dead creature kept only for its place in the order (<see cref="CombatantStart.Placeholder"/>): left out of the report.</param>
+internal sealed record PreparedEntry(string Label, int Side, string Source, int[] Ids, bool DeathSaves, string Where, bool Placeholder = false);
 
 /// <summary>A validated, compiled run: what every fight shares, and what the report echoes.</summary>
 internal sealed record PreparedRun(
@@ -23,7 +24,8 @@ internal sealed record PreparedRun(
     IReadOnlyList<StatBlockWarnings> Warnings,
     int CompareMember,
     string? CompareMemberName,
-    string? CompareFeature)
+    string? CompareFeature,
+    bool Resumed = false)
 {
     public int Combatants => Setup.Templates.Length;
 }
@@ -60,8 +62,10 @@ internal static class SimulationPreparation
         var fightEdition = Match(V.Editions.Set, spec.Edition);
         foreach (var (side, item, combatant) in entries)
         {
-            expanded.Add(CheckEntry(side, item, combatant, fightEdition, problems));
+            expanded.Add(CheckEntry(Where(side, item, combatant?.Spec), combatant, fightEdition, problems));
         }
+
+        StartPreparation.Check(spec, entries, expanded, problems);
 
         var total = expanded.Sum(e => Math.Clamp(e.Count ?? 1, 1, SimulationLimits.MaxCount));
         if (total > SimulationLimits.MaxCombatants)
@@ -106,19 +110,28 @@ internal static class SimulationPreparation
                 var id = templates.Count;
                 ids[copy] = id;
                 templates.Add(combatant.Monster is { } monster
-                    ? CombatantCompiler.FromStatBlock(monster, entry, id, side, label, enemyHp == SimulationValues.EnemyHp.Roll && side == 1)
-                    : CombatantCompiler.FromBuild(resolved[e]!, entry, id, side, label, deathSaves));
+                    ? CombatantCompiler.FromStatBlock(monster, entry, id, side, label, enemyHp == SimulationValues.EnemyHp.Roll && side == 1, spec.Lair)
+                    : resolved[e] is { } resolvedBuild
+                        ? CombatantCompiler.FromBuild(resolvedBuild, entry, id, side, label, deathSaves)
+                        : CombatantCompiler.Placeholder(id, side, label));
             }
 
             var source = combatant.Monster is { } m
                 ? $"monster {m.Ref}"
-                : combatant.Spec.Archetype is { } archetype
-                    ? $"archetype {PartyArchetypes.Canonical(archetype) ?? archetype} (level {Number(resolved[e]!.Level)}, {resolved[e]!.Edition})"
-                    : $"build \"{resolved[e]!.Name}\" (level {Number(resolved[e]!.Level)}, {resolved[e]!.Edition})";
-            prepared.Add(new PreparedEntry(baseLabel, side, source, ids, deathSaves || (combatant.Monster is not null && entry.DeathSaves == true), where));
+                : resolved[e] is null
+                    ? "placeholder"
+                    : combatant.Spec.Archetype is { } archetype
+                        ? $"archetype {PartyArchetypes.Canonical(archetype) ?? archetype} (level {Number(resolved[e]!.Level)}, {resolved[e]!.Edition})"
+                        : $"build \"{resolved[e]!.Name}\" (level {Number(resolved[e]!.Level)}, {resolved[e]!.Edition})";
+            prepared.Add(new PreparedEntry(baseLabel, side, source, ids, deathSaves || (combatant.Monster is not null && entry.DeathSaves == true), where,
+                StartPreparation.IsPlaceholder(combatant)));
         }
 
-        var edition = Match(V.Editions.Set, spec.Edition) ?? EditionOf(entries[0].Combatant, resolved[0]);
+        var resume = spec.Resume is { } given ? StartPreparation.Order(given, prepared.Select(p => p.Ids).ToList()) : ((int[] Order, int StartAt)?)null;
+        var resumedCreature = resume is { } at ? at.Order[at.StartAt] : -1;
+        var unmatched = CompileStarts(entries, prepared, templates, resumedCreature);
+        var first = Enumerable.Range(0, entries.Count).First(e => entries[e].Side != 0 || !prepared[e].Placeholder);
+        var edition = Match(V.Editions.Set, spec.Edition) ?? EditionOf(entries[first].Combatant, resolved[first]);
         var setup = new FightSetup
         {
             Templates = templates.ToArray(),
@@ -132,6 +145,10 @@ internal static class SimulationPreparation
             Healing = healing,
             FinishDowned = policies.FinishDowned == true,
             PcsWinTies = policies.PcsWinTies == true,
+            FixedOrder = resume?.Order,
+            StartAt = resume?.StartAt ?? 0,
+            StartRound = spec.Resume?.Round ?? 1,
+            Seeded = resume is not null || templates.Any(t => t.Start is not null),
         };
         SetThreat(templates);
 
@@ -150,6 +167,11 @@ internal static class SimulationPreparation
             {
                 variantTemplates[id] = CombatantCompiler.FromBuild(variantBuild, entry, id, 0, templates[id].Label, prepared[e].DeathSaves);
                 variantTemplates[id].Threat = templates[id].Threat;
+                if (entries[e].Combatant.Start is { } start)
+                {
+                    // The same live state, matched against the variant's own resources and setups (its names may differ).
+                    variantTemplates[id].Start = StartPreparation.Compile(start, variantTemplates[id], setup.Entries, resumedCreature, prepared[e].Where, [], []);
+                }
             }
 
             variant = new FightSetup
@@ -165,6 +187,10 @@ internal static class SimulationPreparation
                 Healing = setup.Healing,
                 FinishDowned = setup.FinishDowned,
                 PcsWinTies = setup.PcsWinTies,
+                FixedOrder = setup.FixedOrder,
+                StartAt = setup.StartAt,
+                StartRound = setup.StartRound,
+                Seeded = setup.Seeded,
             };
             memberName = prepared[e].Label;
             featureName = compare.Feature!.Name;
@@ -190,16 +216,82 @@ internal static class SimulationPreparation
             spec.Replay,
             echo,
             [
-                .. Assumptions(templates, setup, enemyHp, surprise),
+                .. Assumptions(templates.Where(t => t.Start is not { Placeholder: true }).ToList(), setup, enemyHp, surprise, spec.Lair),
                 .. PartyArchetypes.ReportAssumptions(entries
-                    .Select((entry, e) => (entry.Combatant.Spec.Archetype, Build: resolved[e]))
-                    .Where(a => a.Archetype is not null)
+                    .Select((entry, e) => (entry.Combatant.Spec.Archetype, Build: resolved[e], prepared[e].Placeholder))
+                    .Where(a => a.Archetype is not null && !a.Placeholder)
                     .Select(a => (a.Archetype!, a.Build!.Level, a.Build.Edition))),
+                .. StartAssumptions(setup, prepared, unmatched),
             ],
-            Warnings(entries.Select(e => (e.Side, e.Combatant.Monster)).ToList()),
+            Warnings(entries.Where((_, e) => !prepared[e].Placeholder).Select(e => (e.Side, e.Combatant.Monster)).ToList()),
             member,
             memberName,
-            featureName);
+            featureName,
+            setup.Seeded);
+    }
+
+    /// <summary>
+    /// Compiles every seeded entry's start against its creature (after all are compiled: conditions name other creatures),
+    /// throwing the problems only the compiled creature reveals; returns, per entry label, the names its start gave that
+    /// matched nothing (left at their fresh value, said in the assumptions).
+    /// </summary>
+    /// <param name="resumedCreature">The creature whose turn a resume starts at (−1: no resume).</param>
+    private static List<(string Label, List<string> Names)> CompileStarts(IReadOnlyList<(int Side, int Item, SimulationCombatant Combatant)> entries,
+                                                                         IReadOnlyList<PreparedEntry> prepared, List<CombatantTemplate> templates,
+                                                                         int resumedCreature)
+    {
+        var problems = new List<string>();
+        var unmatched = new List<(string, List<string>)>();
+        var ids = prepared.Select(p => p.Ids).ToList();
+        for (var e = 0; e < entries.Count; e++)
+        {
+            if (entries[e].Combatant.Start is not { } start)
+            {
+                continue;
+            }
+
+            var names = new List<string>();
+            foreach (var id in prepared[e].Ids)
+            {
+                templates[id].Start = StartPreparation.Compile(start, templates[id], ids, resumedCreature, prepared[e].Where, problems, names);
+            }
+
+            if (names.Count > 0)
+            {
+                unmatched.Add((prepared[e].Label, names.Distinct(StringComparer.OrdinalIgnoreCase).ToList()));
+            }
+        }
+
+        DslProblems.ThrowIfAny(problems, "simulation");
+        return unmatched;
+    }
+
+    /// <summary>What a fight picked up from a live state assumes: where it resumes, the placeholders, the names that matched nothing.</summary>
+    private static IEnumerable<string> StartAssumptions(FightSetup setup, IReadOnlyList<PreparedEntry> prepared, List<(string Label, List<string> Names)> unmatched)
+    {
+        if (setup.FixedOrder is { } order)
+        {
+            yield return $"Resumed from a live fight in round {Number(setup.StartRound)} at {setup.Templates[order[setup.StartAt]].Label}'s turn, in its order: " +
+                         "that turn's start is played again (a recharge or death save rolled anew), the rounds and the round cap count from the resumed round as round 1, " +
+                         "and hit points (HP at start, HP lost) are from the live state.";
+        }
+        else if (setup.Seeded)
+        {
+            yield return "Some combatants start from a live state: their hit points (HP at start, HP lost) are from it.";
+        }
+
+        var placeholders = prepared.Where(p => p.Placeholder).Select(p => p.Label).ToList();
+        if (placeholders.Count > 0)
+        {
+            yield return $"Placeholders (dead; they only keep their place in the order, so what they imposed still ends on their turns, and are left out of the results): {string.Join(", ", placeholders)}.";
+        }
+
+        foreach (var (label, names) in unmatched)
+        {
+            var one = names.Count == 1;
+            yield return $"{label}: the live state's {string.Join(", ", names.Select(n => $"\"{DslText.Echo(n)}\""))} {(one ? "matches" : "match")} none of its uses, " +
+                         $"recharges, slot pools or setups here, so {(one ? "it starts" : "they start")} as in a fresh fight.";
+        }
     }
 
     private static void CheckTopLevel(SimulationSpec spec, List<string> problems)
@@ -238,29 +330,74 @@ internal static class SimulationPreparation
         }
     }
 
+    /// <summary>
+    /// One combatant compiled alone, exactly as <see cref="Prepare"/> compiles an entry (its problems checked the same way,
+    /// an archetype expanded, a build resolved), for <see cref="SimulationStartNames.Match"/>: what a start's names are
+    /// matched against. Its problems name it "combatant (its name)", since it is no list's item here.
+    /// </summary>
+    internal static CombatantTemplate CompileAlone(SimulationCombatant combatant, string? edition, RulingsSpec? rulings)
+    {
+        var problems = new List<string>();
+        Known(V.Editions.Set, "edition", edition, problems);
+        var name = combatant.Spec is { } spec
+            ? OneLine(spec.Name) ?? OneLine(spec.Character) ?? OneLine(spec.Monster) ?? OneLine(spec.Build?.Name) ?? OneLine(spec.Archetype)
+            : null;
+        var where = name is null ? "combatant" : $"combatant ({DslText.Echo(name)})";
+        var entry = CheckEntry(where, combatant, Match(V.Editions.Set, edition), problems);
+        DslProblems.ThrowIfAny(problems, "simulation");
+        var label = OneLine(entry.Name) ?? (combatant.Monster is { } block ? block.Name : entry.Build?.Name ?? "combatant");
+        if (combatant.Monster is { } monster)
+        {
+            return CombatantCompiler.FromStatBlock(monster, entry, 0, 0, label, rollHp: false);
+        }
+
+        return entry.Build is { } build
+            ? CombatantCompiler.FromBuild(BuildResolver.Resolve(build, entry.Level ?? build.Level ?? 1, rulings, where + " build", BuildUse.Simulation), entry, 0, 0, label, pcLike: true)
+            : CombatantCompiler.Placeholder(0, 0, label);
+    }
+
+    /// <param name="where">The entry as messages name it ("party item 2 (Fighter)").</param>
     /// <param name="fightEdition">The fight's edition when the spec gives one: an archetype entry without its own follows it.</param>
-    private static CombatantSpec CheckEntry(int side, int item, SimulationCombatant? combatant, string? fightEdition, List<string> problems)
+    private static CombatantSpec CheckEntry(string where, SimulationCombatant? combatant, string? fightEdition, List<string> problems)
     {
         var spec = combatant?.Spec;
-        var where = Where(side, item, spec);
         if (combatant is null || spec is null)
         {
-            problems.Add($"{where}: is null; give an object with monster, build or archetype.");
+            problems.Add($"{where}: is null; give an object with monster, build, archetype or character.");
             return new CombatantSpec();
         }
 
-        var sources = (spec.Monster is not null ? 1 : 0) + (spec.Build is not null ? 1 : 0) + (spec.Archetype is not null ? 1 : 0);
+        var sources = (spec.Monster is not null ? 1 : 0) + (spec.Build is not null ? 1 : 0) + (spec.Archetype is not null ? 1 : 0) +
+                      (spec.Character is not null ? 1 : 0);
+        if (sources == 0 && StartPreparation.IsPlaceholder(combatant))
+        {
+            // A dead creature kept only for its place needs no way to fight (CombatantCompiler.Placeholder): its name is enough.
+            if (spec.Name is { } label && !DslText.IsOneLine(label, DslLimits.MaxBuildNameLength))
+            {
+                problems.Add($"{where}: name must be one line of at most {DslLimits.MaxBuildNameLength} characters.");
+            }
+
+            return spec;
+        }
+
         if (sources != 1)
         {
             problems.Add(sources == 0
-                ? $"{where}: give exactly one of monster (an SRD monster, e.g. \"Ogre\"), build (a DSL build with hp and ac) or archetype."
-                : $"{where}: give only one of monster, build and archetype.");
+                ? $"{where}: give exactly one of monster (an SRD monster, e.g. \"Ogre\"), build (a DSL build with hp and ac), archetype or character (a campaign character with a sheet)."
+                : $"{where}: give only one of monster, build, archetype and character.");
             return spec;
         }
 
         if (spec.Monster is not null && combatant.Monster is null)
         {
             throw new ArgumentException($"{where}: monster \"{spec.Monster}\" reached the simulator without its stat block; the host resolves monsters first.", nameof(combatant));
+        }
+
+        if (spec.Character is not null)
+        {
+            // The host expands a character from its sheet (contract D7) before the Domain sees it, as it resolves a monster:
+            // one that arrives unexpanded would otherwise be simulated as nothing at all.
+            throw new ArgumentException($"{where}: a character entry reached the simulator unexpanded; the host expands characters from their sheets first.", nameof(combatant));
         }
 
         var expanded = spec;
@@ -384,6 +521,10 @@ internal static class SimulationPreparation
         {
             problems.Add($"compare: member is {Number(member)}; the party has {Number(party.Count)} {(party.Count == 1 ? "entry" : "entries")}, so give 1 to {Number(Math.Max(1, party.Count))}.");
         }
+        else if (StartPreparation.IsPlaceholder(party[member - 1]))
+        {
+            problems.Add($"compare: member {Number(member)} is a placeholder (dead, holding its place); compare a member who fights.");
+        }
         else if (expanded[member - 1].Build is null)
         {
             problems.Add($"compare: member {Number(member)} is a monster; the feature needs a build or an archetype to add to.");
@@ -401,7 +542,7 @@ internal static class SimulationPreparation
     internal static string Where(int side, int item, CombatantSpec? spec)
     {
         var list = side == 0 ? "party" : "enemies";
-        var name = spec is null ? null : OneLine(spec.Name) ?? OneLine(spec.Monster) ?? OneLine(spec.Build?.Name) ?? OneLine(spec.Archetype);
+        var name = spec is null ? null : OneLine(spec.Name) ?? OneLine(spec.Character) ?? OneLine(spec.Monster) ?? OneLine(spec.Build?.Name) ?? OneLine(spec.Archetype);
         return name is null ? $"{list} item {Number(item + 1)}" : $"{list} item {Number(item + 1)} ({DslText.Echo(name)})";
     }
 
@@ -456,7 +597,7 @@ internal static class SimulationPreparation
     {
         foreach (var t in templates)
         {
-            var opponents = templates.Where(o => o.Side != t.Side).ToList();
+            var opponents = templates.Where(o => o.Side != t.Side && o.Start is not { Placeholder: true }).ToList();
             if (opponents.Count == 0)
             {
                 continue;
@@ -499,14 +640,17 @@ internal static class SimulationPreparation
         : action.IsAutoHit ? action.MeanDamage * action.Targets
         : 0;
 
-    private static IReadOnlyList<string> Assumptions(List<CombatantTemplate> templates, FightSetup setup, string enemyHp, string surprise)
+    /// <param name="templates">The creatures that fight (placeholders left out: they never act).</param>
+    private static IReadOnlyList<string> Assumptions(List<CombatantTemplate> templates, FightSetup setup, string enemyHp, string surprise, bool lair)
     {
         var list = new List<string>
         {
             "No grid, movement, cover, light, terrain or morale; creatures never flee or surrender.",
             "Engagement: each side has a front line (melee combatants) and a back line; melee attacks reach a standing enemy front-liner (anyone once none stands), flying melee creatures reach the back line, ranged attacks and spells reach anyone.",
             "No opportunity attacks except a build's reaction extra attacks (at their per-round trigger probability). A monster's only reactions are Parry and Shield, each used when its AC bonus turns a hit (not a critical hit) into a miss: a Parry covers that one attack (a Parry whose text says melee attack covers only a melee attack), Shield (+5 AC) lasts until the start of the caster's next turn.",
-            "No lair actions: the fight is not in a lair (legendary action and Legendary Resistance counts are the non-lair ones).",
+            lair
+                ? "In a lair: legendary action and Legendary Resistance counts are the in-lair ones where the stat block has them; lair actions themselves are never simulated."
+                : "No lair actions: the fight is not in a lair (legendary action and Legendary Resistance counts are the non-lair ones).",
             "Monster spells are cast at their own level (no upcasting); a monster does not start a concentration spell while concentrating.",
             "Frightened and charmed ignore line of sight; frightened gives Disadvantage while its source lives.",
             "Monsters choose by expected damage (greedy) against the targets their side's policy picks, heal an ally at 25% HP or less, and Dodge when nothing is usable. A condition an action imposes adds its worth times the chance it lands (an attack's hit, and a failed save where there is one): the target's own damage per round for one that takes its turns (paralyzed, stunned, incapacitated), a quarter of that for one that hampers it (restrained, frightened, prone …), a tenth for exhaustion, nothing for deafened.",

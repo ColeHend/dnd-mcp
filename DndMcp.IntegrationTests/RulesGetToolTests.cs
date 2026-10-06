@@ -808,4 +808,38 @@ public sealed class RulesGetToolTests : IClassFixture<McpServerHarness>
         Assert.True(to >= 0, $"\"{end}\" not found after \"{start}\" in:\n{text}");
         return text[from..to];
     }
+
+    /// <summary>
+    /// Contract D21 and the surface review's M3 (Draft RG): the advancement table is served, so rules_get's "not in the data"
+    /// sentence excepts it from the missing Character Creation chapter, as it excepts the encounter budget from the
+    /// Gameplay Toolbox. Told the whole chapter is missing, the model answers "how much XP for level 5?" with "not in this
+    /// server's data" (the Phase 3 encounter-budget bug, for another table).
+    /// </summary>
+    [Fact]
+    public async Task Description_NotInTheData_ExceptsTheAdvancementTableFromCharacterCreation()
+    {
+        var description = Assert.Single(await _server.Client.ListToolsAsync(), t => t.Name == Tool).Description!;
+
+        Assert.Contains(
+            "Not in the data: the 2024 SRD's Playing the Game, Character Creation (apart from its advancement table) and Gameplay Toolbox chapters " +
+            "(apart from its encounter budget), its Spells chapter's casting rules and Equipment chapter's prose, and the multiclassing rules in either " +
+            "edition (a class shows only its prerequisites); say a rule is not in this server's data rather than quoting it from memory.\n",
+            description, StringComparison.Ordinal);
+        Assert.Contains("Quote rules from here rather than from memory.", description, StringComparison.Ordinal);
+        Assert.InRange(description.Length, 1, 2_048);
+    }
+
+    [Theory]
+    [InlineData("Character Advancement")]
+    [InlineData("XP by Level")]
+    [InlineData("rules://tables/character-advancement")]
+    public async Task CallTool_TheAdvancementTable_IsServedByNameAndRef(string nameOrRef)
+    {
+        var arguments = nameOrRef.StartsWith("rules://", StringComparison.Ordinal) ? $$"""{"ref":"{{nameOrRef}}"}""" : $$"""{"name":"{{nameOrRef}}"}""";
+
+        var lines = await GetLinesAsync(arguments);
+
+        Assert.Equal("# Character Advancement", lines[0]);
+        Assert.Contains("| 5 | 6,500 | +3 |", lines);
+    }
 }

@@ -223,6 +223,7 @@ internal static class MartialArchetypes
                     Resource = Resource(Lv.Of(1), V.Rests.LongRest),
                 },
             ],
+            SlotFunded = [new SlotFundedUse(smite.Name!, 1, OrHigher: true, ExtraUses: e2024 ? 1 : 0)],
             Routine = "longsword 1d8 and shield with Dueling from 2, Extra Attack at 5, Divine Smite 2d8 from 2 " +
                       $"({(e2024 ? "once per turn with the Bonus Action" : "on any hit")}), +1d8 radiant per hit from 11, Lay on Hands",
             Notes =
@@ -284,6 +285,8 @@ internal static class MartialArchetypes
                 "Longbow", "1d8", "piercing", V.Abilities.Dex, [V.Properties.Ranged, V.Properties.Heavy, V.Properties.TwoHanded], Attacks,
                 mastery: e2024 ? V.Masteries.Slow : null),
             Modifiers = modifiers,
+            // 2014 casts Hunter's Mark from a spell slot; 2024's Favored Enemy casts it free (uses the tracker does not count).
+            SlotCast = e2024 ? [] : [new SlotCastSpell("Hunter's Mark", 1)],
             Routine = $"longbow 1d8 with Archery from 2, Extra Attack at 5, Hunter's Mark from {(e2024 ? "1 (d10 at 20, Advantage from 17)" : "2")}",
             Notes =
             [

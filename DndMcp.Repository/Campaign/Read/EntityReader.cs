@@ -26,6 +26,11 @@ namespace DndMcp.Repository.Campaign.Read;
 /// <b>Point in time</b>: entity, fact, alias, relation, link, child, objective and clock rows are replayed to the end of
 /// the session (<see cref="AsOfRows"/>); knowledge is judged by learned / valid-until sessions.
 /// </para>
+/// <para>
+/// <b>Sheets</b> (<c>include: ["sheet"]</c>, Phase 7) come from <see cref="Characters.SheetReader"/>: the author view for
+/// the author; for any other view the public line of a current party member it is shown, every other character reading as
+/// one with no sheet; as of a session, the membership, the view and the sheet are those of that session.
+/// </para>
 /// </summary>
 public sealed class EntityReader
 {
@@ -96,6 +101,7 @@ public sealed class EntityReader
 
         DslProblems.ThrowIfAny(problems, "refs");
         var entities = new List<EntityDetail>();
+        var states = new List<EntityState>();
         var facts = new List<FactDetail>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var (entity, fact) in found)
@@ -103,11 +109,19 @@ public sealed class EntityReader
             if (entity is not null && seen.Add(entity.Row.Id))
             {
                 entities.Add(Detail(scope, entity, includes));
+                states.Add(entity);
             }
             else if (fact is not null && seen.Add(fact.Row.Id))
             {
                 facts.Add(FactDetailOf(scope, fact, includes));
             }
+        }
+
+        if (includes.Sheet)
+        {
+            // Every sheet of the render at once: one view-text check for all the public lines (contract §6.12).
+            var sheets = Characters.SheetReader.ForEntities(scope, states);
+            entities = entities.Select((detail, i) => sheets.TryGetValue(states[i].Row.Id, out var sheet) ? detail with { Sheet = sheet } : detail).ToList();
         }
 
         return new GetResult(entities, facts, asOfSession);

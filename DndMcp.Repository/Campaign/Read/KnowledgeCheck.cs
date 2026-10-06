@@ -285,9 +285,10 @@ public sealed class KnowledgeCheck
     /// The kinds whose own names are in-world proper names, so a word of one said alone can give it away (a person, a
     /// place, a faction, a thing, a legend, a made thing, an event, a work). The other kinds (quests, threads, questions,
     /// secrets, sessions, rules, notes, arcs, beats, clocks, fronts, scenes, handouts) carry titles in ordinary words; their
-    /// aliases still count (<see cref="PartialNames"/>).
+    /// aliases still count (<see cref="PartialNames"/>). The view-text check's prefix rule takes its stems by the same line
+    /// (<see cref="ViewTextCheck"/>).
     /// </summary>
-    private static readonly IReadOnlySet<string> ProperNameKinds = new HashSet<string>(StringComparer.Ordinal)
+    internal static readonly IReadOnlySet<string> ProperNameKinds = new HashSet<string>(StringComparer.Ordinal)
     {
         CampaignValues.Kinds.Character,
         CampaignValues.Kinds.Location,

@@ -136,7 +136,10 @@ internal sealed class ConditionTemplate
     /// <summary>Until-escape: the escape DC.</summary>
     public int EscapeDc { get; init; }
 
-    /// <summary>Save-ends: the repeated save's ability (null for another duration).</summary>
+    /// <summary>
+    /// Save-ends: the repeated save's ability (null for another duration — except a seeded save-ends whose round cap has no
+    /// counted turn end left, compiled as UntilStartOfSourceTurn with its save, <c>StartPreparation.Compile</c>).
+    /// </summary>
     public string? SaveAbility { get; init; }
 
     public int SaveDc { get; init; }
@@ -255,6 +258,13 @@ internal struct ActiveCondition
     /// — 1 when imposed during that creature's own turn, whose end does not count ("its NEXT turn").
     /// </summary>
     public int SkipTurnEnds;
+
+    /// <summary>
+    /// UntilStartOfSourceTurn / UntilStartOfTargetTurn, seeded only: turn starts (of the source / of the target) still to
+    /// pass before it ends — 1 for a condition imposed during the turn a resumed fight starts at, whose start the resume plays
+    /// again (<see cref="StartCondition.ImposedDuringResumedTurn"/>). 0 for everything imposed in a fight.
+    /// </summary>
+    public int SkipTurnStarts;
 
     public ConditionTemplate Template;
 

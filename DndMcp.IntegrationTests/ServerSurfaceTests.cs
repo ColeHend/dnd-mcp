@@ -45,12 +45,14 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
         "balance_dpr",
         "balance_simulate",
         "campaign",
+        "campaign_character",
         "campaign_get",
         "campaign_history",
         "campaign_knowledge",
         "campaign_search",
         "campaign_session",
         "campaign_write",
+        "combat",
         "dice_odds",
         "dice_roll",
         "encounter_difficulty",
@@ -67,9 +69,11 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     /// call rolls again. dice_roll is not read-only: while a campaign session is live it appends its rolls to campaigns.db.
     /// Of the campaign tools only campaign_search and campaign_get are read-only (and so idempotent); every other one writes
     /// campaigns.db and is not idempotent (a second call is a second batch, a second campaign, a second start refused).
-    /// campaign_write (the delete op), campaign_knowledge (retract deletes rows) and campaign_history (undo deletes what a
-    /// batch created) are destructive; campaign and campaign_session never delete anything. All are closed-world: they
-    /// touch nothing but campaigns.db.
+    /// campaign_write (the delete op), campaign_knowledge (retract deletes rows), campaign_history (undo deletes what a
+    /// batch created) and campaign_character (an inventory call that takes a holding to 0 deletes its row) are destructive;
+    /// campaign and campaign_session never delete anything. combat writes campaigns.db (not read-only, not idempotent: a
+    /// second damage is more damage) and deletes nothing (end writes a used item's quantity, 0 included, and its write-back is
+    /// one undoable batch), so it is not destructive. All are closed-world: they touch nothing but campaigns.db.
     /// </summary>
     public static readonly IReadOnlyDictionary<string, (bool ReadOnly, bool Destructive, bool Idempotent, bool OpenWorld)> ExpectedAnnotations =
         new Dictionary<string, (bool, bool, bool, bool)>
@@ -78,12 +82,14 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
             ["balance_dpr"] = (true, false, true, false),
             ["balance_simulate"] = (true, false, false, false),
             ["campaign"] = (false, false, false, false),
+            ["campaign_character"] = (false, true, false, false),
             ["campaign_get"] = (true, false, true, false),
             ["campaign_history"] = (false, true, false, false),
             ["campaign_knowledge"] = (false, true, false, false),
             ["campaign_search"] = (true, false, true, false),
             ["campaign_session"] = (false, false, false, false),
             ["campaign_write"] = (false, true, false, false),
+            ["combat"] = (false, false, false, false),
             ["dice_odds"] = (true, false, true, false),
             ["dice_roll"] = (false, false, false, false),
             ["encounter_difficulty"] = (true, false, true, false),
@@ -94,8 +100,9 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     /// <summary>
     /// THE list of resources with no campaigns, for the same reason. Claude Code offers each as an <c>@dnd:</c> mention and
     /// adds tools to read them, so a resource appearing or vanishing changes what the model can reach. Each campaign then
-    /// adds its own <c>campaign://&lt;slug&gt;/summary</c> and <c>/threads</c>, listed at request time
-    /// (<see cref="ListResources_OneCampaign_AddsItsSummaryAndThreadsAndStillNoTemplates"/>).
+    /// adds its own <c>campaign://&lt;slug&gt;/summary</c>, <c>/threads</c> and <c>/party</c>, listed at request time, and
+    /// <c>/combat/current</c>, readable but never listed
+    /// (<see cref="ListResources_OneCampaign_AddsItsSummaryThreadsAndPartyButNotItsFightAndStillNoTemplates"/>).
     /// </summary>
     public static readonly IReadOnlyList<string> ExpectedResourceUris =
     [
@@ -103,6 +110,7 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
         "rules://attribution",
         "rules://tables/adventuring-day-xp-2014",
         "rules://tables/aoe-targets",
+        "rules://tables/character-advancement",
         "rules://tables/cr-xp",
         "rules://tables/dpr-targets-by-level",
         "rules://tables/encounter-multipliers-2014",
@@ -137,7 +145,7 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     /// three left at the last release, and then the registry and <c>claude mcp list</c> show a new server under an old
     /// version, which is how an update looks like nothing changed.
     /// </summary>
-    public const string ExpectedVersion = "0.6.0";
+    public const string ExpectedVersion = "0.7.0";
 
     // Claude Code truncates tool descriptions and server instructions here (CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH).
     private const int DescriptionLimit = 2048;
@@ -148,7 +156,8 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     // The contract's budget for campaign_write's typed ops before they must be published untyped (CheckedAsAttribute).
     private const int CampaignWriteSchemaLimit = 24_000;
 
-    private const string LaterBuildsLine = "More tools arrive in later builds: character sheets, combat tracking, markdown export and import.";
+    // What is still to come (Phase 8): Phase 7's character sheets and combat tracker exist now (campaign_character, combat).
+    private const string LaterBuildsLine = "More tools arrive in later builds: markdown export and import.";
 
     private readonly McpServerHarness _server;
     private readonly OneCampaignServer _campaign;
@@ -360,11 +369,13 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     }
 
     [Fact]
-    public async Task ListResources_OneCampaign_AddsItsSummaryAndThreadsAndStillNoTemplates()
+    public async Task ListResources_OneCampaign_AddsItsSummaryThreadsAndPartyButNotItsFightAndStillNoTemplates()
     {
         // A campaign's resources are listed by a handler at request time, not registered, so nothing above sees them. A
         // server of its own: a campaign in the class fixture's data directory would change the list pinned above. The
-        // client learns of them only through list_changed, which Claude Code answers by listing again.
+        // client learns of them only through list_changed, which Claude Code answers by listing again. The fight running
+        // now (/combat/current) is readable by URI but never listed (contract §15 H2), like the deep URIs: campaign://list
+        // and the combat results name it.
         var server = new McpServerHarness();
         await server.InitializeAsync();
         try
@@ -382,7 +393,7 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
             await changed.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
             var resources = await server.Client.ListResourcesAsync();
-            string[] added = ["campaign://sky/summary", "campaign://sky/threads"];
+            string[] added = ["campaign://sky/summary", "campaign://sky/threads", "campaign://sky/party"];
             Assert.Equal(
                 ExpectedResourceUris.Concat(added).Order(StringComparer.Ordinal),
                 resources.Select(r => r.Uri).Order(StringComparer.Ordinal));
@@ -400,6 +411,9 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
                 Assert.StartsWith("# ", contents.Text, StringComparison.Ordinal);
             }
 
+            var fight = Assert.IsType<TextResourceContents>(Assert.Single((await server.Client.ReadResourceAsync("campaign://sky/combat/current")).Contents));
+            Assert.StartsWith("# ", fight.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain(resources, r => r.Uri.Contains("/combat", StringComparison.Ordinal));
             Assert.Empty(await server.Client.ListResourceTemplatesAsync());
         }
         finally
@@ -482,7 +496,7 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
 
     [Theory]
     [InlineData("session_recap", "campaign_session", "campaign_search", "campaign_get", "campaign_write", "campaign_history")]
-    [InlineData("session_prep", "campaign", "campaign_session", "campaign_search", "campaign_get", "encounter_difficulty", "balance_simulate")]
+    [InlineData("session_prep", "campaign", "campaign_session", "campaign_search", "campaign_get", "encounter_difficulty", "balance_simulate", "combat")]
     [InlineData("knowledge_check", "campaign_knowledge")]
     [InlineData("continuity_check", "campaign_search", "campaign_get", "campaign_session", "campaign_history", "campaign_knowledge")]
     [InlineData("in_character", "campaign_search", "campaign_get", "campaign_knowledge")]
@@ -522,48 +536,46 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     public void ServerInstructions_EveryTool_IsNamed(string name)
     {
         // Under tool search the instructions are what make the model look a tool up at all; a tool they never mention is
-        // found only by luck.
-        Assert.Contains(name, _server.Client.ServerInstructions, StringComparison.Ordinal);
+        // found only by luck. Named means as a whole word at the head of what it is for: "- combat: …", "- campaign_search,
+        // campaign_get: …", "… per round. balance_compare: …". A substring proved nothing: "combat" passed inside
+        // "combatant" before combat had a line, and "campaign" passes inside every campaign tool's name and in prose.
+        var named = new Regex($@"(?:^- (?:[a-z_]+, )*|\. ){Regex.Escape(name)}(?![A-Za-z0-9_])(?:, [a-z_]+)*: ", RegexOptions.Multiline);
+
+        Assert.Matches(named, _server.Client.ServerInstructions);
+    }
+
+    [Theory]
+    // A promise of something that already exists tells the model it is not there yet: the rules tools (Phase 2), the
+    // encounter tool (Phase 3), the balance tools ("damage per round … arrive in later builds", "combat simulation
+    // arrives"; Phases 4 and 5), the campaign tools ("campaign tracking", Phase 6) and the character sheets and live combat
+    // tracker (campaign_character and combat, Phase 7).
+    [InlineData("rules")]
+    [InlineData("encounter")]
+    [InlineData("damage")]
+    [InlineData("balance")]
+    [InlineData("simulat")]
+    [InlineData("campaign")]
+    [InlineData("tracking")]
+    [InlineData("character")]
+    [InlineData("sheet")]
+    [InlineData("combat")]
+    public void ServerInstructions_LaterBuildsLine_PromisesNothingTheServerHas(string word)
+    {
+        var later = InstructionLine("More tools arrive");
+
+        Assert.DoesNotContain(word, later, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public void ServerInstructions_LaterBuildsLine_NoLongerPromisesRulesLookup()
+    public void ServerInstructions_LaterBuildsLine_NamesOnlyMarkdownExportAndImport()
     {
-        // A promise of something that already exists tells the model the rules tools are not there yet.
-        var later = InstructionLine("More tools arrive");
+        // What is still to come is Phase 8's markdown export and import, on the one line that says anything is coming, and
+        // the last line, so Phase 8 drops it whole when it adds its tool's line.
+        var lines = _server.Client.ServerInstructions!.Split('\n');
 
-        Assert.DoesNotContain("rules", later, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public void ServerInstructions_LaterBuildsLine_NoLongerPromisesEncounterDifficulty()
-    {
-        var later = InstructionLine("More tools arrive");
-
-        Assert.DoesNotContain("encounter", later, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public void ServerInstructions_LaterBuildsLine_NoLongerPromisesDamagePerRoundOrSimulation()
-    {
-        // balance_dpr, balance_compare and balance_simulate exist; "damage-per-round … arrive in later builds" or "combat
-        // simulation arrives" would tell the model they don't. ("combat tracking" is Phase 7's live tracker, not these.)
-        var later = InstructionLine("More tools arrive");
-
-        Assert.DoesNotContain("damage", later, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("balance", later, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("simulat", later, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public void ServerInstructions_LaterBuildsLine_NamesOnlyCharacterSheetsCombatTrackingAndMarkdownTransfer()
-    {
-        // The seven campaign tools exist now; "More tools arrive in later builds: campaign tracking." would tell the model
-        // they don't. What is still to come: Phase 7's character sheets and combat tracker, Phase 8's markdown export/import.
-        var later = InstructionLine("More tools arrive");
-
-        Assert.Equal(LaterBuildsLine, later);
-        Assert.DoesNotContain("campaign", later, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(LaterBuildsLine, InstructionLine("More tools arrive"));
+        Assert.Equal(LaterBuildsLine, lines[^1]);
+        Assert.Single(lines, l => l.Contains("later build", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -597,13 +609,20 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
         "ledger (who knows what)")]
     [InlineData("- campaign_session: ", "plan", "start", "end (saves the recap)", "record_past (a past night)", "recap (what was learned)")]
     [InlineData("- campaign_history: ", "since", "as_of", "undo a batch")]
+    [InlineData("- campaign_character: ", "sheets", "HP", "damage", "slots", "resources", "conditions", "rests", "XP", "inventory")]
+    [InlineData("- combat: ", "a live fight", "initiative", "damage", "conditions", "death saves", "reminders", "end updates sheets")]
     public void ServerInstructions_CampaignTools_EachLineSaysWhatTheToolIsFor(string line, params string[] words)
     {
         // Under tool search this line is all the model knows of the tool until it picks it. "Does Belmakor know the old
         // king's name?" reaches campaign_knowledge only if the line says so; answered from the conversation instead, it
         // uses the author's view, true names included. The glosses settle the requests whose words two tools share:
         // "record what happened tonight" is the session's end (which saves the recap), not campaign_knowledge's record;
-        // "what did the party learn last session?" is the session recap; "who knows that?" is the knowledge ledger.
+        // "what did the party learn last session?" is the session recap; "who knows that?" is the knowledge ledger. The
+        // table's words ("Belmakor takes 14 damage", "roll initiative", "a long rest") reach campaign_character and combat
+        // only through their lines, and "end updates sheets" says a fight's HP reaches the sheet at its end, not per hit.
+        // "damage" is on campaign_character's line too: "Torch takes 14 damage from the trap" with no fight running belongs
+        // to the sheet (and goes to the fight by itself when one runs, contract D5); with "damage" on combat's line only,
+        // it reaches combat, whose no-fight refusal offers to start a fight for one hit.
         var text = InstructionLine(line);
 
         Assert.All(words, word => Assert.Contains(word, text, StringComparison.Ordinal));
@@ -623,6 +642,36 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     }
 
     [Fact]
+    public void RulesScope_Instructions_SayWhatIsMissingIsNotInThisServersData()
+    {
+        // The model is told to "Say so", so it repeats the phrase to the user. "Not in the data" reads as "not in the SRD",
+        // which is false for the 2024 chapters the line lists: they are in SRD 5.2.1, only not served here. "Not in this
+        // server's data" sends the user to the SRD itself rather than telling them the rule does not exist.
+        var rulesGet = InstructionLine("- rules_get: ");
+
+        Assert.Contains("Not in this server's data: ", rulesGet, StringComparison.Ordinal);
+        Assert.Contains("Say so; never search again or quote from memory.", rulesGet, StringComparison.Ordinal);
+        Assert.DoesNotContain("Not in the data", _server.Client.ServerInstructions, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RulesScope_InstructionsAndRulesGet_ExceptTheAdvancementTableFromTheMissingCharacterCreation()
+    {
+        // The XP and proficiency bonus by level is the one part of the Character Creation chapter this server has
+        // (rules://tables/character-advancement, contract D21). Told that the whole chapter is missing and to say so "never
+        // search again", a model answers "how much XP for level 5?" with "not in this server's data": the encounter-budget bug of
+        // Phase 3 again. The exception is pinned where the model reads it first and in rules_get's own description, and the
+        // table it promises must be there.
+        var rulesGet = await GetToolAsync("rules_get");
+        var table = _server.SuccessText(await _server.CallToolJsonAsync("rules_get", """{"ref":"rules://tables/character-advancement"}"""));
+
+        Assert.Contains("Character Creation (except its advancement table)", InstructionLine("- rules_get: "), StringComparison.Ordinal);
+        Assert.Contains("Character Creation (apart from its advancement table)", rulesGet.Description, StringComparison.Ordinal);
+        Assert.StartsWith("# ", table, StringComparison.Ordinal);
+        Assert.Contains("| 5 | 6,500 | +3 |", table, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ServerInstructions_SimulationAndCombatantFormat_AreNamedWithWhatTheyAnswer()
     {
         // Under tool search the instructions decide whether "can my party survive this?" reaches balance_simulate at all,
@@ -631,6 +680,13 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
 
         Assert.Contains("- balance_simulate: Monte Carlo fights", instructions, StringComparison.Ordinal);
         Assert.Contains("class archetypes", instructions, StringComparison.Ordinal);
+        // Phase 7: a party member can be a campaign character played from its sheet, and the fight can be one stored in a
+        // campaign (encounter, from_state). "How would our party fare in the fight I prepared?" and "who wins from here?"
+        // reach those forms only if this line ties the simulator to sheets and to a campaign's fight; its description,
+        // which carries the arguments, is read only once the model has picked the tool.
+        var simulate = InstructionLine("- balance_simulate: ");
+        Assert.Contains("sheets", simulate, StringComparison.Ordinal);
+        Assert.Contains("a campaign's fight", simulate, StringComparison.Ordinal);
         Assert.Contains("format \"combatant\" shows a monster as the simulator reads it", instructions, StringComparison.Ordinal);
         // F's Phase 4 fix: a verdict compares against the official option.
         Assert.Contains("for a verdict, baseline = the official option (a feat: the ASI it replaces)", instructions, StringComparison.Ordinal);
@@ -639,7 +695,8 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     [Theory]
     [InlineData("balance_dpr", "build", "target", "levels", "ac_range", "horizon", "rounds", "rest_preset", "encounters_per_day", "short_rests", "rulings")]
     [InlineData("balance_compare", "baseline", "variant", "feature", "target", "levels", "horizon", "rounds", "rest_preset", "encounters_per_day", "short_rests", "rulings")]
-    [InlineData("balance_simulate", "party", "enemies", "iterations", "seed", "round_cap", "edition", "surprise", "enemy_hp", "precision", "replay", "policies", "compare", "rulings")]
+    [InlineData("balance_simulate", "party", "enemies", "encounter", "from_state", "campaign", "iterations", "seed", "round_cap", "edition", "surprise",
+        "enemy_hp", "precision", "replay", "policies", "compare", "rulings")]
     [InlineData("campaign", "action", "campaign", "name", "role", "ruleset", "dm_name", "slug", "settings", "party_name", "my_character", "status",
         "summary_md", "current_location", "current_ingame", "perspective", "reason", "session", "dry_run")]
     [InlineData("campaign_search", "query", "kinds", "statuses", "tags", "perspective", "include_facts", "as_of_session", "limit", "cursor", "campaign")]
@@ -651,6 +708,12 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
         "ingame_end", "notes", "recap_md", "next_hooks", "confidence", "status", "limit", "cursor", "perspective", "reason", "dry_run")]
     [InlineData("campaign_history", "action", "since", "session", "targets", "ref", "refs", "detail", "batch_id", "dry_run", "reason", "limit",
         "cursor", "campaign")]
+    [InlineData("campaign_character", "action", "character", "campaign", "perspective", "sheet", "sim_profile", "amount", "damage_type", "slot_level",
+        "pact", "resource", "kind", "hit_dice", "rolls", "add", "remove", "level", "class", "items", "coins", "session", "reason", "dry_run")]
+    [InlineData("combat", "action", "campaign", "encounter", "name", "add_party", "lair", "edition", "combatants", "targets", "amount", "dice", "damage_type",
+        "parts", "critical", "magical", "half", "raw", "knock_out", "source", "secret", "temp", "item", "add", "remove", "duration", "dc", "ability", "level",
+        "round", "effect", "resource", "spell", "slot_level", "pact", "drop", "total", "face", "stable", "resistance", "rolls", "surprised", "from",
+        "perspective", "outcome", "xp", "loot", "currency", "discard", "force", "dry_run", "reason")]
     public async Task ToolDescription_BalanceAndCampaignTools_NamesEveryArgumentAndGivesAnExample(string name, params string[] arguments)
     {
         // MCP has no input_examples: the description is where the model learns each argument and sees one whole call. Each
@@ -691,6 +754,8 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     [InlineData("campaign_history", "- action \"{0}\"")]
     [InlineData("campaign_knowledge", "- {0}:")]
     [InlineData("campaign_session", "- {0}:")]
+    [InlineData("campaign_character", "- {0}:")]
+    [InlineData("combat", "- {0}:")]
     public async Task ToolDescription_ActionTools_DocumentEveryArgumentOfEachActionWhereThatActionIsDescribed(string name, string actionLine)
     {
         // One flat parameter list serves every action, so a word search over the whole description proves nothing: with
@@ -732,6 +797,8 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     [InlineData("campaign_history", "- action \"{0}\"")]
     [InlineData("campaign_knowledge", "- {0}: ")]
     [InlineData("campaign_session", "- {0}: ")]
+    [InlineData("campaign_character", "- {0}: ")]
+    [InlineData("combat", "- {0}: ")]
     public async Task ToolDescription_ActionTools_DescribeEveryActionTheToolAccepts(string name, string actionLine)
     {
         // The actions a tool accepts are its own vocabulary; its refusal of an unknown action lists them. A new action the
@@ -884,8 +951,56 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
 
         Assert.Contains("same fields as party", properties.GetProperty("enemies").GetProperty("description").GetString(), StringComparison.Ordinal);
         Assert.Contains("attacks, modifiers", properties.GetProperty("compare").GetProperty("description").GetString(), StringComparison.Ordinal);
-        Assert.Equal(["enemies", "party"], schema.GetProperty("required").EnumerateArray().Select(r => r.GetString()!).Order(StringComparer.Ordinal));
+        // party and enemies are optional since an encounter can give the sides (contract §15 H2): with nothing required the
+        // SDK publishes no required key at all, and the tool refuses a call with neither ("give party and enemies, or encounter").
+        Assert.False(schema.TryGetProperty("required", out _), "balance_simulate publishes a required list.");
         Assert.True(schema.GetRawText().Length < 24_000, $"balance_simulate's input schema is {schema.GetRawText().Length} characters.");
+    }
+
+    [Fact]
+    public async Task CampaignCharacter_SimProfileIsPublishedUntypedAndTheSchemaStaysUnder16K()
+    {
+        // sim_profile is a whole build (about 14,000 characters of schema typed): published untyped and checked as a
+        // BuildSpec by the argument guard (CheckedAsAttribute), as balance_simulate's compare is. The sheet's own fields
+        // are typed (the guard refuses a misspelt one) and the action needs only action. Pinned below the contract's
+        // 16,000 so a description that grows or a second typed build shows up here first.
+        var schema = (await GetToolAsync("campaign_character")).JsonSchema;
+        var properties = schema.GetProperty("properties");
+        var simProfile = properties.GetProperty("sim_profile");
+
+        Assert.False(simProfile.TryGetProperty("properties", out _));
+        Assert.False(simProfile.TryGetProperty("type", out _));
+        Assert.Contains("a build as balance_dpr takes it", simProfile.GetProperty("description").GetString(), StringComparison.Ordinal);
+        Assert.Contains("object", Types(properties.GetProperty("sheet")));
+        Assert.True(properties.GetProperty("sheet").TryGetProperty("properties", out _), "sheet is published untyped");
+        Assert.Equal(["action"], schema.GetProperty("required").EnumerateArray().Select(r => r.GetString()!));
+        Assert.True(schema.GetRawText().Length < 16_000, $"campaign_character's input schema is {schema.GetRawText().Length} characters.");
+    }
+
+    [Fact]
+    public async Task Combat_EntriesAreTypedAndTheSchemaStaysUnder16K()
+    {
+        // combat has 51 flat parameters and six entry types (combatants, parts, effect, rolls, loot, currency): every entry is
+        // typed, so the argument guard refuses a misspelt field ("combatants item 1 has unknown field 'cuont'"), and hp alone is
+        // untyped ("avg", "roll", "unknown" or a number). Pinned below the contract's 16,000 so a description that grows, a
+        // quoted example per field (each quote costs six characters on the wire) or a second typed copy shows up here first.
+        var schema = (await GetToolAsync("combat")).JsonSchema;
+        var properties = schema.GetProperty("properties");
+        var combatant = properties.GetProperty("combatants").GetProperty("items");
+
+        Assert.Contains("object", Types(combatant));
+        Assert.Equal(
+            ["ac", "character", "count", "death_saves", "hidden", "hp", "init_bonus", "max_hp_reduction", "name", "side", "srd"],
+            combatant.GetProperty("properties").EnumerateObject().Select(p => p.Name).Order(StringComparer.Ordinal));
+        Assert.False(combatant.GetProperty("properties").GetProperty("hp").TryGetProperty("type", out _), "hp is typed");
+        foreach (var typed in new[] { "parts", "rolls", "loot", "currency" })
+        {
+            Assert.Contains("object", Types(properties.GetProperty(typed).GetProperty("items")));
+        }
+
+        Assert.Contains("object", Types(properties.GetProperty("effect")));
+        Assert.Equal(["action"], schema.GetProperty("required").EnumerateArray().Select(r => r.GetString()!));
+        Assert.True(schema.GetRawText().Length < 16_000, $"combat's input schema is {schema.GetRawText().Length} characters.");
     }
 
     [Fact]
@@ -1057,6 +1172,20 @@ public sealed partial class ServerSurfaceTests : IClassFixture<McpServerHarness>
     {
         // The test above holds the three versions together; this one says which version they are (ExpectedVersion).
         Assert.Equal(ExpectedVersion, _server.Client.ServerInfo.Version);
+    }
+
+    [Fact]
+    public void ServerManifest_Description_FitsTheRegistrysLimit()
+    {
+        // The MCP registry schema the manifest declares ($schema, 2025-10-17 server.schema.json) gives ServerDetail's
+        // description minLength 1 and maxLength 100. Longer, the file fails that schema: mcp-publisher refuses it, and so
+        // does any client that validates the .mcp/server.json packed into the NuGet package. A description that grows with
+        // each phase's features passes everything else (0.6.0's was 117 characters, 0.7.0's draft 148).
+        using var manifest = JsonDocument.Parse(File.ReadAllText(ServerManifestPath()));
+        var description = manifest.RootElement.GetProperty("description").GetString();
+
+        Assert.NotNull(description);
+        Assert.InRange(description.Length, 1, 100);
     }
 
     [Fact]

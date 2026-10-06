@@ -347,7 +347,10 @@ public sealed class CampaignSeed
         return id;
     }
 
-    /// <summary>A dice roll (not change-logged, like the real ones); returns its seq.</summary>
+    /// <summary>
+    /// A dice roll (not change-logged, like the real ones); returns its seq. <paramref name="encounterId"/> makes it a roll
+    /// of the combat tracker (Phase 7), which may have no session.
+    /// </summary>
     public long DiceRoll(
         string campaignId,
         string? sessionId,
@@ -356,7 +359,238 @@ public sealed class CampaignSeed
         string? label = null,
         long? outcome = null,
         string detail = "{}",
-        bool secret = false) =>
+        bool secret = false,
+        string? encounterId = null,
+        string? id = null) =>
         DiceRollLog.Append(_connection, null,
-            new DiceRollRow(0, string.Empty, campaignId, sessionId, expression, label, total, outcome, detail, secret ? 1L : 0L, At));
+            new DiceRollRow(0, id ?? string.Empty, campaignId, sessionId, expression, label, total, outcome, detail, secret ? 1L : 0L, At,
+                encounterId));
+
+    /// <summary>
+    /// A character sheet for a character entity (raw SQL: no change_log row, so no history to undo or replay; write it
+    /// through <see cref="ChangeRecorder"/> when a test needs that). Every column can be given; JSON columns take JSON text
+    /// in the shapes of contract §4. Returns the entity id (the sheet's key).
+    /// </summary>
+    public string CharacterSheet(
+        string entityId,
+        string? player = null,
+        string? ruleset = null,
+        string? species = null,
+        string? lineage = null,
+        string? background = null,
+        string? size = null,
+        string classes = "[]",
+        long? level = null,
+        long? xp = null,
+        string abilities = "{}",
+        string saves = "{}",
+        string skills = "{}",
+        long? ac = null,
+        long? maxHp = null,
+        long maxHpReduction = 0,
+        long? hp = null,
+        long tempHp = 0,
+        long? speed = null,
+        string movement = "{}",
+        string senses = "{}",
+        long? initiativeBonus = null,
+        long? passivePerception = null,
+        long? spellSaveDc = null,
+        long? spellAttack = null,
+        string defenses = "{}",
+        string hitDice = "{}",
+        string spellSlots = "{}",
+        string resources = "{}",
+        string conditions = "[]",
+        string? concentration = null,
+        string deathSaves = "{\"successes\":0,\"failures\":0,\"stable\":false}",
+        long exhaustion = 0,
+        bool inspiration = false,
+        string feats = "[]",
+        string features = "[]",
+        string spells = "[]",
+        string languages = "[]",
+        string? simProfile = null,
+        string notesMd = "",
+        string? sheetSource = null)
+    {
+        _connection.Execute(
+            $"INSERT INTO character_sheet({CharacterSheetRow.Columns}) VALUES (@entityId, @player, @ruleset, @species, @lineage, " +
+            "@background, @size, @classes, @level, @xp, @abilities, @saves, @skills, @ac, @maxHp, @maxHpReduction, @hp, @tempHp, " +
+            "@speed, @movement, @senses, @initiativeBonus, @passivePerception, @spellSaveDc, @spellAttack, @defenses, @hitDice, " +
+            "@spellSlots, @resources, @conditions, @concentration, @deathSaves, @exhaustion, @inspiration, @feats, @features, " +
+            "@spells, @languages, @simProfile, @notesMd, @sheetSource, @at, @at)",
+            new
+            {
+                entityId, player, ruleset, species, lineage, background, size, classes, level, xp, abilities, saves, skills, ac,
+                maxHp, maxHpReduction, hp, tempHp, speed, movement, senses, initiativeBonus, passivePerception, spellSaveDc,
+                spellAttack, defenses, hitDice, spellSlots, resources, conditions, concentration, deathSaves, exhaustion,
+                inspiration = inspiration ? 1L : 0L, feats, features, spells, languages, simProfile, notesMd, sheetSource, at = At,
+            });
+        return entityId;
+    }
+
+    /// <summary>Something a character (or the party faction) carries; returns its id.</summary>
+    public string Holding(
+        string campaignId,
+        string holderId,
+        string name,
+        double quantity = 1,
+        string? itemId = null,
+        string? srdRef = null,
+        bool equipped = false,
+        bool attuned = false,
+        string? charges = null,
+        string? acquiredSessionId = null,
+        string? notes = null)
+    {
+        var id = CampaignDatabase.NewId();
+        _connection.Execute(
+            $"INSERT INTO holding({HoldingRow.Columns}) VALUES (@id, @campaignId, @holderId, @itemId, @name, @srdRef, @quantity, " +
+            "@equipped, @attuned, @charges, @acquiredSessionId, @notes, @at, @at)",
+            new
+            {
+                id, campaignId, holderId, itemId, name, srdRef, quantity, equipped = equipped ? 1L : 0L, attuned = attuned ? 1L : 0L,
+                charges, acquiredSessionId, notes, at = At,
+            });
+        return id;
+    }
+
+    /// <summary>Coins in (positive) or out (negative) for a holder; returns its id.</summary>
+    public string CurrencyTxn(
+        string campaignId,
+        string holderId,
+        string note = "loot",
+        long cp = 0,
+        long sp = 0,
+        long ep = 0,
+        long gp = 0,
+        long pp = 0,
+        string? sessionId = null)
+    {
+        var id = CampaignDatabase.NewId();
+        _connection.Execute(
+            $"INSERT INTO currency_txn({CurrencyTxnRow.Columns}) VALUES (@id, @campaignId, @holderId, @sessionId, @cp, @sp, @ep, @gp, " +
+            "@pp, @note, @at)",
+            new { id, campaignId, holderId, sessionId, cp, sp, ep, gp, pp, note, at = At });
+        return id;
+    }
+
+    /// <summary>An award (kind xp unless given); returns its id.</summary>
+    public string Award(
+        string campaignId,
+        string recipientId,
+        string kind = CampaignValues.AwardKinds.Xp,
+        long? amount = null,
+        string? sessionId = null,
+        string? note = null,
+        string? source = null)
+    {
+        var id = CampaignDatabase.NewId();
+        _connection.Execute(
+            $"INSERT INTO award({AwardRow.Columns}) VALUES (@id, @campaignId, @recipientId, @sessionId, @kind, @amount, @note, @source, @at)",
+            new { id, campaignId, recipientId, sessionId, kind, amount, note, source, at = At });
+        return id;
+    }
+
+    /// <summary>An encounter (planned, 2024, round 0 unless given); returns its id.</summary>
+    public string Encounter(
+        string campaignId,
+        string name = "The crypt",
+        string ruleset = CampaignValues.Rulesets.R2024,
+        string status = CampaignValues.EncounterStatuses.Planned,
+        string? sessionId = null,
+        string? sceneId = null,
+        long round = 0,
+        string? turnCombatantId = null,
+        bool lair = false,
+        string data = "{}",
+        string notesMd = "",
+        string? outcomeMd = null,
+        string? writebackBatchId = null,
+        string? startedAt = null,
+        string? endedAt = null)
+    {
+        var id = CampaignDatabase.NewId();
+        _connection.Execute(
+            $"INSERT INTO encounter({EncounterRow.Columns}) VALUES (@id, @campaignId, @sceneId, @sessionId, @name, @ruleset, @status, " +
+            "@round, @turnCombatantId, @lair, @data, @notesMd, @outcomeMd, @writebackBatchId, @startedAt, @endedAt, @at, @at)",
+            new
+            {
+                id, campaignId, sceneId, sessionId, name, ruleset, status, round, turnCombatantId, lair = lair ? 1L : 0L, data,
+                notesMd, outcomeMd, writebackBatchId, startedAt, endedAt, at = At,
+            });
+        return id;
+    }
+
+    /// <summary>
+    /// A combatant of an encounter (an enemy unless given; <paramref name="orderKey"/> defaults to after the encounter's
+    /// last). A <paramref name="sheetSnapshot"/> makes it sheet-seeded. Returns its id.
+    /// </summary>
+    public string Combatant(
+        string encounterId,
+        string name,
+        string side = CampaignValues.CombatSides.Enemy,
+        string? entityId = null,
+        string? initGroup = null,
+        string? srdRef = null,
+        string? statblock = null,
+        double? initiative = null,
+        long initBonus = 0,
+        long? ac = null,
+        long? maxHp = null,
+        long maxHpReduction = 0,
+        long? hp = null,
+        long tempHp = 0,
+        long damageTaken = 0,
+        string conditions = "[]",
+        string? concentration = null,
+        string deathSaves = "{\"successes\":0,\"failures\":0,\"stable\":false}",
+        bool makesDeathSaves = false,
+        long exhaustion = 0,
+        string? legendary = null,
+        string resources = "{}",
+        string? sheetSnapshot = null,
+        bool reactionUsed = false,
+        bool surprised = false,
+        bool hidden = false,
+        bool defeated = false,
+        bool dead = false,
+        bool removed = false,
+        double? orderKey = null)
+    {
+        var id = CampaignDatabase.NewId();
+        orderKey ??= _connection.ExecuteScalar<double>(
+            "SELECT coalesce(max(order_key), 0) + 1 FROM combatant WHERE encounter_id = @encounterId", new { encounterId });
+        _connection.Execute(
+            $"INSERT INTO combatant({CombatantRow.Columns}) VALUES (@id, @encounterId, @entityId, @name, @side, @initGroup, @srdRef, " +
+            "@statblock, @initiative, @initBonus, @ac, @maxHp, @maxHpReduction, @hp, @tempHp, @damageTaken, @conditions, " +
+            "@concentration, @deathSaves, @makesDeathSaves, @exhaustion, @legendary, @resources, @sheetSnapshot, @reactionUsed, " +
+            "@surprised, @hidden, @defeated, @dead, @removed, @orderKey, @at, @at)",
+            new
+            {
+                id, encounterId, entityId, name, side, initGroup, srdRef, statblock, initiative, initBonus, ac, maxHp, maxHpReduction,
+                hp, tempHp, damageTaken, conditions, concentration, deathSaves, makesDeathSaves = makesDeathSaves ? 1L : 0L, exhaustion,
+                legendary, resources, sheetSnapshot, reactionUsed = reactionUsed ? 1L : 0L, surprised = surprised ? 1L : 0L,
+                hidden = hidden ? 1L : 0L, defeated = defeated ? 1L : 0L, dead = dead ? 1L : 0L, removed = removed ? 1L : 0L, orderKey,
+                at = At,
+            });
+        return id;
+    }
+
+    /// <summary>A combat_log row (kind note unless given); returns its seq.</summary>
+    public long CombatLog(
+        string encounterId,
+        string kind = CampaignValues.CombatLogKinds.Note,
+        long round = 0,
+        string? turnCombatantId = null,
+        string? actorId = null,
+        string? targetId = null,
+        long? amount = null,
+        string? detail = null,
+        string? rollId = null) =>
+        _connection.ExecuteScalar<long>(
+            "INSERT INTO combat_log(encounter_id, round, turn_combatant_id, actor_id, target_id, kind, amount, detail, roll_id, at) " +
+            "VALUES (@encounterId, @round, @turnCombatantId, @actorId, @targetId, @kind, @amount, @detail, @rollId, @at) RETURNING seq",
+            new { encounterId, round, turnCombatantId, actorId, targetId, kind, amount, detail, rollId, at = At });
 }

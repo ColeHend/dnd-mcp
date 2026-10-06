@@ -26,11 +26,14 @@ namespace DndMcp.IntegrationTests;
 /// party), a <c>campaign_knowledge</c> check; then, with campaigns.db there, what reads it outside the campaign tools: the
 /// resource list (which Claude Code sends at every connect, so a stray line there would drop the server for every user
 /// with a campaign), a campaign resource, a prompt, and a rules call whose edition the campaign decides; then a session
-/// started, a <c>dice_roll</c> logged to it and the session ended (its backup made with <c>VACUUM INTO</c>, and retention
-/// run), each of which can log. Those run one after another, each waiting for what it needs, because the server handles
-/// requests concurrently and a write sent with the create could reach a campaign that does not exist yet. The startup
-/// SQLite probe's verdict goes to stderr too. Shutdown is included because output written while stopping lands after the
-/// last response, where a test that stopped reading early would miss it.
+/// started, a character's sheet made (<c>campaign_character update</c>), a fight with her in it (<c>combat start</c>,
+/// <c>damage</c> with a given amount, <c>end</c>, whose write-back is a batch) and the sheet read back with the HP the fight
+/// wrote, a <c>dice_roll</c> logged to the session and the session ended (its backup made with <c>VACUUM INTO</c>, and
+/// retention run), each of which can log. The fight gives every value, so the server rolls nothing in it: the only roll
+/// logged is the <c>dice_roll</c>, and the HP read back is exact. Those run one after another, each waiting for what it
+/// needs, because the server handles requests concurrently and a write sent with the create could reach a campaign that
+/// does not exist yet. The startup SQLite probe's verdict goes to stderr too. Shutdown is included because output written
+/// while stopping lands after the last response, where a test that stopped reading early would miss it.
 /// </para>
 /// <para>
 /// By default this runs <c>dotnet DndMcp.dll</c> from the build. Set <see cref="BuiltHost.HostExecutableVariable"/>
@@ -65,6 +68,11 @@ public sealed class StdoutPurityTests
     private const int ReadSummaryId = 21;
     private const int GetPromptId = 22;
     private const int CampaignEditionCallId = 23;
+    private const int SheetUpdateCallId = 24;
+    private const int CombatStartCallId = 25;
+    private const int CombatDamageCallId = 26;
+    private const int CombatEndCallId = 27;
+    private const int SheetGetCallId = 28;
 
     // What the startup SQLite probe logs when the native library has everything (SqliteCapabilityCheck).
     private const string ProbeVerdict = ") has every feature dnd-mcp needs: ";
@@ -139,11 +147,27 @@ public sealed class StdoutPurityTests
         // A night at the table: the roll went into the live session's log and the end took the session-end backup.
         Assert.False(IsToolError(responses[SessionStartCallId]), $"The campaign_session start call failed.{server.Diagnostics()}");
         Assert.Contains("session:1 is live.", ResultText(responses[SessionStartCallId]), StringComparison.Ordinal);
+
+        // A fight during it, through the 0002 schema (sheets, encounters, combatants, the combat log) in the real binary:
+        // Aria Vale's sheet made, the fight started with her in it, 5 damage taken, the fight ended with its write-back
+        // batch, and her sheet read back at the HP the fight left her.
+        Assert.False(IsToolError(responses[SheetUpdateCallId]), $"The campaign_character update call failed.{server.Diagnostics()}");
+        Assert.Contains("Batch `", ResultText(responses[SheetUpdateCallId]), StringComparison.Ordinal);
+        Assert.False(IsToolError(responses[CombatStartCallId]), $"The combat start call failed.{server.Diagnostics()}");
+        Assert.Contains("Aria Vale", ResultText(responses[CombatStartCallId]), StringComparison.Ordinal);
+        Assert.False(IsToolError(responses[CombatDamageCallId]), $"The combat damage call failed.{server.Diagnostics()}");
+        Assert.Contains("- Aria Vale: 5 piercing; 24 → 19", ResultText(responses[CombatDamageCallId]), StringComparison.Ordinal);
+        Assert.False(IsToolError(responses[CombatEndCallId]), $"The combat end call failed.{server.Diagnostics()}");
+        Assert.Contains("## Written back", ResultText(responses[CombatEndCallId]), StringComparison.Ordinal);
+        Assert.Contains("Batch `", ResultText(responses[CombatEndCallId]), StringComparison.Ordinal);
+        Assert.False(IsToolError(responses[SheetGetCallId]), $"The campaign_character get call failed.{server.Diagnostics()}");
+        Assert.Contains("HP 19/24", ResultText(responses[SheetGetCallId]), StringComparison.Ordinal);
         Assert.False(IsToolError(responses[LoggedRollCallId]), $"The logged dice_roll failed.{server.Diagnostics()}");
         Assert.EndsWith("Logged to purity, session 1.", ResultText(responses[LoggedRollCallId]), StringComparison.Ordinal);
         Assert.False(IsToolError(responses[SessionEndCallId]), $"The campaign_session end call failed.{server.Diagnostics()}");
         Assert.Contains("Session-end backup: ", ResultText(responses[SessionEndCallId]), StringComparison.Ordinal);
         Assert.Single(Directory.GetFiles(Path.Combine(server.WorkingDirectory, "data", "backups"), "*-session-end.db"));
+        Assert.Equal(["Stealth"], LoggedRollLabels(Path.Combine(server.WorkingDirectory, "data", "campaigns.db")));
 
         // The startup probe's verdict is a log line: on stderr (and, by the purity check above, nowhere on stdout).
         Assert.True(
@@ -350,6 +374,21 @@ public sealed class StdoutPurityTests
             (CampaignEditionCallId, "tools/call", """{"name":"rules_get","arguments":{"name":"Fireball"}}"""),
         ]);
         yield return ([SessionStartCallId], [(SessionStartCallId, "tools/call", """{"name":"campaign_session","arguments":{"action":"start"}}""")]);
+        yield return ([SheetUpdateCallId],
+        [
+            (SheetUpdateCallId, "tools/call",
+                """{"name":"campaign_character","arguments":{"action":"update","character":"character:aria-vale","sheet":{"level":3,"max_hp":24,"ac":15}}}"""),
+        ]);
+        yield return ([CombatStartCallId], [(CombatStartCallId, "tools/call", """{"name":"combat","arguments":{"action":"start","name":"Purity probe"}}""")]);
+        yield return ([CombatDamageCallId],
+        [
+            (CombatDamageCallId, "tools/call",
+                """{"name":"combat","arguments":{"action":"damage","targets":["aria-vale"],"amount":5,"damage_type":"piercing"}}"""),
+        ]);
+        yield return ([CombatEndCallId],
+            [(CombatEndCallId, "tools/call", """{"name":"combat","arguments":{"action":"end","outcome":"Aria Vale held the door."}}""")]);
+        yield return ([SheetGetCallId],
+            [(SheetGetCallId, "tools/call", """{"name":"campaign_character","arguments":{"action":"get","character":"character:aria-vale"}}""")]);
         yield return ([LoggedRollCallId], [(LoggedRollCallId, "tools/call", """{"name":"dice_roll","arguments":{"expression":"1d20+5","label":"Stealth"}}""")]);
         yield return ([SessionEndCallId],
         [
@@ -401,6 +440,24 @@ public sealed class StdoutPurityTests
     {
         Assert.True(response.TryGetProperty("result", out var result), $"The {request} request failed: {response}{server.Diagnostics()}");
         return result;
+    }
+
+    // The labels of every roll campaigns.db logged, read once the server has exited.
+    private static List<string> LoggedRollLabels(string databasePath)
+    {
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection(
+            new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT label FROM dice_roll ORDER BY seq";
+        using var reader = command.ExecuteReader();
+        var labels = new List<string>();
+        while (reader.Read())
+        {
+            labels.Add(reader.IsDBNull(0) ? "(none)" : reader.GetString(0));
+        }
+
+        return labels;
     }
 
     private static List<string?> ResourceUris(JsonElement result) =>

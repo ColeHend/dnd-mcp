@@ -93,8 +93,8 @@ public sealed partial class CampaignPromptTests : IClassFixture<McpServerHarness
 
         Assert.StartsWith($"Check the most recent draft in this conversation against what character:belmakor knows in campaign `{slug}`. " +
                           "If there is no draft yet, ask me for it and stop.", text, StringComparison.Ordinal);
-        Assert.Contains($"\n1. Call campaign_knowledge {{\"action\": \"check\", \"campaign\": \"{slug}\", \"perspective\": \"character:belmakor\", " +
-                        "\"text\": <the draft, verbatim>, \"diegetic\": true}", text, StringComparison.Ordinal);
+        Assert.Contains($"\n1. Call campaign_knowledge {{\"action\": \"check\", \"perspective\": \"character:belmakor\", " +
+                        $"\"text\": <the draft, verbatim>, \"diegetic\": true, \"campaign\": \"{slug}\"}}", text, StringComparison.Ordinal);
         Assert.True(text.IndexOf("hard flags first", StringComparison.Ordinal) < text.IndexOf("the things to review", StringComparison.Ordinal));
         Assert.Contains("Never put its words into the draft.", text, StringComparison.Ordinal);
     }
@@ -121,15 +121,15 @@ public sealed partial class CampaignPromptTests : IClassFixture<McpServerHarness
         var text = await Text("session_recap", ("campaign", slug), ("session", "12"));
 
         Assert.StartsWith($"Recap session 12 of campaign `{slug}` from my account of it in this conversation.", text, StringComparison.Ordinal);
-        Assert.Contains($"campaign_session {{\"action\": \"get\", \"campaign\": \"{slug}\", \"session\": 12}}", text, StringComparison.Ordinal);
+        Assert.Contains($"campaign_session {{\"action\": \"get\", \"session\": 12, \"campaign\": \"{slug}\"}}", text, StringComparison.Ordinal);
         Assert.Contains("every call as a dry run first (dry_run: true)", text, StringComparison.Ordinal);
         Assert.Contains("for real only after I approve", text, StringComparison.Ordinal);
-        var recordPast = text.IndexOf($"campaign_session {{\"action\": \"record_past\", \"campaign\": \"{slug}\", \"session\": 12, " +
-                                      "\"title\": ..., \"played_on\": ..., \"recap_md\": ..., \"attendance\": [...]} FIRST", StringComparison.Ordinal);
-        var batch = text.IndexOf($"then campaign_write {{\"campaign\": \"{slug}\", \"session\": 12, \"ops\": [...]}}.", StringComparison.Ordinal);
+        var recordPast = text.IndexOf("campaign_session {\"action\": \"record_past\", \"session\": 12, " +
+                                      $"\"title\": ..., \"played_on\": ..., \"recap_md\": ..., \"attendance\": [...], \"campaign\": \"{slug}\"}} FIRST", StringComparison.Ordinal);
+        var batch = text.IndexOf($"then campaign_write {{\"session\": 12, \"ops\": [...], \"campaign\": \"{slug}\"}}.", StringComparison.Ordinal);
         Assert.True(recordPast > 0 && recordPast < batch, text);
-        Assert.Contains($"campaign_session {{\"action\": \"end\", \"campaign\": \"{slug}\", \"recap_md\": ..., \"attendance\": [...]}} LAST", text, StringComparison.Ordinal);
-        Assert.Contains($"campaign_history {{\"action\": \"undo\", \"campaign\": \"{slug}\"", text, StringComparison.Ordinal);
+        Assert.Contains($"campaign_session {{\"action\": \"end\", \"recap_md\": ..., \"attendance\": [...], \"campaign\": \"{slug}\"}} LAST", text, StringComparison.Ordinal);
+        Assert.Contains($"campaign_history {{\"action\": \"undo\", \"batch_id\": ..., \"campaign\": \"{slug}\"}}", text, StringComparison.Ordinal);
         // A session named by the user needs no guessing about which one it is.
         Assert.DoesNotContain("With no session number from me", text, StringComparison.Ordinal);
     }
@@ -147,8 +147,25 @@ public sealed partial class CampaignPromptTests : IClassFixture<McpServerHarness
             Assert.Contains(tool, text, StringComparison.Ordinal);
         }
 
-        Assert.EndsWith($"campaign_session {{\"action\": \"plan\", \"campaign\": \"{slug}\", \"session\": 13, \"title\": ..., " +
-                        "\"prep_md\": <the run-sheet>, \"dry_run\": true}, then the same call without dry_run.", text, StringComparison.Ordinal);
+        Assert.EndsWith("campaign_session {\"action\": \"plan\", \"session\": 13, \"title\": ..., " +
+                        $"\"prep_md\": <the run-sheet>, \"dry_run\": true, \"campaign\": \"{slug}\"}}, then the same call without dry_run.", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetPrompt_SessionPrep_SizesEachFightAgainstThePartysSheetsAndOffersToPrepareAndSimulateIt()
+    {
+        // Contract §15 H2: the party's levels come from their sheets (party "campaign"), and a dangerous fight can be stored
+        // for the night and simulated with the party fighting from those sheets; every call names the campaign, last.
+        var slug = CampaignWriteSetup.CreateCampaign(_server);
+
+        var text = await Text("session_prep", ("campaign", slug));
+
+        Assert.Contains(
+            $"5. For each fight, encounter_difficulty {{\"party\": \"campaign\", \"monsters\": [...], \"campaign\": \"{slug}\"}} (the party's levels from " +
+            "their sheets). For the dangerous ones, offer to store the fight for the night with combat " +
+            $"{{\"action\": \"prepare\", \"name\": ..., \"combatants\": [...], \"campaign\": \"{slug}\"}} and to run it with " +
+            $"balance_simulate {{\"encounter\": <its name>, \"campaign\": \"{slug}\"}} (the party fights from their sheets).\n",
+            text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -168,8 +185,9 @@ public sealed partial class CampaignPromptTests : IClassFixture<McpServerHarness
 
         // Step 4 is the who-could-know pass: the check runs for the draft's speaker. Without the perspective it runs for the
         // author (its default), for whom every name is ok and no gate or reveal-rule vocabulary applies: it would report nothing.
-        Assert.Contains($"\n4. Check who could know this: campaign_knowledge {{\"action\": \"check\", \"campaign\": \"{slug}\", " +
-                        "\"perspective\": <the speaker, e.g. \"character:<slug>\" or \"party\">, \"text\": <the draft>, ", text, StringComparison.Ordinal);
+        Assert.Contains("\n4. Check who could know this: campaign_knowledge {\"action\": \"check\", " +
+                        "\"perspective\": <the speaker, e.g. \"character:<slug>\" or \"party\">, \"text\": <the draft>, \"diegetic\": true, " +
+                        $"\"campaign\": \"{slug}\"}} (diegetic true for anything said aloud in the world).", text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -181,8 +199,8 @@ public sealed partial class CampaignPromptTests : IClassFixture<McpServerHarness
 
         Assert.Contains("call balance_compare with the OFFICIAL option it replaces", text, StringComparison.Ordinal);
         Assert.Contains("(Under, On budget, Creeping, Over, Breaking)", text, StringComparison.Ordinal);
-        Assert.Contains($"campaign_search {{\"campaign\": \"{slug}\", \"kinds\": [\"rule\"], \"query\": \"balance\"}}", text, StringComparison.Ordinal);
-        Assert.Contains("\"dry_run\": true}, then the same call without dry_run.", text, StringComparison.Ordinal);
+        Assert.Contains($"campaign_search {{\"kinds\": [\"rule\"], \"query\": \"balance\", \"campaign\": \"{slug}\"}}", text, StringComparison.Ordinal);
+        Assert.Contains($"\"dry_run\": true, \"campaign\": \"{slug}\"}}, then the same call without dry_run.", text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -240,8 +258,8 @@ public sealed partial class CampaignPromptTests : IClassFixture<McpServerHarness
         var text = await Text("session_recap", ("campaign", slug));
 
         Assert.StartsWith($"Recap the session just played (the live one, if one is live) of campaign `{slug}`", text, StringComparison.Ordinal);
-        Assert.Contains($"campaign_session {{\"action\": \"record_past\", \"campaign\": \"{slug}\", \"title\": ...", text, StringComparison.Ordinal);
-        Assert.Contains($"then campaign_write {{\"campaign\": \"{slug}\", \"session\": <the number record_past reported>, \"ops\": [...]}}.", text, StringComparison.Ordinal);
+        Assert.Contains("campaign_session {\"action\": \"record_past\", \"title\": ...", text, StringComparison.Ordinal);
+        Assert.Contains($"then campaign_write {{\"session\": <the number record_past reported>, \"ops\": [...], \"campaign\": \"{slug}\"}}.", text, StringComparison.Ordinal);
         Assert.Contains("\n   - With no session number from me: if step 1 shows the session my account describes already recorded (played), " +
                         "give record_past its \"session\" number, which corrects it; leave session out only for a session not recorded yet " +
                         "(record_past then takes the next one to play).\n", text, StringComparison.Ordinal);
@@ -270,9 +288,10 @@ public sealed partial class CampaignPromptTests : IClassFixture<McpServerHarness
 
         Assert.Contains($"Pass \"campaign\": \"{slug}\" on every call to its campaign tools, as the calls below do: without it a call " +
                         "goes to the active campaign, which may be another.", text, StringComparison.Ordinal);
-        var calls = Regex.Matches(text, @"(?<![A-Za-z_])campaign(?:_[a-z]+)? \{[^}]*").Select(m => m.Value).ToList();
+        // Whole calls (a nested ops list included), each naming the campaign last (fix F1: one order everywhere).
+        var calls = CampaignPrintedCallTests.PrintedCalls(text).Where(c => Regex.IsMatch(c, @"^campaign(?:_[a-z]+)? \{")).ToList();
         Assert.NotEmpty(calls);
-        Assert.All(calls, call => Assert.Contains($"\"campaign\": \"{slug}\"", call, StringComparison.Ordinal));
+        Assert.All(calls, call => Assert.EndsWith($"\"campaign\": \"{slug}\"}}", call, StringComparison.Ordinal));
     }
 
     [Fact]
@@ -282,8 +301,8 @@ public sealed partial class CampaignPromptTests : IClassFixture<McpServerHarness
 
         var text = await Text("in_character", ("character", "belmakor"), ("campaign", slug));
 
-        Assert.Contains($"3. Before showing me, run campaign_knowledge {{\"action\": \"check\", \"campaign\": \"{slug}\", " +
-                        "\"perspective\": \"character:belmakor\", \"text\": <the draft>, \"diegetic\": true for a song or anything performed}, " +
+        Assert.Contains("3. Before showing me, run campaign_knowledge {\"action\": \"check\", \"perspective\": \"character:belmakor\", " +
+                        $"\"text\": <the draft>, \"diegetic\": true, \"campaign\": \"{slug}\"}} (diegetic true for a song or anything performed), " +
                         "fix every hard flag, and tell me what it listed to review.\n", text, StringComparison.Ordinal);
     }
 
@@ -318,8 +337,8 @@ public sealed partial class CampaignPromptTests : IClassFixture<McpServerHarness
             var start = await CampaignWriteSetup.CallAsync(server, "campaign_session", $$"""{"campaign": "{{slug}}", "action": "start", "dry_run": true}""");
 
             Assert.StartsWith($"Prepare the next session to play, session {expected}, of campaign `{slug}`", text, StringComparison.Ordinal);
-            Assert.EndsWith($"campaign_session {{\"action\": \"plan\", \"campaign\": \"{slug}\", \"session\": {expected}, \"title\": ..., " +
-                            "\"prep_md\": <the run-sheet>, \"dry_run\": true}, then the same call without dry_run.", text, StringComparison.Ordinal);
+            Assert.EndsWith($"campaign_session {{\"action\": \"plan\", \"session\": {expected}, \"title\": ..., " +
+                            $"\"prep_md\": <the run-sheet>, \"dry_run\": true, \"campaign\": \"{slug}\"}}, then the same call without dry_run.", text, StringComparison.Ordinal);
             Assert.StartsWith($"# Dry run: Session {expected} started ({slug})", start, StringComparison.Ordinal);
         });
     }

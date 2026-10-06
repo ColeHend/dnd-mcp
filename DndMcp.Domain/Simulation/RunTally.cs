@@ -22,7 +22,7 @@ internal sealed class RunTally
     public long Defeats;
     public long Draws;
 
-    /// <summary>Fights that ended with at least one party member dead.</summary>
+    /// <summary>Fights that ended with at least one party member dead (placeholders, dead before a resume, do not count).</summary>
     public long AnyDeath;
 
     /// <summary>
@@ -82,8 +82,8 @@ internal sealed class RunTally
         for (var i = 0; i < creatures.Length; i++)
         {
             Creatures[i].Add(creatures[i]);
-            anyDeath |= creatures[i].Side == 0 && creatures[i].Dead;
-            anyDying |= creatures[i].Side == 0 && CreatureTally.IsDying(creatures[i]);
+            anyDeath |= CreatureTally.Counts(creatures[i]) && creatures[i].Dead;
+            anyDying |= CreatureTally.Counts(creatures[i]) && CreatureTally.IsDying(creatures[i]);
         }
 
         if (anyDeath)
@@ -112,8 +112,8 @@ internal sealed class RunTally
         var anyDying = false;
         foreach (var c in creatures)
         {
-            anyDeath |= c.Side == 0 && c.Dead;
-            anyDying |= c.Side == 0 && CreatureTally.IsDying(c);
+            anyDeath |= CreatureTally.Counts(c) && c.Dead;
+            anyDying |= CreatureTally.Counts(c) && CreatureTally.IsDying(c);
         }
 
         if (win)
@@ -229,8 +229,18 @@ internal sealed class CreatureTally
     /// </summary>
     public static bool IsDying(Creature c) => c.Down && !c.Dead && !c.Stable && c.T.PcLike;
 
-    /// <summary>Hit points lost by the end of the fight: all of them when dead.</summary>
-    public static int HpLost(Creature c) => c.Dead ? c.MaxHp : Math.Max(0, c.MaxHp - c.Hp);
+    /// <summary>
+    /// Hit points lost by the end of the fight, from where it started (<see cref="Creature.StartHp"/>: the maximum, or the
+    /// seeded HP of a resumed fight): all of those when dead. Measured from the maximum, a resumed creature would count the
+    /// damage it took before the resume as the simulation's.
+    /// </summary>
+    public static int HpLost(Creature c) => c.Dead ? c.StartHp : Math.Max(0, c.StartHp - c.Hp);
+
+    /// <summary>
+    /// A party member whose death or dying counts in the outcomes: not a placeholder (dead before the resume, kept only for
+    /// its place in the order), which would otherwise make every resumed fight "a party member dies".
+    /// </summary>
+    public static bool Counts(Creature c) => c.Side == 0 && c.T.Start is not { Placeholder: true };
 
     public void Add(Creature c)
     {
@@ -252,7 +262,7 @@ internal sealed class CreatureTally
         var lost = HpLost(c);
         HpLostSum += lost;
         HpLostHistogram[Math.Min(lost, HpLostHistogram.Length - 1)]++;
-        StartHpSum += c.MaxHp;
+        StartHpSum += c.StartHp;
         DealtRaw += c.DealtRaw;
         DealtEffective += c.DealtEffective;
         TakenRaw += c.TakenRaw;

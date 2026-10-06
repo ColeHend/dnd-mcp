@@ -351,4 +351,21 @@ public sealed partial class RulesSearchToolTests : IClassFixture<McpServerHarnes
             .ToList();
 
     private sealed record Hit(int Number, string Name, string Kind, string Edition, string Ref);
+
+    /// <summary>
+    /// Contract D21 (Draft RS): the rules tables are not searched, and the description's list of them names character
+    /// advancement, so a model that searched for "XP for level 5" is sent to rules_get's table index instead of concluding the
+    /// rule is missing.
+    /// </summary>
+    [Fact]
+    public async Task Description_RulesTables_NameCharacterAdvancementAndSayWhereTheyAre()
+    {
+        var description = Assert.Single(await _server.Client.ListToolsAsync(), t => t.Name == Tool).Description!;
+
+        Assert.Contains(
+            "The rules tables (XP by CR, character advancement, both editions' encounter budgets and thresholds) are not searched either: rules_get ref " +
+            "\"rules://tables\" lists them.\n",
+            description, StringComparison.Ordinal);
+        Assert.InRange(description.Length, 1, 2_048);
+    }
 }

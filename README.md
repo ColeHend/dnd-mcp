@@ -12,7 +12,7 @@ Claude Code and Claude Desktop launch it over stdio.
 | DPR maths + feature deltas for homebrew | Done (Phase 4): `balance_dpr` (exact damage per round of a build in the feature DSL: per-attack and per-rider breakdown, round-1 damage percentiles, power-attack choices, save effects with kill chances; round 1, fight or adventuring-day horizon; level curves and level × AC grids) and `balance_compare` (a feature's ΔDPR against a baseline, its level-equivalent and balance band, Bonus Action and Reaction collisions), plus the `rules://tables/{dpr-targets-by-level, gwf-expected-values, aoe-targets}` resources |
 | Monte Carlo combat simulation | Done (Phase 5): `balance_simulate` (a party of class archetypes, feature-DSL builds or SRD monsters against SRD monsters or builds, fought 10,000 times with the dice rolled: win, defeat, draw and death odds with 95% intervals, rounds, per-combatant damage and resources, a replay of any fight, a paired comparison with and without a feature, reproducible by seed), `rules_get` format `combatant` (a monster as the simulator reads it), plus the `rules://tables/monster-stats-by-cr-empirical` resource |
 | Campaign tracking (SQLite: who knows what, sessions, undo) | Done (Phase 6): `campaign`, `campaign_search`, `campaign_get`, `campaign_write`, `campaign_knowledge`, `campaign_session` and `campaign_history` over one local `campaigns.db` (people, places, quests, secrets and facts with their provenance; what each character, the party and the table know, and under which names; reads from a character's perspective that show only what they know; reveal gates and forbidden words; sessions with a live log and an end-of-session checklist; every write one undoable batch; entries as they stood after any session), six prompts, the `campaign://` resources, `dice_roll` logging to a live session, the rules, encounter and balance tools defaulting to the active campaign's ruleset, and the `backup` and `restore` commands |
-| Character sheets and live combat tracking | Phase 7 |
+| Character sheets and live combat tracking | Done (Phase 7): `campaign_character` (a campaign character's sheet: HP and temporary HP, spell slots and Pact Magic, resources, conditions and exhaustion, death saves, short and long rests with Hit Dice, level-ups, XP, inventory and coins, and the build the simulator fights it with; every change out of a fight one undoable batch) and `combat` (a live fight: initiative, turns and rounds, damage with resistances, healing, conditions and their durations, concentration saves, legendary actions, death saves, reminders that carry the call resolving them, a board for the players; `end` writes the sheets back as one undoable batch, with XP, loot and coins), `balance_simulate` fighting a stored fight or resuming the live one and playing characters from their sheets, `encounter_difficulty` with the campaign's party, the `campaign://<slug>/party` and `/combat/current` resources, and the `rules://tables/character-advancement` table |
 | Markdown export and import (an Obsidian vault, a player-safe export, the PWA's campaign bundles) | Phase 8 |
 
 The design, decisions and phase plan are in [PLAN.md](PLAN.md).
@@ -25,10 +25,10 @@ The design, decisions and phase plan are in [PLAN.md](PLAN.md).
 | `rules_get` | One SRD entry in full by ref or name, or both editions side by side; format `combatant` shows a monster as the simulator reads it; also the rules tables and the attribution. |
 | `dice_roll` | A roll made for the user, with every die shown. While a campaign session is live the roll is logged to it; `secret` marks a roll behind the DM's screen. |
 | `dice_odds` | Exact probabilities for a dice expression. |
-| `encounter_difficulty` | How hard a fight is for a party, by the 2014 DMG method, the 2024 XP budget, or both. |
+| `encounter_difficulty` | How hard a fight is for a party, by the 2014 DMG method, the 2024 XP budget, or both; `party: "campaign"` takes the levels from the campaign's current party sheets. |
 | `balance_dpr` | A build's damage per round, computed exactly over every die outcome (not simulated). |
 | `balance_compare` | What a homebrew feature adds to a baseline build, in damage and in character levels. |
-| `balance_simulate` | Who wins a whole fight, how often, and at what cost: a Monte Carlo simulation of a party against enemies. |
+| `balance_simulate` | Who wins a whole fight, how often, and at what cost: a Monte Carlo simulation of a party against enemies, of a fight stored in a campaign (`encounter`), or of the live fight from where it stands (`from_state`); a party member can be a campaign character played from its sheet. Read-only: it writes nothing. |
 | `campaign` | Your campaigns: create one (you play in it or you run it; 2014, 2024 or mixed rules), choose the one the other tools use, change its record, or see where things stand. |
 | `campaign_search` | What a campaign holds, found by words or listed by kind, status and tag, as one perspective sees it: a character's view finds only what they know, under the names they know. |
 | `campaign_get` | Up to ten entries in full (people, places, quests, secrets, facts, sessions), with their relations, facts, who knows them and their history. |
@@ -36,6 +36,8 @@ The design, decisions and phase plan are in [PLAN.md](PLAN.md).
 | `campaign_knowledge` | Who knows what: record it, reveal facts at the table (a reveal before its gate is met warns and is applied), check a draft (a lyric, a journal, a line of dialogue) against what its speaker knows, and the ledger of who knows each fact. |
 | `campaign_session` | Sessions: plan one, start it (writes then belong to it), log notes, end it with the recap and a checklist of loose ends, record one played earlier, read them back. |
 | `campaign_history` | What changed and when, entries as they stood after a given session, and undo of one batch (an undo is itself a batch, so it can be undone). |
+| `campaign_character` | A character's sheet: read it (another perspective sees only a public line), create or patch it, and the table's changes to it: damage, healing, temporary HP, slots and resources spent, rests, conditions, level-ups, XP, inventory and coins, each one undoable batch (while the character is in a live fight from its sheet, its damage, healing, temporary HP, uses and conditions go to the fight instead, with no batch, and reach the sheet at the fight's `end`). |
+| `combat` | A live fight at the table, step by step: initiative, turns, damage, healing, conditions, concentration, legendary actions and death saves, each step answered with the initiative table and the reminders it raised; `state` with a perspective is the players' board; `end` writes the fight back to the sheets as one undoable batch. |
 
 **The balance tools.** A build is written in a small JSON feature DSL: attacks (dice, damage type, to-hit, properties,
 weapon mastery, cantrip scaling) and modifiers (`to_hit`, `extra_damage` for smites and Sneak Attack, `bonus_damage`,
@@ -86,7 +88,12 @@ and the limited resources it spends. Each side is a list of entries, each exactl
   cleric, druid, wizard, sorcerer, warlock or bard, so "four level 5 characters" needs no builds;
 - `monster`: any SRD monster by name or ref, normalized from its stat block (`rules_get` with `format: "combatant"`
   shows exactly what the simulator reads, and every result lists what a stat block's simulation leaves out);
-- `build` with `hp` and `ac`: any feature-DSL build, for a real character sheet or a homebrew creature.
+- `build` with `hp` and `ac`: any feature-DSL build, for a real character sheet or a homebrew creature;
+- `character`: a campaign character with a sheet (`"character:torch"`), fought with its sheet's `sim_profile` build (the
+  sheet then needs a level, AC and maximum HP), else the archetype of its main class at its total level; a sheet with no
+  classes, or whose class has no archetype (an artificer), needs a `sim_profile`, and is refused as an entry (an
+  encounter run leaves that member out and says so). It starts at the sheet's maximum HP (less any reduction), not its
+  current HP, with the sheet's AC and save proficiencies.
 
 ```json
 {"party": [{"archetype": "fighter", "level": 5, "count": 2}, {"archetype": "cleric", "level": 5},
@@ -94,11 +101,17 @@ and the limited resources it spends. Each side is a list of entries, each exactl
  "enemies": [{"monster": "ogre", "count": 3}], "seed": 42}
 ```
 
-Monsters use greedy expected-damage tactics; there is no grid (a front line and a back line per side), no lair, no
-fleeing and no morale, and every result lists its assumptions and the targeting and resource policies in force. A seed
-reproduces a result exactly (without one, a random seed is drawn and shown); `replay` shows one fight turn by turn;
-`precision` runs until P(win) is known to a chosen half-width; `compare` runs the same fights with and without a feature
-and reports the paired difference, which resolves far smaller changes than two separate runs.
+With `encounter` a fight stored in a campaign is the two sides (`"current"`, the one running now; `"last"`, the last one
+ended; or a stored fight's name, planned, running or ended; a planned fight with no party in it yet fights the campaign's
+current party), and `from_state: true` (once initiative is rolled) resumes the running fight from its hit points, slots,
+conditions, concentration and turn, so "who wins from here?" has an answer mid-fight. Neither writes anything.
+
+Monsters use greedy expected-damage tactics; there is no grid (a front line and a back line per side), no lair actions
+(a stored fight in a lair uses the in-lair legendary action and Legendary Resistance counts), no fleeing and no morale,
+and every result lists its assumptions and the targeting and resource policies in force. A seed reproduces a result
+exactly (without one, a random seed is drawn and shown); `replay` shows one fight turn by turn; `precision` runs until
+P(win) is known to a chosen half-width; `compare` runs the same fights with and without a feature and reports the paired
+difference, which resolves far smaller changes than two separate runs.
 
 **Campaigns.** One `campaigns.db` holds every campaign, each a player campaign (you play one character in it) or a DM
 campaign (you run it). Every campaign tool takes `campaign` (a slug); left out, it is the one chosen in this session
@@ -125,12 +138,49 @@ learned it in and the name they know a thing by.
   live. `end` stores the recap and returns a checklist of loose ends (names in the recap that match nothing, clocks not
   ticked, facts nobody learned, inventions to accept or strike). An open roll's label is shown with it in the players'
   views of the session; roll `secret` for one they must not see.
-- **History and undo.** Every call that writes is one batch, and its id is printed with the call that reverses it:
-  `campaign_history` `undo` reverses exactly one batch, and refuses (naming the later batches in the way) when later
-  changes build on it. `as_of` shows entries as they stood at the end of a session.
+- **History and undo.** Every call that writes the campaign's record is one batch, and its id is printed with the call
+  that reverses it (a fight's steps, and the sheet changes `campaign_character` sends to a live fight, write none: the
+  fight's `end` is the batch): `campaign_history` `undo` reverses exactly one batch, and refuses (naming the later
+  batches in the way) when later changes build on it. `as_of` shows entries as they stood at the end of a session.
 - **Defaults for the other tools.** With a campaign chosen, `rules_search`, `rules_get`, `encounter_difficulty` and the
   balance tools use its ruleset when a call names no edition (and say so), and `encounter_difficulty` takes its
-  `effective_level_offset` setting.
+  `effective_level_offset` setting. `encounter_difficulty` with `party: "campaign"` takes the levels from the current
+  party's sheets (and says who it counted); a member without a sheet or a level is refused with the call that gives one.
+
+**Character sheets and combat.** Any campaign character can have a sheet, made and patched with `campaign_character`
+`update` (classes and level, abilities, AC, maximum and current HP, slots, resources with their recharge, defenses,
+features, notes, and a `sim_profile` build for the simulator). Every sheet change out of a fight is one batch, undone
+like any other. Read from another perspective (`perspective`, or `campaign_get` with `include: ["sheet"]`), a sheet is
+one public line: a current party member's name as that view knows it, level, classes, species, HP, AC, exhaustion and
+conditions, nothing more; other characters read as having no sheet.
+
+`combat` runs a fight at the table. `start` adds the current party, played from their sheets, and `add` brings in SRD
+monsters by name (their stat blocks snapshotted), campaign characters and anything else by name with its HP and AC. Each
+step (`initiative`, `next`, `damage`, `heal`, `condition`, `concentration`, `use`, `legendary`, `death_save`, …) answers
+with what changed, the initiative table and the reminders it raised: a concentration save and its DC, a condition
+ending, a save to repeat, a legendary action reset, a creature dropping or dying, each with the call that resolves it.
+
+The server rolls only what a call does not give (initiative, damage and healing dice, concentration and death saves,
+rolled hit points) and logs those rolls with the fight. A roll belongs to the creature it is rolled for: a damage roll
+to its `source`, else to the creature whose turn it is (before the first turn, to its one target); a healing or
+temporary-HP roll to its `source`, else to its one target, the creature healed. It is secret, left out of the players'
+views of the session, when that creature is hidden; when it rolls the hit points of anything not on the party's side
+(allies included); when the creature is not on the party's side and is a campaign character the party does not know as
+itself (unseen, or known only in disguise); and, in a DM campaign, whenever the creature is an enemy or neutral. A roll
+that belongs to no one (several targets, no source, and for damage no turn running) is secret when any one target's
+would be. `damage`, `heal`, `initiative`, `concentration` and `death_save` take `secret`, which overrides all of this
+either way.
+
+The fight's hit points change turn by turn outside the campaign's history: no batch per hit, nothing for
+`campaign_history` to list or undo. `end` writes the fight back as one batch: each sheet's HP, slots, resources,
+conditions, exhaustion and items used, and any XP, loot and coins awarded. That batch is undone like any other (the undo
+is refused, naming the later batch in the way, when a later sheet edit builds on it); `dry_run` previews it. While a
+character is in the fight from its sheet (until the fight ends, even after it leaves), `campaign_character`'s damage,
+healing, temporary HP, use and conditions go to the fight instead (the sheet gets them at `end`), and a rest is refused
+until the fight is over. `state` with a `perspective` is the players' board: the order, the party's numbers, every
+other creature's state as one word (unhurt, hurt, bloodied, down), conditions by name, and no hidden creature, secret
+name or roll. A name you type that only starts like a word your hidden notes capitalise ("Baalite cultist" where only a
+secret says Baal) is shown, and the step that typed it warns you, so you decide.
 
 **Prompts.** In Claude Code each is a command, `/mcp__dnd__<name>` for the server registered as `dnd`; its arguments
 are single words, and the draft or notes it works on come from the conversation.
@@ -144,11 +194,13 @@ are single words, and the draft or notes it works on come from the conversation.
 | `/mcp__dnd__in_character <character> [campaign]` | Writes the piece you ask for in a character's voice from only what they know, and checks it before showing it. |
 | `/mcp__dnd__homebrew_review [campaign]` | Measures homebrew with `balance_compare` against the official option it replaces and reports its balance band, with the smallest fix. |
 
-**Resources.** `campaign://list` (every campaign and its resources) and, per campaign, `campaign://<slug>/summary` and
-`campaign://<slug>/threads`: in Claude Code, `@dnd:` mentions. Readable by URI though not listed:
-`campaign://<slug>/entity/<ref>`, `campaign://<slug>/session/<n>` (or `live`, `last`) and
-`campaign://<slug>/knowledge/<perspective>`, everything one view knows (e.g. `knowledge/character:belmakor`). The
-tools reach everything the resources show.
+**Resources.** `campaign://list` (every campaign and its resources) and, per campaign, `campaign://<slug>/summary`,
+`campaign://<slug>/threads` and `campaign://<slug>/party` (every current party member's sheet line): in Claude Code,
+`@dnd:` mentions. Readable by URI though not listed: `campaign://<slug>/entity/<ref>`, `campaign://<slug>/session/<n>`
+(or `live`, `last`), `campaign://<slug>/knowledge/<perspective>`, everything one view knows (e.g.
+`knowledge/character:belmakor`), and `campaign://<slug>/combat/current`, the fight running now as `combat` `state`
+shows it. The rules tables include `rules://tables/character-advancement` (XP and proficiency bonus by level, the same
+in both editions). The tools reach everything the resources show.
 
 ## Install for Claude Code
 
@@ -171,7 +223,10 @@ directory, never the binary alone. To check an install, and to build the rules i
 ```
 
 To upgrade, publish into an empty directory (delete `~/.local/share/dnd-mcp/bin` first): `dotnet publish` never
-removes files an older version left behind.
+removes files an older version left behind. Then restart every Claude session that was running: a new version may
+migrate `campaigns.db` the first time it opens it (0.7.0 adds the tables for sheets and fights, after a pre-migration
+backup), and an older server still running refuses the migrated file (a 0.6.0 process says a newer version of dnd-mcp
+wrote it, and changes nothing) until it is restarted.
 
 The rules index (`srd.db`) is a disposable cache in `$DND_MCP_CACHE_DIR`, else `$XDG_CACHE_HOME/dnd-mcp`, else
 `~/.cache/dnd-mcp`. Set `DND_MCP_CACHE_DIR` to an absolute path: MCP configs are JSON, which expands nothing, so the

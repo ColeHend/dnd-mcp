@@ -34,6 +34,25 @@ internal sealed class FightSetup
 
     public required bool PcsWinTies { get; init; }
 
+    /// <summary>
+    /// A resumed fight's turn order (creature ids, <see cref="FightResume"/>), used instead of rolling initiative; null rolls
+    /// it. Skipping the roll entirely (not just its result) matters: the roll draws a die and a tiebreak per entry, so a
+    /// half skip would shift every later draw.
+    /// </summary>
+    public int[]? FixedOrder { get; init; }
+
+    /// <summary>The position in the order whose turn the first round starts at (a resume's turn-holder; 0 in a fresh fight).</summary>
+    public int StartAt { get; init; }
+
+    /// <summary>The round the fight starts in, for the log (the round cap and the reported rounds count it as 1).</summary>
+    public int StartRound { get; init; } = 1;
+
+    /// <summary>
+    /// Some creature starts from a live state (<see cref="CombatantTemplate.Start"/>) or the order is fixed: the fight is
+    /// checked for a side already beaten before its first turn. A fresh fight never is, so its first turn is untouched.
+    /// </summary>
+    public bool Seeded { get; init; }
+
     /// <summary>The dummy harness: fixed turn order, the build always attacks dummy 0, the fight never ends early.</summary>
     public bool Dummy { get; init; }
 

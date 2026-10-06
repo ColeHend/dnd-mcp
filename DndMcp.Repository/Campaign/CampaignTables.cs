@@ -30,9 +30,11 @@ public enum CampaignColumnType
 /// <param name="Type">How it is stored.</param>
 /// <param name="Nullable">True when the column accepts NULL.</param>
 /// <param name="LoggedPerKey">
-/// True for the free-form object columns (<c>data</c>, <c>settings</c>): an update logs one change_log row per changed
-/// top-level key (<c>field_path</c> = <c>data.&lt;key&gt;</c>) rather than the whole document, so history reads
-/// "data.attitude: 20 → -40" and undoing one key's change cannot clobber another key written later.
+/// True for the free-form object columns (<c>data</c>, <c>settings</c>) and the character sheet's keyed trackers
+/// (<c>abilities</c>, <c>hit_dice</c>, <c>spell_slots</c>, <c>resources</c>): an update logs one change_log row per changed
+/// top-level key (<c>field_path</c> = <c>data.&lt;key&gt;</c>, <c>spell_slots.1</c>) rather than the whole document, so
+/// history reads "data.attitude: 20 → -40" and undoing one key's change cannot clobber another key written later (the
+/// end-of-combat write-back that spent a 3rd-level slot stays undoable after a later rest touched only <c>spell_slots.1</c>).
 /// </param>
 /// <param name="Logged">
 /// False for columns whose changes never reach change_log: <c>updated_at</c> (bookkeeping, not history) and
@@ -272,21 +274,66 @@ public static class CampaignTables
         [C("id", T), C("campaign_id", T), C("from_beat_id", T), C("to_beat_id", T), C("mode", T)],
         entityColumn: "from_beat_id", otherEntityColumn: "to_beat_id");
 
-    /// <summary>Every loggable table, in the migration's order.</summary>
+    // 0002 (Phase 7). A character's sheet is keyed by its character entity's id (a session row's pattern), so its history
+    // is the character's history. The keyed trackers log per key: a combat write-back spending a 3rd-level slot and a later
+    // rest restoring 1st-level slots touch different keys, so neither blocks undoing the other; abilities likewise per
+    // score. The JSON arrays (classes, conditions, feats, …) and the other objects are logged whole.
+    public static readonly CampaignTable CharacterSheet = new("character_sheet", ["entity_id"],
+    [
+        C("entity_id", T), N("player", T), N("ruleset", T), N("species", T), N("lineage", T), N("background", T), N("size", T),
+        C("classes", A), N("level", I), N("xp", I), new("abilities", O, Nullable: false, LoggedPerKey: true), C("saves", O),
+        C("skills", O), N("ac", I), N("max_hp", I), C("max_hp_reduction", I), N("hp", I), C("temp_hp", I), N("speed", I),
+        C("movement", O), C("senses", O), N("initiative_bonus", I), N("passive_perception", I), N("spell_save_dc", I),
+        N("spell_attack", I), C("defenses", O), new("hit_dice", O, Nullable: false, LoggedPerKey: true),
+        new("spell_slots", O, Nullable: false, LoggedPerKey: true), new("resources", O, Nullable: false, LoggedPerKey: true),
+        C("conditions", A), N("concentration", O), C("death_saves", O), C("exhaustion", I), C("inspiration", I),
+        C("feats", A), C("features", A), C("spells", A), C("languages", A), N("sim_profile", O), C("notes_md", T),
+        N("sheet_source", T), C("created_at", T), Stamp(),
+    ], entityColumn: "entity_id", otherEntityColumn: null);
+
+    // A thing someone carries. item_id links an item entity when there is one (the other entity of its history rows).
+    public static readonly CampaignTable Holding = new("holding", ["id"],
+    [
+        C("id", T), C("campaign_id", T), C("holder_id", T), N("item_id", T), C("name", T), N("srd_ref", T), C("quantity", R),
+        C("equipped", I), C("attuned", I), N("charges", O), N("acquired_session_id", T), N("notes", T), C("created_at", T),
+        Stamp(),
+    ], entityColumn: "holder_id", otherEntityColumn: "item_id");
+
+    // Coins in or out (a ledger: a balance is the sum). Created and, by undo, deleted; never updated.
+    public static readonly CampaignTable CurrencyTxn = new("currency_txn", ["id"],
+    [
+        C("id", T), C("campaign_id", T), C("holder_id", T), N("session_id", T), C("cp", I), C("sp", I), C("ep", I), C("gp", I),
+        C("pp", I), C("note", T), C("created_at", T),
+    ], entityColumn: "holder_id", otherEntityColumn: "session_id");
+
+    public static readonly CampaignTable Award = new("award", ["id"],
+    [
+        C("id", T), C("campaign_id", T), C("recipient_id", T), N("session_id", T), C("kind", T), N("amount", I), N("note", T),
+        N("source", T), C("created_at", T),
+    ], entityColumn: "recipient_id", otherEntityColumn: "session_id");
+
+    /// <summary>Every loggable table, in the migrations' order.</summary>
     public static readonly IReadOnlyList<CampaignTable> All =
     [
         Campaign, Entity, EntityAlias, Tag, EntityTag, Relation, CrossLink, Fact, FactLink, FactDependency, Knowledge,
-        Session, SessionAttendance, Objective, Clock, BeatEdge,
+        Session, SessionAttendance, Objective, Clock, BeatEdge, CharacterSheet, Holding, CurrencyTxn, Award,
     ];
 
     /// <summary>
     /// Tables deliberately outside change_log: bookkeeping (<c>schema_migrations</c>, <c>app_state</c>: which campaign is
     /// active is not history), <c>dice_roll</c> (a roll is its own record, and undo must never un-roll dice), change_log
-    /// itself, and the FTS tables (derived by triggers). FTS shadow tables (<c>entity_fts_data</c>, …) and
-    /// <c>sqlite_sequence</c> are recognised by <see cref="IsInternal"/>.
+    /// itself, the FTS tables (derived by triggers), and the live combat tracker (<c>encounter</c>, <c>combatant</c>,
+    /// <c>combat_log</c>: HP ticks stay out of history, combat_log is the fight's own audit trail, and what a fight
+    /// changes on the sheets reaches change_log as one end-of-combat batch). No logged table has a foreign key into the
+    /// tracker's tables, so nothing undo deletes there changes a logged row; the reverse case (undo deleting an entity or
+    /// session a tracker row points at) is refused by <see cref="UndoEngine"/>. FTS shadow tables (<c>entity_fts_data</c>,
+    /// …) and <c>sqlite_sequence</c> are recognised by <see cref="IsInternal"/>.
     /// </summary>
     public static readonly IReadOnlyList<string> NotLogged =
-        ["schema_migrations", "app_state", "dice_roll", "change_log", "entity_fts", "fact_fts"];
+    [
+        "schema_migrations", "app_state", "dice_roll", "change_log", "entity_fts", "fact_fts", "encounter", "combatant",
+        "combat_log",
+    ];
 
     private static readonly Dictionary<string, CampaignTable> ByName = All.ToDictionary(t => t.Name, StringComparer.Ordinal);
 

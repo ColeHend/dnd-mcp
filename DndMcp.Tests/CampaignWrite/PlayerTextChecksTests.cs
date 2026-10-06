@@ -34,9 +34,9 @@ public sealed class PlayerTextChecksTests : IDisposable
 
     // A hidden-name warning's second remedy (review UR1): the record call that makes the reader's known_as the true name.
     private static string Learned(string campaign, string reader, string target, string? state, string trueName) =>
-        $"; or, if {reader} now knows the name, record it: campaign_knowledge {{\"action\": \"record\", \"campaign\": \"{campaign}\", " +
+        $"; or, if {reader} now knows the name, record it: campaign_knowledge {{\"action\": \"record\", " +
         $"\"targets\": [\"{target}\"], \"knowers\": [{{\"who\": \"{reader}\"{(state is null ? string.Empty : $", \"state\": \"{state}\"")}, " +
-        $"\"known_as\": \"{trueName}\"}}]}}";
+        $"\"known_as\": \"{trueName}\"}}], \"campaign\": \"{campaign}\"}}";
 
     // A player campaign where the party knows Keras only as "the old king", and f:1's gate forbids "Keras" and "seal"
     // while the party does not know f:1.
@@ -179,8 +179,8 @@ public sealed class PlayerTextChecksTests : IDisposable
     [InlineData("A raven watched the docks.", null, null, null)]
     [InlineData("The ravens of the harbour carry messages.", null, null, null)]
     [InlineData("The guards argued about who would protect the protector of the harbour.", null, null, null)]
-    [InlineData("Raven watched the docks.", "Raven", "character:raven", "the true name of character:raven, which party knows as \"the cloaked stranger\": say \"the cloaked stranger\" instead; or, if party now knows the name, record it: campaign_knowledge {\"action\": \"record\", \"campaign\": \"one-piece\", \"targets\": [\"character:raven\"], \"knowers\": [{\"who\": \"party\", \"state\": \"met\", \"known_as\": \"Raven\"}]}")]
-    [InlineData("We met the Protector at dawn.", "Protector", "character:the-protector", "the true name of character:the-protector, which party knows as \"the advisor in Serret\": say \"the advisor in Serret\" instead; or, if party now knows the name, record it: campaign_knowledge {\"action\": \"record\", \"campaign\": \"one-piece\", \"targets\": [\"character:the-protector\"], \"knowers\": [{\"who\": \"party\", \"state\": \"met\", \"known_as\": \"The Protector\"}]}")]
+    [InlineData("Raven watched the docks.", "Raven", "character:raven", "the true name of character:raven, which party knows as \"the cloaked stranger\": say \"the cloaked stranger\" instead; or, if party now knows the name, record it: campaign_knowledge {\"action\": \"record\", \"targets\": [\"character:raven\"], \"knowers\": [{\"who\": \"party\", \"state\": \"met\", \"known_as\": \"Raven\"}], \"campaign\": \"one-piece\"}")]
+    [InlineData("We met the Protector at dawn.", "Protector", "character:the-protector", "the true name of character:the-protector, which party knows as \"the advisor in Serret\": say \"the advisor in Serret\" instead; or, if party now knows the name, record it: campaign_knowledge {\"action\": \"record\", \"targets\": [\"character:the-protector\"], \"knowers\": [{\"who\": \"party\", \"state\": \"met\", \"known_as\": \"The Protector\"}], \"campaign\": \"one-piece\"}")]
     [InlineData("Then The Grey One left.", "Grey One", "character:raven", "an author alias of character:raven, which party does not use: say \"the cloaked stranger\" instead")]
     [InlineData("Then the grey one left.", "grey one", "character:raven", "an author alias of character:raven, which party does not use: say \"the cloaked stranger\" instead")]
     public void RecordPast_OrdinaryWordsSpelledLikeADisguisedName_AreNotReportedButTheNameIs(string recap, string? word, string? source, string? what)
@@ -753,8 +753,8 @@ public sealed class PlayerTextChecksTests : IDisposable
             Op = "fact", Statement = "The ancient sorcerer king's name is Keras.", About = ["character:keras"], KnownBy = [Op.Knower("party")],
         });
 
-        const string Call = "campaign_knowledge {\"action\": \"record\", \"campaign\": \"sky\", \"targets\": [\"character:keras\"], \"knowers\": [{\"who\": \"party\"";
-        var call = Call + keep + ", \"known_as\": \"Keras\"}]}";
+        const string Call = "campaign_knowledge {\"action\": \"record\", \"targets\": [\"character:keras\"], \"knowers\": [{\"who\": \"party\"";
+        var call = Call + keep + ", \"known_as\": \"Keras\"}], \"campaign\": \"sky\"}";
         var warning = Assert.Single(Texts(told.Warnings));
         Assert.Equal($"f:1's statement uses \"Keras\", the true name of character:keras, {why}; or, if party now knows the name, record it: {call}.",
             warning.Message);
@@ -787,7 +787,7 @@ public sealed class PlayerTextChecksTests : IDisposable
         SendRecordCall(c, call);
         var again = _f.Sessions.RecordPast(c, 1, recapMd: "Björn \"Stone\" Fell came down the mountain.");
 
-        Assert.EndsWith("\"knowers\": [{\"who\": \"party\", \"state\": \"heard\", \"known_as\": \"Björn \\\"Stone\\\" Fell\"}]}", call);
+        Assert.EndsWith("\"knowers\": [{\"who\": \"party\", \"state\": \"heard\", \"known_as\": \"Björn \\\"Stone\\\" Fell\"}], \"campaign\": \"sky\"}", call);
         Assert.Empty(Texts(again.Warnings));
     }
 

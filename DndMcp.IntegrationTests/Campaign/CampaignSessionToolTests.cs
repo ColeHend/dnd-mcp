@@ -168,7 +168,7 @@ public sealed partial class CampaignSessionToolTests : IClassFixture<McpServerHa
         var list = await Session(_server, slug, """{"action": "list", "perspective": "public"}""");
 
         Assert.Equal("An error occurred invoking 'campaign_session': No session session:last for this perspective. campaign_session " +
-                     $"{{\"action\": \"list\", \"campaign\": \"{slug}\", \"perspective\": \"public\"}} lists the sessions it can see.", get);
+                     $"{{\"action\": \"list\", \"perspective\": \"public\", \"campaign\": \"{slug}\"}} lists the sessions it can see.", get);
         // Only the author plans sessions: a player view with none to see is not told to plan one.
         Assert.Equal($"# Sessions: {slug} (0)\n\n_Perspective: public. Names are the ones this view knows; author-only text is withheld._\n\n" +
                      "No sessions yet.\n", list);
@@ -818,6 +818,29 @@ public sealed partial class CampaignSessionToolTests : IClassFixture<McpServerHa
         Assert.Equal("# Session 3 ended (big)\n\nBatch `0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000`. To undo it: campaign_history {\"action\": \"undo\", " +
                      "\"batch_id\": \"0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000\", \"campaign\": \"big\"}.\n\nsession:3 is played.\nChanged: status.\nBackup not written: disk full\n\n" +
                      "## Checklist\nNothing left to do: every name is known, clocks are ticked, facts have knowers, attendance is recorded.\n", text);
+    }
+
+    /// <summary>
+    /// A session ended over fights still running (Phase 7, contract §14): the checklist prints one end call per fight,
+    /// naming it (a paused fight is not "current", so a bare end would miss it), each a call that parses as sent, since
+    /// the fights' sheet-seeded characters are written back only when they end.
+    /// </summary>
+    [Fact]
+    public void FormatWrite_SessionEndWithFightsStillRunning_TheChecklistPrintsAnEndCallNamingEach()
+    {
+        var checklist = new SessionChecklist([], [], [], [], [], false, ["The crypt (fixture)", "Björn's \"last\" stand"]);
+        var result = new SessionWriteResult("0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000", false, "session:4", 4, "played", WriteOutcomes.Updated,
+            ["status"], [], checklist);
+
+        var text = SessionMarkdown.FormatWrite(CampaignWriteSetup.Row("big"), "end", result);
+
+        Assert.Contains(
+            "\n- [ ] Encounters still running: end each: combat {\"action\": \"end\", \"encounter\": \"The crypt (fixture)\", \"campaign\": \"big\"}; " +
+            "combat {\"action\": \"end\", \"encounter\": \"Björn's \\\"last\\\" stand\", \"campaign\": \"big\"}.\n", text, StringComparison.Ordinal);
+        var calls = CampaignWriteSetup.PrintedCalls(text, "combat").Select(c => JsonDocument.Parse(c).RootElement).ToList();
+        Assert.Equal(["The crypt (fixture)", "Björn's \"last\" stand"], calls.Select(c => c.GetProperty("encounter").GetString()));
+        Assert.All(calls, c => Assert.Equal(("end", "big"), (c.GetProperty("action").GetString(), c.GetProperty("campaign").GetString())));
+        Assert.DoesNotContain("Nothing left to do", text, StringComparison.Ordinal);
     }
 
     [Fact]

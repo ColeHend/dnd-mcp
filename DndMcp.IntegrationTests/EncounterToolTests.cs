@@ -423,9 +423,10 @@ public sealed partial class EncounterToolTests : IClassFixture<McpServerHarness>
             await Error($$"""{"party":[5],"monsters":[{{entries}}]}"""));
     }
 
+    // party is published untyped and checked as int[] with the word "campaign" (CheckedAsAttribute.Or); the list names both.
     private const string Accepts =
-        " encounter_difficulty accepts: party (array of integer, required), monsters (array of object, required), edition (string, " +
-        "optional), effective_level_offset (integer, optional).";
+        " encounter_difficulty accepts: party (array of integer or \"campaign\", required), monsters (array of object, required), edition (string, " +
+        "optional), effective_level_offset (integer, optional), campaign (string, optional).";
 
     // ToolArgumentGuard inside monsters: every one of these fails in the SDK's binder or binds wrongly without it.
     [Theory]
@@ -455,6 +456,45 @@ public sealed partial class EncounterToolTests : IClassFixture<McpServerHarness>
         var text = await Error($$"""{"party":{{party}},"monsters":[{"name":"Ogre"}]}""");
 
         Assert.Equal(Prefix + "Invalid arguments: " + problem + "." + Accepts, text);
+    }
+
+    [Theory]
+    // Every party message of the typed int[] is byte-identical through the literal (contract §15 H1): a list is checked
+    // exactly as before, null and a missing party included; only a string that is not the word is new to see.
+    [InlineData("""{"party":null,"monsters":[{"name":"Ogre"}]}""", "argument 'party' should be array but was null")]
+    [InlineData("""{"party":"the campaign","monsters":[{"name":"Ogre"}]}""", "argument 'party' should be array but was the string \"the campaign\"")]
+    [InlineData("""{"party":"campaigns","monsters":[{"name":"Ogre"}]}""", "argument 'party' should be array but was the string \"campaigns\"")]
+    [InlineData("""{"party":{"campaign":true},"monsters":[{"name":"Ogre"}]}""", "argument 'party' should be array but was an object")]
+    [InlineData("""{"monsters":[{"name":"Ogre"}]}""", "missing required argument 'party'")]
+    public async Task CallTool_PartyNeitherLevelsNorTheWord_TheGuardRefusesItAndNamesTheWord(string arguments, string problem)
+    {
+        Assert.Equal(Prefix + "Invalid arguments: " + problem + "." + Accepts, await Error(arguments));
+    }
+
+    [Theory]
+    [InlineData("\"campaign\"")]
+    [InlineData("\"Campaign\"")]
+    [InlineData("\" CAMPAIGN \"")]
+    public async Task CallTool_PartyTheWordInAnyCaseWithNoCampaigns_IsTheToolsAnswerAndCreatesNoDatabase(string party)
+    {
+        // The guard lets the word through in any case (the tool reads exactly the spellings the guard passed), and a server
+        // with no campaigns answers as every campaign call does, without leaving a campaigns.db behind.
+        var text = await Error($$"""{"party":{{party}},"monsters":[{"name":"Ogre"}]}""");
+
+        Assert.Equal(
+            Prefix + "There are no campaigns yet. Create one with campaign {\"action\": \"create\", \"name\": \"…\", \"role\": \"player\" or \"dm\", " +
+            "\"ruleset\": \"2024\"}.",
+            text);
+        Assert.False(File.Exists(Path.Combine(_server.DataDirectory, "campaigns.db")), "party \"campaign\" created campaigns.db.");
+    }
+
+    [Fact]
+    public async Task CallTool_PartyAsNumericStrings_BindsLikeNumbers()
+    {
+        // The guard accepts digit strings for integers (the binder reads them), through the untyped parameter too.
+        Assert.Equal(
+            await Success("""{"party":[5,5,5,5],"monsters":[{"name":"Ogre","count":3}]}"""),
+            await Success("""{"party":["5","5","5","5"],"monsters":[{"name":"Ogre","count":3}]}"""));
     }
 
     [Fact]
@@ -648,5 +688,347 @@ public sealed partial class EncounterToolTests : IClassFixture<McpServerHarness>
 
         Assert.Contains("item 5 field 'count'", text, StringComparison.Ordinal);
         Assert.DoesNotContain("more problem", text, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// Invariant (contract D8, §15 H1): <c>encounter_difficulty</c> with <c>party: "campaign"</c> judges the fight for the
+/// campaign's current party (members linked member_of the party now, not dead or departed), each at the level its sheet
+/// gives, says whose levels it used and who was left out, and otherwise answers exactly as with those levels given; it
+/// refuses an empty party (with the link that adds a member) and members whose sheet gives no level (all of them, each with
+/// the update call that gives one), and never drops one silently. <c>campaign</c> names the campaign; the edition and
+/// level offset the call leaves out come from that same campaign, with the usual notes when it is the active one and notes
+/// naming it when it is not.
+///
+/// <para>
+/// Why it fails silently: a party one short changes the 2014 multiplier and every band, and a dead member counted, or a
+/// level read from the wrong campaign, gives a confident wrong label; the defaults of the active campaign applied to
+/// another campaign's party judge it under the wrong rules. Every test compares with the explicit levels or pins the note.
+/// </para>
+/// </summary>
+public sealed class EncounterToolCampaignPartyTests : IAsyncLifetime
+{
+    private const string Prefix = "An error occurred invoking 'encounter_difficulty': ";
+
+    // FIX §2.4's fight (fixture A): the mummy lord and two mummies.
+    private const string Crypt = """[{"ref": "2014/monster/mummy-lord"}, {"ref": "2014/monster/mummy", "count": 2}]""";
+
+    private readonly McpServerHarness _server = new();
+
+    public Task InitializeAsync() => _server.InitializeAsync();
+
+    public Task DisposeAsync() => _server.DisposeAsync();
+
+    private Task<string> Success(string arguments) => Campaign.ScenarioCalls.Call(_server, "encounter_difficulty", arguments);
+
+    private Task<string> Error(string arguments) => Campaign.ScenarioCalls.Fail(_server, "encounter_difficulty", arguments);
+
+    private Task<string> Call(string tool, string arguments) => Campaign.ScenarioCalls.Call(_server, tool, arguments);
+
+    [Fact]
+    public async Task CallTool_FixtureA_ReadsSixLevelsFromTheSheetsAndLeavesTheDeadOut()
+    {
+        await BelmakorAsync();
+
+        var text = await Success($$"""{"party": "campaign", "monsters": {{Crypt}}, "edition": "both"}""");
+        var explicitLevels = await Success($$"""{"party": [12, 12, 12, 12, 12, 12], "monsters": {{Crypt}}, "edition": "both"}""");
+
+        Assert.Contains("## 2014 rules: Hard\n", text, StringComparison.Ordinal);
+        Assert.Contains("- Monster XP 14,400 × 1.5 = **21,600 adjusted XP**", text, StringComparison.Ordinal);
+        Assert.Contains("## 2024 rules: Moderate\n", text, StringComparison.Ordinal);
+        Assert.Contains(
+            "**Notes:**\n- Party: the belmakor campaign's 6 current members (Aiden Ironstar 12, Belmakor 12, Ignis 12, Lieutenant James Torch 12, Serif 12, " +
+            "Vars Nocturne 12).\n- Left out: Tristan (dead); a dead or departed member is not in the party.\n",
+            text, StringComparison.Ordinal);
+        Assert.Equal(explicitLevels, Without(text, "- Party: the belmakor", "- Left out: Tristan"));
+    }
+
+    [Fact]
+    public async Task CallTool_APartyOfOne_IsOneCurrentMember()
+    {
+        // Review M (mutant E01): the note's singular ("1 current member") was never read, so "members" for one went unnoticed.
+        await Call("campaign", """{"action": "create", "name": "Solo", "role": "dm", "ruleset": "2024", "slug": "solo"}""");
+        await Call("campaign_write", """
+            {"campaign": "solo", "ops": [
+              {"op": "upsert", "kind": "character", "name": "Ana", "subtype": "pc", "visibility": "party"},
+              {"op": "link", "from": "character:ana", "rel": "member_of", "to": "faction:the-party"}]}
+            """);
+        await Call("campaign_character", """{"action": "update", "campaign": "solo", "character": "character:ana", "sheet": {"level": 5}}""");
+
+        var text = await Success("""{"party": "campaign", "campaign": "solo", "monsters": [{"ref": "2024/monster/ogre"}]}""");
+
+        Assert.Contains("- Party: the solo campaign's 1 current member (Ana 5).\n", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_FixtureAWithoutEdition_UsesTheCampaignsRulesetWithTheUsualNote()
+    {
+        await BelmakorAsync();
+
+        var text = await Success($$"""{"party": "campaign", "monsters": {{Crypt}}}""");
+
+        Assert.Contains("## 2014 rules: Hard\n", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("## 2024 rules", text, StringComparison.Ordinal);
+        Assert.Contains("\n- 2014 rules: the active campaign's (belmakor) ruleset.\n", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_FixtureB_TakesTheOffsetFromTheCampaign()
+    {
+        // FIX §4.6: three level-8 members, the campaign's effective_level_offset +1, the aboleth in its lair.
+        await OnePieceAsync();
+
+        var text = await Success("""{"party": "campaign", "monsters": [{"ref": "2024/monster/aboleth", "lair": true}], "edition": "both"}""");
+        var bookOnly = await Success("""{"party": "campaign", "monsters": [{"ref": "2024/monster/aboleth", "lair": true}], "edition": "both", "effective_level_offset": 0}""");
+
+        Assert.Contains("**Effective level:** +1 (3 characters at level 9).", text, StringComparison.Ordinal);
+        Assert.Contains("## 2024 rules: Beyond High (High at effective level +1)\n", text, StringComparison.Ordinal);
+        Assert.Contains("## 2014 rules: Hard (the same at effective level +1)\n", text, StringComparison.Ordinal);
+        Assert.Contains(
+            "- Party: the one-piece campaign's 3 current members (Björn Mountainfell 8, The amethyst Dragon Slayer 8, The fishman monk 8).\n" +
+            "- Effective level +1: the active campaign's (one-piece) effective_level_offset; pass effective_level_offset 0 for the book levels alone.\n",
+            text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Effective level", bookOnly, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_PartyOfAnotherCampaign_TakesThatCampaignsDefaultsAndNamesIt()
+    {
+        // one-piece (2024, +1) is current; the call asks for belmakor's party: belmakor's 2014 rules, no offset, and a note
+        // that names belmakor rather than calling it the active campaign.
+        await BelmakorAsync();
+        await OnePieceAsync();
+
+        var text = await Success($$"""{"party": "campaign", "campaign": "belmakor", "monsters": {{Crypt}}}""");
+
+        Assert.Contains("## 2014 rules: Hard\n", text, StringComparison.Ordinal);
+        Assert.Contains("\n- 2014 rules: the belmakor campaign's ruleset.\n", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("active campaign", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Effective level", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_LevelsWithAnotherCampaign_TakeThatCampaignsDefaults()
+    {
+        await OnePieceAsync();
+        await BelmakorAsync();
+
+        var text = await Success("""{"party": [8, 8, 8], "campaign": "one-piece", "monsters": [{"ref": "2024/monster/aboleth", "lair": true}]}""");
+
+        Assert.Contains("## 2024 rules: Beyond High (High at effective level +1)\n", text, StringComparison.Ordinal);
+        Assert.Contains(
+            "**Notes:**\n- 2024 rules: the one-piece campaign's ruleset.\n- Effective level +1: the one-piece campaign's effective_level_offset; pass " +
+            "effective_level_offset 0 for the book levels alone.\n",
+            text, StringComparison.Ordinal);
+        Assert.DoesNotContain("- Party:", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_EmptyParty_IsRefusedWithTheLinkThatAddsAMember()
+    {
+        await Call("campaign", """{"action": "create", "name": "Deep", "role": "dm", "ruleset": "2024", "slug": "deep"}""");
+
+        Assert.Equal(
+            Prefix + "the deep campaign has no current party members: link characters member_of faction:the-party, e.g. campaign_write " +
+            "{\"ops\": [{\"op\": \"link\", \"from\": \"character:…\", \"rel\": \"member_of\", \"to\": \"faction:the-party\"}], \"campaign\": \"deep\"}. " +
+            "Or give party as levels, e.g. [5, 5, 5, 5].",
+            await Error("""{"party": "campaign", "monsters": [{"name": "Ogre"}]}"""));
+    }
+
+    /// <summary>
+    /// LR02 (F2, D8 as amended): before any session is played, "now" is session 1, so characters linked member_of the party
+    /// since session 1 while it is still planned are the party; the refusal used to tell the author to link them.
+    /// </summary>
+    [Fact]
+    public async Task CallTool_MembersLinkedSinceTheFirstSession_BeforeItIsPlayed_AreTheParty()
+    {
+        await Call("campaign", """{"action": "create", "name": "Fresh", "role": "dm", "ruleset": "2024", "slug": "fresh"}""");
+        await Call("campaign_session", """{"action": "plan", "session": 1, "title": "Session 1"}""");
+        await Call("campaign_write", """
+            {"ops": [{"op": "upsert", "kind": "character", "name": "Ana", "subtype": "pc"}, {"op": "upsert", "kind": "character", "name": "Bo", "subtype": "pc"},
+                     {"op": "link", "from": "character:ana", "rel": "member_of", "to": "faction:the-party", "since": 1},
+                     {"op": "link", "from": "character:bo", "rel": "member_of", "to": "faction:the-party", "since": 1}]}
+            """);
+        await Call("campaign_character", """{"action": "update", "character": "character:ana", "sheet": {"level": 3}}""");
+        await Call("campaign_character", """{"action": "update", "character": "character:bo", "sheet": {"level": 3}}""");
+
+        var text = await Success("""{"party": "campaign", "monsters": [{"name": "Ogre"}]}""");
+
+        Assert.Contains("\n- Party: the fresh campaign's 2 current members (Ana 3, Bo 3).", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_EveryMemberDeadOrDeparted_IsRefusedNamingWhoWasLeftOut()
+    {
+        await Call("campaign", """{"action": "create", "name": "Deep", "role": "dm", "ruleset": "2024", "slug": "deep"}""");
+        await Call("campaign_write", """
+            {"ops": [{"op": "upsert", "kind": "character", "name": "Old Tom", "subtype": "pc", "status": "dead"},
+                     {"op": "upsert", "kind": "character", "name": "Wanderer", "subtype": "pc", "status": "departed"},
+                     {"op": "link", "from": "character:old-tom", "rel": "member_of", "to": "faction:the-party"},
+                     {"op": "link", "from": "character:wanderer", "rel": "member_of", "to": "faction:the-party"}]}
+            """);
+
+        var text = await Error("""{"party": "campaign", "monsters": [{"name": "Ogre"}]}""");
+
+        Assert.StartsWith(Prefix + "the deep campaign has no current party members: link characters member_of faction:the-party", text, StringComparison.Ordinal);
+        Assert.Contains(" Left out: Old Tom (dead), Wanderer (departed); a dead or departed member is not in the party. Or give party as levels", text,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_MembersWithoutASheetLevel_AreRefusedTogetherEachWithItsFix()
+    {
+        await Call("campaign", """{"action": "create", "name": "Deep", "role": "dm", "ruleset": "2024", "slug": "deep"}""");
+        await Call("campaign_write", """
+            {"ops": [{"op": "upsert", "kind": "character", "name": "Ash", "subtype": "pc"}, {"op": "upsert", "kind": "character", "name": "Birch", "subtype": "pc"},
+                     {"op": "upsert", "kind": "character", "name": "Cedar", "subtype": "pc"},
+                     {"op": "link", "from": "character:ash", "rel": "member_of", "to": "faction:the-party"},
+                     {"op": "link", "from": "character:birch", "rel": "member_of", "to": "faction:the-party"},
+                     {"op": "link", "from": "character:cedar", "rel": "member_of", "to": "faction:the-party"}]}
+            """);
+        await Call("campaign_character", """{"action": "update", "character": "character:ash", "sheet": {"level": 5}}""");
+        await Call("campaign_character", """{"action": "update", "character": "character:birch", "sheet": {"ac": 14}}""");
+
+        Assert.Equal(
+            Prefix + "party \"campaign\": the deep campaign's party levels come from the sheets, and 2 members have no level on one: " +
+            "Birch (a sheet with no level): campaign_character {\"action\": \"update\", \"character\": \"character:birch\", \"sheet\": {\"level\": <n>}, " +
+            "\"campaign\": \"deep\"}; Cedar (no sheet): campaign_character {\"action\": \"update\", \"character\": \"character:cedar\", \"sheet\": " +
+            "{\"level\": <n>}, \"campaign\": \"deep\"}. Or give party as levels, e.g. [5, 5, 5, 5].",
+            await Error("""{"party": "campaign", "monsters": [{"name": "Ogre"}]}"""));
+    }
+
+    [Fact]
+    public async Task CallTool_PartyLargerThanAListOfLevelsMayBe_IsRefusedBeforeItsSheetsAre()
+    {
+        // The bound a list of levels has (50 characters) holds for the campaign's party too, and comes before the sheets:
+        // at 50 members without sheets the refusal is theirs; at 51 it is the size, not 51 update calls.
+        await Call("campaign", """{"action": "create", "name": "Deep", "role": "dm", "ruleset": "2024", "slug": "deep"}""");
+        await MembersAsync(1, 50);
+        var fifty = await Error("""{"party": "campaign", "monsters": [{"name": "Ogre"}]}""");
+        await MembersAsync(51, 51);
+
+        var text = await Error("""{"party": "campaign", "monsters": [{"name": "Ogre"}]}""");
+
+        Assert.StartsWith(Prefix + "party \"campaign\": the deep campaign's party levels come from the sheets, and 50 members have no level on one: ", fifty,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            Prefix + "party \"campaign\": the deep campaign's party has 51 current members; at most 50 characters are accepted. Give party as the levels " +
+            "of the characters in this fight, e.g. [5, 5, 5, 5].",
+            text);
+
+        // Members "Member 01" … linked member_of the party, 25 to a call (two ops each: the ops limit is 50).
+        async Task MembersAsync(int first, int last)
+        {
+            foreach (var chunk in Enumerable.Range(first, last - first + 1).Chunk(25))
+            {
+                var ops = chunk.Select(i => $$"""{"op": "upsert", "kind": "character", "name": "Member {{i:D2}}", "subtype": "pc"}""")
+                    .Concat(chunk.Select(i => $$"""{"op": "link", "from": "character:member-{{i:D2}}", "rel": "member_of", "to": "faction:the-party"}"""));
+                await Call("campaign_write", $$"""{"ops": [{{string.Join(", ", ops)}}]}""");
+            }
+        }
+    }
+
+    [Fact]
+    public async Task CallTool_AMemberWhoLeftTheParty_IsNotCounted()
+    {
+        await OnePieceAsync();
+        await Call("campaign_write", """
+            {"ops": [{"op": "upsert", "kind": "character", "name": "Drifter", "subtype": "pc"},
+                     {"op": "link", "from": "character:drifter", "rel": "member_of", "to": "faction:the-party", "status": "former"}]}
+            """);
+        await Call("campaign_character", """{"action": "update", "character": "character:drifter", "sheet": {"level": 20}}""");
+
+        var text = await Success("""{"party": "campaign", "monsters": [{"name": "Ogre"}]}""");
+
+        Assert.Contains("- Party: the one-piece campaign's 3 current members (", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Drifter", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_UnknownCampaign_IsTheCampaignRefusal()
+    {
+        await OnePieceAsync();
+
+        var text = await Error("""{"party": "campaign", "campaign": "nope", "monsters": [{"name": "Ogre"}]}""");
+
+        Assert.StartsWith(Prefix + "No campaign \"nope\".", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CallTool_PartyCampaignBeforeAnyMonsterCheck_StillChecksTheMonstersFirst()
+    {
+        // Every argument check runs before campaigns.db is read: a bad monster list is the answer, not the party.
+        var text = await Error("""{"party": "campaign", "monsters": []}""");
+
+        Assert.StartsWith(Prefix + "monsters needs at least one item.", text, StringComparison.Ordinal);
+        Assert.False(File.Exists(Path.Combine(_server.DataDirectory, "campaigns.db")), "a refused call created campaigns.db.");
+    }
+
+    // The text without the lines that start with any of the prefixes (a note line each), and without a notes block left empty.
+    private static string Without(string text, params string[] prefixes)
+    {
+        var kept = string.Join("\n", text.Split('\n').Where(l => !prefixes.Any(p => l.StartsWith(p, StringComparison.Ordinal))));
+        return kept.Replace("**Notes:**\n\n", string.Empty, StringComparison.Ordinal);
+    }
+
+    // Fixture A's party (contract §16): six level-12 members with sheets, Tristan dead.
+    private async Task BelmakorAsync()
+    {
+        await Call("campaign", """
+            {"action": "create", "name": "Belmakor", "role": "player", "ruleset": "2014", "slug": "belmakor", "my_character": "Belmakor"}
+            """);
+        await Call("campaign_write", """
+            {"campaign": "belmakor", "ops": [
+              {"op": "upsert", "kind": "character", "name": "Vars Nocturne", "slug": "vars", "subtype": "pc"},
+              {"op": "upsert", "kind": "character", "name": "Ignis", "subtype": "pc"},
+              {"op": "upsert", "kind": "character", "name": "Serif", "subtype": "pc"},
+              {"op": "upsert", "kind": "character", "name": "Lieutenant James Torch", "slug": "torch", "subtype": "pc"},
+              {"op": "upsert", "kind": "character", "name": "Aiden Ironstar", "subtype": "pc"},
+              {"op": "upsert", "kind": "character", "name": "Tristan", "subtype": "pc", "status": "dead"},
+              {"op": "link", "from": "character:vars", "rel": "member_of", "to": "faction:the-party"},
+              {"op": "link", "from": "character:ignis", "rel": "member_of", "to": "faction:the-party"},
+              {"op": "link", "from": "character:serif", "rel": "member_of", "to": "faction:the-party"},
+              {"op": "link", "from": "character:torch", "rel": "member_of", "to": "faction:the-party"},
+              {"op": "link", "from": "character:aiden-ironstar", "rel": "member_of", "to": "faction:the-party"},
+              {"op": "link", "from": "character:tristan", "rel": "member_of", "to": "faction:the-party"}]}
+            """);
+        foreach (var (character, classes) in new[]
+                 {
+                     ("character:belmakor", """[{"class": "wizard", "subclass": "Bladesinger", "level": 12}]"""),
+                     ("character:vars", """[{"class": "ranger", "level": 6}, {"class": "rogue", "level": 6}]"""),
+                     ("character:aiden-ironstar", """[{"class": "paladin", "level": 6}, {"class": "sorcerer", "level": 6}]"""),
+                     ("character:ignis", """[{"class": "bard", "level": 12}]"""),
+                     ("character:serif", """[{"class": "artificer", "level": 12, "hit_die": 8}]"""),
+                     ("character:torch", """[{"class": "wizard", "level": 12}]"""),
+                 })
+        {
+            await Call("campaign_character", $$"""{"action": "update", "campaign": "belmakor", "character": "{{character}}", "sheet": {"classes": {{classes}}} }""");
+        }
+    }
+
+    // Fixture B's party (contract §16, FIX §3): three level-8 members in the DM campaign one-piece (2024, offset +1).
+    private async Task OnePieceAsync()
+    {
+        await Call("campaign", """
+            {"action": "create", "name": "One Piece", "role": "dm", "ruleset": "2024", "slug": "one-piece", "settings": {"effective_level_offset": 1}}
+            """);
+        await Call("campaign_write", """
+            {"campaign": "one-piece", "ops": [
+              {"op": "upsert", "kind": "character", "name": "Björn Mountainfell", "subtype": "pc", "visibility": "party"},
+              {"op": "upsert", "kind": "character", "name": "The amethyst Dragon Slayer", "slug": "dragon-slayer", "subtype": "pc", "visibility": "party"},
+              {"op": "upsert", "kind": "character", "name": "The fishman monk", "slug": "fishman-monk", "subtype": "pc", "visibility": "party"},
+              {"op": "link", "from": "character:bjorn-mountainfell", "rel": "member_of", "to": "faction:the-party"},
+              {"op": "link", "from": "character:dragon-slayer", "rel": "member_of", "to": "faction:the-party"},
+              {"op": "link", "from": "character:fishman-monk", "rel": "member_of", "to": "faction:the-party"}]}
+            """);
+        foreach (var (character, classes) in new[]
+                 {
+                     ("character:bjorn-mountainfell", """[{"class": "barbarian", "level": 8}]"""),
+                     ("character:dragon-slayer", """[{"class": "Dragon Slayer", "subclass": "Amethyst", "level": 8, "hit_die": 10}]"""),
+                     ("character:fishman-monk", """[{"class": "monk", "level": 8}]"""),
+                 })
+        {
+            await Call("campaign_character", $$"""{"action": "update", "campaign": "one-piece", "character": "{{character}}", "sheet": {"classes": {{classes}}} }""");
+        }
     }
 }

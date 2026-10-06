@@ -1,7 +1,7 @@
 namespace DndMcp.Domain.Simulation;
 
 /// <summary>What one death saving throw leaves a dying creature as.</summary>
-internal enum DeathSaveState
+public enum DeathSaveState
 {
     /// <summary>Still dying: roll again next turn.</summary>
     Dying,
@@ -26,8 +26,13 @@ internal enum DeathSaveState
 /// P(stable) = 0.41375, P(natural-20 revive) = 0.181375 for a creature left alone) as well as sampling it through the
 /// engine: a wrong threshold or a missing "nat 1 = two failures" fails the enumeration to 1e-12.
 /// </para>
+/// <para>
+/// Public from Phase 7 so the tracker and the sheet share it: <c>CombatRules.DeathSave</c> wraps it with the totals,
+/// the 2024 Exhaustion penalty and the reset on becoming stable that the rule adds. <see cref="Step"/> itself is unchanged
+/// (it leaves the counts on <see cref="DeathSaveState.Stable"/>; the engine and the wrapper reset them).
+/// </para>
 /// </summary>
-internal static class DeathSaves
+public static class DeathSaves
 {
     public const int Dc = 10;
 

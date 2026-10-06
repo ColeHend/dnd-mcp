@@ -4,15 +4,19 @@ namespace DndMcp.Hosting;
 /// Sent once at the MCP handshake. Claude Code loads only tool NAMES plus these instructions at session
 /// start (tool search defers the definitions), so this text is what makes the model reach for the right
 /// tool at all. Claude Code truncates it at 2,048 characters — ServerSurfaceTests pins the length, and that every
-/// tool is named here.
+/// tool is named here, as a whole word, at the head of the line or sentence that says what it is for.
 ///
 /// <para>
 /// The balance tools are named with the words a user asks with ("damage per round", "homebrew", the band scale from Under
 /// to Breaking), since a request like "is this homebrew feat overtuned?" must lead the model to <c>balance_compare</c>
-/// rather than to an estimate. <c>balance_simulate</c> is named with what it answers (win, defeat and death odds) and what
-/// a party may be made of (class archetypes), and <c>rules_get</c>'s combatant format with what it shows, so a surprising
-/// simulation result leads the model to the stat block as the simulator read it. The later-builds line promises only what
-/// does not exist yet: a promise of something already here tells the model it is missing.
+/// rather than to an estimate. <c>balance_simulate</c> is named with what it answers (win, defeat and death odds), what a
+/// party may be made of (class archetypes, builds, monsters, sheets) and that it fights "a campaign's fight": without the
+/// last two, "how would our party fare in the fight I prepared?" or "who wins from here?" in the middle of a fight reaches
+/// the encounter, from_state and character forms only if the model happens to open <c>balance_simulate</c>'s description.
+/// <c>rules_get</c>'s combatant format is named with what it shows, so a surprising simulation result leads the model to
+/// the stat block as the simulator read it. The later-builds line promises only what does not exist yet (Phase 8's
+/// markdown export and import): a promise of something already here tells the model it is missing, which is why it no
+/// longer names character sheets or combat tracking.
 /// </para>
 /// <para>
 /// The campaign tools are named with the jobs they do, in the words a user brings to them: "does X know this?", names,
@@ -28,38 +32,59 @@ namespace DndMcp.Hosting;
 /// model told "2024" would pass 2024 in a 2014 campaign.
 /// </para>
 /// <para>
-/// Fifteen tools in 2,048 characters: <c>rules_get</c>'s "not in this server's data" sentences keep every chapter they
-/// name and the one part of the Gameplay Toolbox the server does have, its encounter budget (without that exception a
-/// 2024 encounter-building question is answered "not in this server's data", though <c>encounter_difficulty</c> and
-/// rules://tables/xp-budget-2024 serve it); ServerSurfaceTests pins each. Every other tool gets one short line, because its
-/// own description, loaded when the model picks the tool, carries the arguments and the examples.
+/// <c>campaign_character</c> and <c>combat</c> are named with what a user says at the table: a character's HP, damage,
+/// slots, rests and inventory ("Belmakor takes 14 fire damage", "we take a long rest"), and a live fight's initiative,
+/// damage, conditions and death saves, with "end updates sheets" so the model knows the fight's HP reaches the sheet only
+/// at its end. "damage" is on both lines on purpose: a hit to a character is always right through
+/// <c>campaign_character</c>, which applies it to the live fight when the character is in one and to the sheet when no
+/// fight runs, while <c>combat</c> with no fight running refuses and offers to start one, a fight nobody wanted for one
+/// trap. Without these lines a model keeps HP and initiative in the conversation, where nothing tracks durations or
+/// concentration and nothing reaches the campaign.
+/// </para>
+/// <para>
+/// Seventeen tools in 2,048 characters: <c>rules_get</c>'s "Not in this server's data" sentence keeps every chapter it
+/// names and the two parts of those chapters the server does have, the Character Creation chapter's advancement table
+/// and the Gameplay Toolbox's encounter budget (without those exceptions "how much XP for level 5?" or a 2024
+/// encounter-building question is answered "not in this server's data", though rules://tables/character-advancement,
+/// <c>encounter_difficulty</c> and rules://tables/xp-budget-2024 serve them); ServerSurfaceTests pins each. It says "this
+/// server's data", not "the data": the model repeats the phrase to the user ("Say so"), and "not in the data" reads as
+/// "not in the SRD", which is false for the 2024 chapters (they are in SRD 5.2.1, only not served here). Every other tool
+/// gets one short line, because its own description, loaded when the model picks the tool, carries the arguments and
+/// the examples: <c>rules_search</c>'s kinds of entry, <c>rules_get</c>'s edition "both", <c>encounter_difficulty</c>'s
+/// party "campaign" and <c>balance_simulate</c>'s argument names are left to those descriptions. The text is 2,045
+/// characters, so 3 are left: Phase 8 must drop the later-builds line (63 characters with its newline) before it adds its
+/// tool's line, and to fit more than that it must move the missing-chapters list into the rules tools' descriptions
+/// (with the RulesScope pins that read it here).
 /// </para>
 /// </summary>
 internal static class ServerInstructions
 {
     public const string Text =
-        "D&D 5e, 2014 and 2024 rules: use these tools instead of guessing or doing maths by hand. Editions default to the " +
-        "active campaign's ruleset, else 2024.\n" +
-        "- rules_search: find SRD text by words: spells, monsters, classes, feats, items, conditions, rules.\n" +
-        "- rules_get: one entry by ref or name; edition \"both\" compares; format \"combatant\" shows a monster as the simulator " +
-        "reads it. Quote rules from these tools. The 2024 rules are the SRD 5.2.1 Rules Glossary. Not in this server's data: " +
-        "the 2024 SRD's Playing the Game, Character Creation and Gameplay Toolbox chapters (except its encounter budget), its " +
-        "Spells chapter's casting rules and Equipment chapter's prose, and multiclassing rules in either edition. Say such a " +
-        "rule is not in this server's data rather than searching again or quoting from memory.\n" +
-        "- dice_roll: any roll the user wants made, logged to a live campaign session. dice_odds: exact odds, not many rolls.\n" +
+        "D&D 5e (2014 and 2024): use these tools, not guesses or mental maths. Editions default to the active campaign's " +
+        "ruleset, else 2024.\n" +
+        "- rules_search: find SRD text by words.\n" +
+        "- rules_get: an entry by ref or name; format \"combatant\" shows a monster as the simulator reads it. 2024 rules " +
+        "are the SRD 5.2.1 Rules Glossary. Not in this server's data: 2024's Playing the Game, Character Creation " +
+        "(except its advancement table) and Gameplay Toolbox chapters (except its encounter budget), Spells chapter's " +
+        "casting rules and Equipment chapter's prose; multiclassing rules in either edition. Say so; never search again " +
+        "or quote from memory.\n" +
+        "- dice_roll: any roll the user wants made, logged to a live campaign session. dice_odds: exact odds.\n" +
         "- encounter_difficulty: how hard a fight is (2014 DMG, 2024 XP budget or both). Tables: rules_get ref " +
         "\"rules://tables\".\n" +
         "- balance_dpr: a build's exact damage per round. balance_compare: judge homebrew: ΔDPR vs a baseline, " +
-        "level-equivalent, band (Under to Breaking); for a verdict, baseline = the official option (a feat: the ASI it replaces).\n" +
-        "- balance_simulate: Monte Carlo fights of a party (class archetypes, builds, monsters) vs enemies: win, defeat and " +
-        "death odds.\n" +
+        "level-equivalent, band (Under to Breaking); for a verdict, baseline = the official option (a feat: the ASI it " +
+        "replaces).\n" +
+        "- balance_simulate: Monte Carlo fights of a party (class archetypes, builds, monsters, sheets) vs enemies, or a " +
+        "campaign's fight: win, defeat and death odds.\n" +
         "- campaign: create, use, summary.\n" +
-        "- campaign_search, campaign_get: find and read entries and facts; perspective \"character:<slug>\" shows only what " +
-        "they know, by the names they know.\n" +
+        "- campaign_search, campaign_get: find and read entries and facts; perspective \"character:<slug>\" shows only " +
+        "what they know, by the names they know.\n" +
         "- campaign_write: changes as one batch of ops; dry_run first; inventions get F-codes.\n" +
-        "- campaign_knowledge: record, reveal; check a draft (\"does X know this?\": names, gates, forbidden words); ledger " +
-        "(who knows what).\n" +
+        "- campaign_knowledge: record, reveal; check a draft (\"does X know this?\": names, gates, forbidden words); " +
+        "ledger (who knows what).\n" +
         "- campaign_session: plan, start, end (saves the recap), record_past (a past night), recap (what was learned).\n" +
         "- campaign_history: since, as_of, undo a batch.\n" +
-        "More tools arrive in later builds: character sheets, combat tracking, markdown export and import.";
+        "- campaign_character: sheets: HP, damage, slots, resources, conditions, rests, XP, inventory.\n" +
+        "- combat: a live fight: initiative, damage, conditions, death saves, reminders; end updates sheets.\n" +
+        "More tools arrive in later builds: markdown export and import.";
 }

@@ -37,8 +37,8 @@ namespace DndMcp.Tools;
 public sealed class CampaignKnowledgeTools
 {
     internal const string Example =
-        "{\"action\": \"check\", \"campaign\": \"belmakor\", \"perspective\": \"character:belmakor\", " +
-        "\"text\": \"Old king, come down\", \"diegetic\": true}";
+        "{\"action\": \"check\", \"perspective\": \"character:belmakor\", " +
+        "\"text\": \"Old king, come down\", \"diegetic\": true, \"campaign\": \"belmakor\"}";
 
     private const string Record = "record";
     private const string Reveal = "reveal";

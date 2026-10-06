@@ -86,8 +86,32 @@ public sealed class ScenarioBelmakorWorld : IAsyncLifetime
     public const string AmbitionStatement =
         "Belmakor intends to reclaim the blighted surface, make new habitable land, and become a legend who outstrips his parents.";
 
+    /// <summary>The world in a server of its own (the class-fixture form: <see cref="InitializeAsync"/> starts it and builds the world).</summary>
+    public ScenarioBelmakorWorld()
+        : this(new McpServerHarness())
+    {
+    }
+
+    // The world in a server someone else made (BuildAsync): Phase 7's combat scenarios give theirs a scripted dice roller.
+    private ScenarioBelmakorWorld(McpServerHarness server)
+    {
+        Server = server;
+    }
+
     /// <summary>The server the world lives in (its own data directory, deleted on dispose).</summary>
-    public McpServerHarness Server { get; } = new();
+    public McpServerHarness Server { get; }
+
+    /// <summary>
+    /// Builds the world in <paramref name="server"/>, already initialized and holding no campaign, which the caller owns
+    /// (starts and disposes): the form for a server with test-only services, such as Phase 7's scripted dice roller
+    /// (<c>McpServerHarness.WithExtraTools</c>), which the class-fixture form cannot take.
+    /// </summary>
+    public static async Task<ScenarioBelmakorWorld> BuildAsync(McpServerHarness server)
+    {
+        var world = new ScenarioBelmakorWorld(server);
+        await world.BuildAsync();
+        return world;
+    }
 
     /// <summary>"The thing the old king wants fetched is the Axiom Cage." (author visibility; Belmakor and the party unaware).</summary>
     public string AxiomFact { get; private set; } = string.Empty;

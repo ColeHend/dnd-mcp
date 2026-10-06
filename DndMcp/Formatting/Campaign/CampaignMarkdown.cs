@@ -41,7 +41,7 @@ internal static class CampaignMarkdown
     // like the get; without campaign the call reads whichever campaign is current).
     private static string GetCapHint(string campaignSlug, CampaignView view) => view.AuthorView
         ? $"use campaign {{\"action\": \"summary\", \"campaign\": \"{campaignSlug}\"}} for the state of play"
-        : $"use campaign {{\"action\": \"summary\", \"campaign\": \"{campaignSlug}\", \"perspective\": \"{view.Perspective.Text}\"}} for the state of play";
+        : $"use campaign {{\"action\": \"summary\", \"perspective\": \"{view.Perspective.Text}\", \"campaign\": \"{campaignSlug}\"}} for the state of play";
 
     private static readonly CultureInfo Invariant = CultureInfo.InvariantCulture;
 
@@ -252,7 +252,7 @@ internal static class CampaignMarkdown
 
     /// <summary>"Resources: campaign://belmakor/summary, …" with the deep forms.</summary>
     public static string ResourcesLine(string slug) =>
-        $"Resources: `campaign://{slug}/summary`, `campaign://{slug}/threads`; also readable by URI: `campaign://{slug}/entity/<ref>`, " +
+        $"Resources: `campaign://{slug}/summary`, `campaign://{slug}/threads`, `campaign://{slug}/party`; also readable by URI: `campaign://{slug}/entity/<ref>`, " +
         $"`campaign://{slug}/session/<n>`, `campaign://{slug}/knowledge/<perspective>`.";
 
     /// <summary>"Batch `…`. To undo it: campaign_history {…, "campaign": "…"}."</summary>

@@ -174,7 +174,7 @@ public sealed partial class RulesResourceTests : IClassFixture<McpServerHarness>
         return Assert.IsType<TextResourceContents>(Assert.Single(result.Contents)).Text;
     }
 
-    private static string ReadmePath()
+    internal static string ReadmePath()
     {
         for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
         {

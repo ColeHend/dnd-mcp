@@ -33,6 +33,9 @@ internal sealed partial class Fight
 {
     private static readonly ConditionTemplate ProneTemplate = new() { Condition = Cond.Prone, Duration = DurationKind.UntilStands };
 
+    /// <summary>Set while a fight's start state is applied (<see cref="ApplyStart"/>): what happened in the live fight is not replayed (no death burst).</summary>
+    private bool _seeding;
+
     private readonly int[] _hit = new int[DamageTypes.Count];
     private readonly int[] _aux = new int[DamageTypes.Count];
     private readonly int[] _aoe = new int[DamageTypes.Count];
@@ -361,7 +364,8 @@ internal sealed partial class Fight
             _log.Line($"    {target.Label} dies");
         }
 
-        if (target.T.DeathBurst is { } burst)
+        // A death on the seed (a sixth exhaustion level) happened in the live fight: its burst is not rolled again.
+        if (target.T.DeathBurst is { } burst && !_seeding)
         {
             DeathBurst(target, burst);
         }
@@ -534,9 +538,13 @@ internal sealed partial class Fight
     /// <summary>
     /// Imposes a condition (refused by an immunity); returns whether it landed. <paramref name="immunity"/> is the imposing
     /// effect's <see cref="MonsterAction.ImmunityIndex"/> (−1: none): when this condition ends, the target becomes immune to
-    /// that effect of <paramref name="source"/> (<see cref="RemoveAt"/>).
+    /// that effect of <paramref name="source"/> (<see cref="RemoveAt"/>). <paramref name="skipTurnEnds"/> (−1: from whose
+    /// turn it is now) and <paramref name="skipTurnStarts"/> are a seeded condition's own counts
+    /// (<see cref="StartCondition.ImposedDuringResumedTurn"/>): nothing imposed mid-fight ever skips a turn start, because
+    /// the turn it was imposed in has already started.
     /// </summary>
-    internal bool AddCondition(Creature? source, Creature target, ConditionTemplate template, int concentrationToken, bool quiet = false, int immunity = -1)
+    internal bool AddCondition(Creature? source, Creature target, ConditionTemplate template, int concentrationToken, bool quiet = false, int immunity = -1,
+                               int skipTurnEnds = -1, int skipTurnStarts = 0)
     {
         if (target.Dead)
         {
@@ -560,9 +568,11 @@ internal sealed partial class Fight
             Source = source?.Id ?? -1,
             Duration = template.Duration,
             RoundsLeft = template.Duration is DurationKind.Rounds or DurationKind.SaveEnds ? template.Rounds : 0,
-            SkipTurnEnds = template.Duration == DurationKind.UntilEndOfTargetTurn
-                ? (_active == target.Id ? 1 : 0)
-                : (source is not null && _active == source.Id ? 1 : 0),
+            SkipTurnEnds = skipTurnEnds >= 0 ? skipTurnEnds
+                : template.Duration == DurationKind.UntilEndOfTargetTurn
+                    ? (_active == target.Id ? 1 : 0)
+                    : (source is not null && _active == source.Id ? 1 : 0),
+            SkipTurnStarts = skipTurnStarts,
             Template = template,
             ConcentrationToken = concentrationToken,
             Immunity = source is null ? -1 : immunity,
@@ -618,7 +628,11 @@ internal sealed partial class Fight
         target.BecomeImmuneToEffect(active.Source, active.Immunity);
     }
 
-    /// <summary>Removes the conditions with this duration (from this source, and of this condition, when given).</summary>
+    /// <summary>
+    /// Removes the conditions with this duration (from this source, and of this condition, when given). A seeded until-start
+    /// condition imposed during the resumed turn (<see cref="ActiveCondition.SkipTurnStarts"/>, the only conditions with one)
+    /// outlives the replayed start of that turn instead: it is only ever matched here at a turn start.
+    /// </summary>
     private void RemoveMatching(Creature target, DurationKind duration, int? source, int condition, string why)
     {
         for (var i = target.Conditions.Count - 1; i >= 0; i--)
@@ -626,6 +640,13 @@ internal sealed partial class Fight
             var active = target.Conditions[i];
             if (active.Duration == duration && (source is null || active.Source == source) && (condition < 0 || active.Condition == condition))
             {
+                if (active.SkipTurnStarts > 0)
+                {
+                    active.SkipTurnStarts--;
+                    target.Conditions[i] = active;
+                    continue;
+                }
+
                 if (_log is not null)
                 {
                     _log.Line($"  {target.Label} is no longer {Cond.Name(active.Condition)} ({why})");

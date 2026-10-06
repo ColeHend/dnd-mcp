@@ -100,6 +100,40 @@ public sealed class CampaignTestDb : IDisposable
         file.Write(noise);
     }
 
+    /// <summary>
+    /// Writes campaigns.db the way a program other than this server might (a hand edit, another tool, a damaged page):
+    /// <paramref name="sql"/> on a connection of its own with CHECK constraints off, so a value no tool writes gets in.
+    /// </summary>
+    public void WriteBehindTheServer(string sql)
+    {
+        using var connection = new SqliteConnection($"Data Source={DatabasePath};Pooling=False");
+        connection.Open();
+        connection.Execute("PRAGMA ignore_check_constraints = ON");
+        connection.Execute(sql);
+    }
+
+    /// <summary>
+    /// Drops STRICT from <paramref name="table"/>'s declared schema (through writable_schema, as an older tool or a hand edit
+    /// may leave a file), so a later <see cref="WriteBehindTheServer"/> can store text in its number columns. Connections
+    /// opened afterwards read the changed schema.
+    /// </summary>
+    public void DropStrict(string table)
+    {
+        using var connection = new SqliteConnection($"Data Source={DatabasePath};Pooling=False");
+        connection.Open();
+        var sql = connection.ExecuteScalar<string>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = @table", new { table })!.TrimEnd();
+        if (!sql.EndsWith("STRICT", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"{table} is not STRICT.");
+        }
+
+        var version = connection.ExecuteScalar<long>("PRAGMA schema_version");
+        connection.Execute("PRAGMA writable_schema = ON");
+        connection.Execute("UPDATE sqlite_master SET sql = @sql WHERE type = 'table' AND name = @table", new { sql = sql[..^"STRICT".Length].TrimEnd(), table });
+        connection.Execute($"PRAGMA schema_version = {version + 1}");
+        connection.Execute("PRAGMA writable_schema = OFF");
+    }
+
     public void Dispose()
     {
         Database.Dispose();

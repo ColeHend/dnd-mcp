@@ -88,8 +88,7 @@ internal static class HistoryMarkdown
 
     /// <summary>The exact undo call for one batch: <c>campaign_history {"action": "undo", "batch_id": "…", "campaign": "…"}</c>.</summary>
     public static string UndoCall(string batchId, string campaignSlug, bool dryRun = false) =>
-        $"campaign_history {{\"action\": \"undo\", \"batch_id\": \"{batchId}\", \"campaign\": \"{campaignSlug}\"" +
-        (dryRun ? ", \"dry_run\": true}" : "}");
+        $"campaign_history {{\"action\": \"undo\", \"batch_id\": \"{batchId}\", {(dryRun ? "\"dry_run\": true, " : string.Empty)}\"campaign\": \"{campaignSlug}\"}}";
 
     /// <summary>Whether a batch created the campaign itself (its undo removes the campaign, so it has no redo).</summary>
     public static bool CreatedTheCampaign(HistoryBatch batch)

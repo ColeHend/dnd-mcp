@@ -253,7 +253,8 @@ public static class Simulator
         {
             $"Summary of fight {replay.ToString(CultureInfo.InvariantCulture)}: {Describe(outcome.Outcome)} after {outcome.Rounds.ToString(CultureInfo.InvariantCulture)} round{(outcome.Rounds == 1 ? "" : "s")}.",
         };
-        foreach (var c in fight.Creatures)
+        // A placeholder (dead before a resume, holding its place) did not fight: the log's start lines name it, the summary does not.
+        foreach (var c in fight.Creatures.Where(c => c.T.Start is not { Placeholder: true }))
         {
             var state = c.Dead ? "dead" : c.Down ? (c.Stable ? "0 HP, stable" : "0 HP, dying") : $"{c.Hp}/{c.MaxHp} HP";
             lines.Add($"- {c.Label} ({(c.Side == 0 ? "party" : "enemy")}): {state}; dealt {c.DealtRaw} ({c.DealtEffective} effective), took {c.TakenRaw}" +
@@ -277,7 +278,11 @@ public static class Simulator
         var combatants = new List<CombatantReport>();
         for (var e = 0; e < run.Entries.Count; e++)
         {
-            combatants.Add(EntryReport(run, run.Entries[e], tally, tally.Entries[e], n));
+            // A placeholder (dead before a resume, kept for its place in the order) did not fight: it has no line.
+            if (!run.Entries[e].Placeholder)
+            {
+                combatants.Add(EntryReport(run, run.Entries[e], tally, tally.Entries[e], n));
+            }
         }
 
         CompareReport? compare = null;
@@ -333,6 +338,7 @@ public static class Simulator
             ReplayOutcome = replayed?.Outcome,
             ReplayRounds = replayed?.Rounds,
             Compare = compare,
+            Resumed = run.Resumed,
         };
     }
 
@@ -388,12 +394,15 @@ public static class Simulator
 
         double Per(long sum) => n == 0 ? 0 : (double)sum / n;
         MeanEstimate Mean(long sum, long sumOfFightSquares) => SimulationStatistics.Mean(sum, sumOfFightSquares, fights, scale: copies);
+        // What the fight had to spend: the fresh counts, or what a seeded creature (one per entry) had left at the resume.
+        var start = template.Start;
         var usage = new List<ResourceUsage>();
         if (template.Pc is { } pc)
         {
             for (var i = 0; i < resources.Length; i++)
             {
-                usage.Add(new ResourceUsage(pc.Resources[i].Label, pc.Resources[i].Uses, Per(resources[i])));
+                var uses = pc.Resources[i].Uses;
+                usage.Add(new ResourceUsage(pc.Resources[i].Label, start?.PcUsesOf(i, uses) ?? uses, Per(resources[i])));
             }
         }
 
@@ -401,12 +410,12 @@ public static class Simulator
         {
             var action = template.Limited[i];
             var available = action.Source.Usage.Kind == StatBlockValues.UsageKinds.PerDay ? action.Source.Usage.Uses ?? 1 : 0;
-            usage.Add(new ResourceUsage(template.LimitedNames[i], available, Per(limited[i])));
+            usage.Add(new ResourceUsage(template.LimitedNames[i], start?.LimitedUsesOf(i, available) ?? available, Per(limited[i])));
         }
 
         for (var i = 0; i < pools.Length; i++)
         {
-            usage.Add(new ResourceUsage($"spell slots ({template.PoolNames[i]})", template.PoolSizes[i], Per(pools[i])));
+            usage.Add(new ResourceUsage($"spell slots ({template.PoolNames[i]})", start?.PoolSlotsOf(i, template.PoolSizes[i]) ?? template.PoolSizes[i], Per(pools[i])));
         }
 
         return new CombatantReport

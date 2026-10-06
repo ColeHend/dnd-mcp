@@ -28,17 +28,25 @@ namespace DndMcp.Repository.Campaign.Write;
 /// <param name="ClosedGateReveals">Gated facts that reached a non-author knower this session while their gate was not ready ("f:12 to party").</param>
 /// <param name="ProposedInventions">Entities and facts created this session still proposed: accept or strike ("F3 f:12").</param>
 /// <param name="AttendanceNotRecorded">No attendance rows for the session: party knowledge will read as "attendance not recorded".</param>
+/// <param name="ActiveEncounters">
+/// Fights of the campaign still running (active or paused) when the live session ends, by name, oldest first: a fight left
+/// running keeps its sheet-seeded characters' hit points, slots and conditions in the tracker, unwritten to their sheets
+/// (the write-back happens only at <c>combat end</c>), and an active one blocks starting the next. Each is ended by name
+/// (a paused fight is not "current"). Empty for <c>record_past</c> (a past session has nothing to do with today's fight).
+/// Null (an older caller) reads as none.
+/// </param>
 public sealed record SessionChecklist(
     IReadOnlyList<string> UnknownNames,
     IReadOnlyList<string> ClocksNotTicked,
     IReadOnlyList<string> FactsWithoutKnowers,
     IReadOnlyList<string> ClosedGateReveals,
     IReadOnlyList<string> ProposedInventions,
-    bool AttendanceNotRecorded)
+    bool AttendanceNotRecorded,
+    IReadOnlyList<string>? ActiveEncounters = null)
 {
     public bool IsEmpty =>
         UnknownNames.Count == 0 && ClocksNotTicked.Count == 0 && FactsWithoutKnowers.Count == 0 && ClosedGateReveals.Count == 0 &&
-        ProposedInventions.Count == 0 && !AttendanceNotRecorded;
+        ProposedInventions.Count == 0 && !AttendanceNotRecorded && (ActiveEncounters is null || ActiveEncounters.Count == 0);
 }
 
 /// <summary>What a session write did.</summary>
@@ -425,7 +433,7 @@ public sealed partial class SessionWriter
             var attended = Attendance(b, live.EntityId, attendance, "end", replace: true);
             fields.AddRange(attended.Fields);
             b.Finish();
-            var checklist = Checklist(b, live.EntityId, checked((int)live.Number), recapMd);
+            var checklist = Checklist(b, live.EntityId, checked((int)live.Number), recapMd, runningFights: true);
             return SessionResult(b, checked((int)live.Number), WriteOutcomes.Updated, fields, checklist, attended);
         });
         if (result.DryRun)
@@ -554,7 +562,7 @@ public sealed partial class SessionWriter
 
             b.Finish();
             var body = b.EntityById(sessionId)!.BodyMd;
-            return SessionResult(b, n, outcome, fields, Checklist(b, sessionId, n, body), attended);
+            return SessionResult(b, n, outcome, fields, Checklist(b, sessionId, n, body, runningFights: false), attended);
         }, setup => own = OwnSession(setup, number));
     }
 
@@ -750,7 +758,9 @@ public sealed partial class SessionWriter
 
     // ---- the checklist ----------------------------------------------------------------------------------------------
 
-    private static SessionChecklist Checklist(WriteBatch b, string sessionId, int number, string? recap)
+    // runningFights: only the end of the live session lists the fights still running; a past session recorded now has
+    // nothing to do with today's fight, and listing it there would ask to end a fight that may be mid-round.
+    private static SessionChecklist Checklist(WriteBatch b, string sessionId, int number, string? recap, bool runningFights)
     {
         var session = b.Resolver.SessionByNumber(number)!;
         var notes = (JsonNode.Parse(session.LiveLog) as JsonArray ?? [])
@@ -763,8 +773,16 @@ public sealed partial class SessionWriter
             FactsWithoutKnowers(b, sessionId),
             ClosedGateReveals(b, sessionId, number),
             ProposedInventions(b, sessionId),
-            b.Connection.ExecuteScalar<long>("SELECT count(*) FROM session_attendance WHERE session_id = @sessionId", new { sessionId }, b.Transaction) == 0);
+            b.Connection.ExecuteScalar<long>("SELECT count(*) FROM session_attendance WHERE session_id = @sessionId", new { sessionId }, b.Transaction) == 0,
+            runningFights ? ActiveEncounters(b) : []);
     }
+
+    // Fights still running (active or paused), oldest first: the write-back to the sheets waits for their end.
+    private static IReadOnlyList<string> ActiveEncounters(WriteBatch b) =>
+        b.Connection.Query<string>(
+            "SELECT name FROM encounter WHERE campaign_id = @campaignId AND status IN (@active, @paused) ORDER BY created_at, rowid",
+            new { campaignId = b.Campaign.Id, active = CampaignValues.EncounterStatuses.Active, paused = CampaignValues.EncounterStatuses.Paused },
+            b.Transaction).ToList();
 
     // Proper nouns matching no name here. Generous on purpose (a miss is an invention made canon by accident; a false
     // flag costs a glance): a candidate is known when it equals a name, alias or known_as (article optional), is a

@@ -121,8 +121,8 @@ public sealed partial class RulesTools
         "whole entry. Use it to find entries on a topic (\"grapple\", \"difficult terrain\") or when unsure of a name; for a known " +
         "name call rules_get with name directly. Not in the data (so no search finds them): the 2024 SRD's Playing the Game, " +
         "Character Creation and Gameplay Toolbox chapters, its Spells chapter's casting rules and Equipment chapter's prose, and " +
-        "the multiclassing rules in either edition. The rules tables (XP by CR, both editions' encounter budgets and " +
-        "thresholds) are not searched either: rules_get ref \"rules://tables\" lists them.\n" +
+        "the multiclassing rules in either edition. The rules tables (XP by CR, character advancement, both editions' encounter " +
+        "budgets and thresholds) are not searched either: rules_get ref \"rules://tables\" lists them.\n" +
         "- query: the words to find. Every word must match; end a word with * for a prefix (fire*). An entry whose name is the " +
         "query comes first. If no entry has every word, entries matching any word are returned and the result says so.\n" +
         "- edition: \"2014\", \"2024\", or \"both\" to search both SRDs; default: the active campaign's ruleset, else 2024.\n" +
@@ -183,10 +183,10 @@ public sealed partial class RulesTools
         "a spell, a class with its level table, a subclass, species/race, feat, background, item, condition or rule (2024 " +
         "rules are the SRD 5.2.1 Rules Glossary). With edition \"both\" it shows the entry from each edition side by side, " +
         "with a comparison table for spells and monsters. Quote rules from here rather than from memory. Not in the data: the " +
-        "2024 SRD's Playing the Game, Character Creation and Gameplay Toolbox chapters (apart from its encounter budget, a " +
-        "rules table), its Spells chapter's casting rules and Equipment chapter's prose, and the multiclassing rules in either " +
-        "edition (a class shows only its multiclassing " +
-        "prerequisites); say a rule is not in this server's data rather than quoting it from memory.\n" +
+        "2024 SRD's Playing the Game, Character Creation (apart from its advancement table) and Gameplay Toolbox chapters " +
+        "(apart from its encounter budget), its Spells chapter's casting rules and Equipment chapter's prose, and the " +
+        "multiclassing rules in either edition (a class shows only its prerequisites); say a rule is not in this server's " +
+        "data rather than quoting it from memory.\n" +
         "Give exactly one of:\n" +
         "- ref: an entry's ref from rules_search or an earlier result, e.g. \"2024/spell/fireball\"; \"spell/fireball\" uses " +
         "edition. \"rules://attribution\" gives the SRD licence text; " +

@@ -22,7 +22,7 @@ namespace DndMcp.IntegrationTests.Campaign;
 /// </summary>
 public sealed class ScenarioPromptTests : IClassFixture<ScenarioBelmakorWorld>
 {
-    private static readonly Regex CheckCall = new("""(?<![A-Za-z_])campaign_knowledge (\{"action": "check", .*?"diegetic": true\})""", RegexOptions.CultureInvariant);
+    private static readonly Regex CheckCall = new("""(?<![A-Za-z_])campaign_knowledge (\{"action": "check", .*?"diegetic": true, "campaign": "[a-z0-9-]+"\})""", RegexOptions.CultureInvariant);
 
     private readonly ScenarioBelmakorWorld _w;
 
@@ -42,8 +42,8 @@ public sealed class ScenarioPromptTests : IClassFixture<ScenarioBelmakorWorld>
 
         Assert.StartsWith($"Check the most recent draft in this conversation against what {perspective} knows in campaign `belmakor`. " +
                           "If there is no draft yet, ask me for it and stop.\n", text, StringComparison.Ordinal);
-        Assert.Contains($"\n1. Call campaign_knowledge {{\"action\": \"check\", \"campaign\": \"belmakor\", \"perspective\": \"{perspective}\", " +
-                        "\"text\": <the draft, verbatim>, \"diegetic\": true}.", text, StringComparison.Ordinal);
+        Assert.Contains($"\n1. Call campaign_knowledge {{\"action\": \"check\", \"perspective\": \"{perspective}\", " +
+                        "\"text\": <the draft, verbatim>, \"diegetic\": true, \"campaign\": \"belmakor\"}.", text, StringComparison.Ordinal);
         Assert.True(text.IndexOf("Report the hard flags first", StringComparison.Ordinal) < text.IndexOf("Then the things to review", StringComparison.Ordinal),
             text);
         Assert.EndsWith("Never put its words into the draft.", text, StringComparison.Ordinal);

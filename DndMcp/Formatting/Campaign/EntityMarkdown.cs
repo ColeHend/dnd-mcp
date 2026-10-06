@@ -18,7 +18,8 @@ namespace DndMcp.Formatting.Campaign;
 /// none", which would differ between a disguised entity and an ordinary one and so say that a truer name exists), the
 /// "Author" section and the <c>&gt; [!secret]</c> block exist only when the author records exist, and no line says how many
 /// rows were hidden. A new field added to a reader's author record is rendered only if it is added here, inside those
-/// author-only blocks.
+/// author-only blocks. A character's sheet (<c>include: ["sheet"]</c>) is the same rule: the author's whole sheet or the
+/// view's public line, rendered by <see cref="SheetMarkdown"/>, and no section at all when the reader gave none.
 /// </para>
 /// <para>
 /// <b>Concise by default.</b> <c>detail: "full"</c> opts in to whole bodies, secret text and whole fact statements;
@@ -166,7 +167,7 @@ internal static class EntityMarkdown
         }
 
         var includes = e.Relations is { Count: > 0 } || e.Facts is { Count: > 0 } || e.Children is { Count: > 0 } || e.Sessions is { Count: > 0 } ||
-                       e.Knowledge is { Count: > 0 } || e.Author?.History is { Count: > 0 };
+                       e.Knowledge is { Count: > 0 } || e.Author?.History is { Count: > 0 } || e.Sheet is not null;
         return Render(e, level, true, Math.Max(ConciseBodyChars, bodyBudget), Math.Max(ConciseBodyChars, secretBudget),
             includes ? Cut.SingleBesideIncludes : Cut.Single, campaignSlug, view);
 
@@ -315,6 +316,13 @@ internal static class EntityMarkdown
         if (e.Beat is { } beat)
         {
             StoryWeb(b, beat, sub);
+        }
+
+        // include "sheet" (contract §7.3, §7.4): the author's whole sheet, or the public line; nothing (no heading either)
+        // when the view gets no sheet, so a sheet the view may not be shown reads exactly as none.
+        if (e.Sheet is { } sheet)
+        {
+            SheetMarkdown.AppendSection(b, sheet, sub, sheet.Author is { } author ? SheetLiveFight.For(view.LiveFight, author.Ref) : null);
         }
 
         if (e.Relations is { Count: > 0 } relations)
@@ -515,11 +523,11 @@ internal static class EntityMarkdown
     /// its hint (<see cref="SessionListCall"/>) keeps only the perspective.
     /// </summary>
     private static string ViewCall(CampaignView view, string campaignSlug, string tool, string arguments) =>
-        $"{tool} {{\"campaign\": \"{campaignSlug}\", {arguments}, {view.ViewArguments}}}";
+        $"{tool} {{{arguments}, {view.ViewArguments}, \"campaign\": \"{campaignSlug}\"}}";
 
     // campaign_session list in the same view: it takes no as_of_session (it lists sessions as they are).
     private static string SessionListCall(CampaignView view, string campaignSlug) =>
-        $"campaign_session {{\"campaign\": \"{campaignSlug}\", \"action\": \"list\", \"perspective\": \"{view.Perspective.Text}\"}}";
+        $"campaign_session {{\"action\": \"list\", \"perspective\": \"{view.Perspective.Text}\", \"campaign\": \"{campaignSlug}\"}}";
 
     // The author is pointed at the ledger (an author-facing grid); another view at a search of its own view.
     private static string KnowledgeHint(CampaignView view, string campaignSlug) => view.AuthorView

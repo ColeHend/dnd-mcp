@@ -23,7 +23,8 @@ namespace DndMcp.Domain.Simulation;
 /// </summary>
 internal static class CombatantCompiler
 {
-    public static CombatantTemplate FromStatBlock(StatBlock block, CombatantSpec spec, int id, int side, string label, bool rollHp)
+    /// <param name="lair">The fight is in a lair (<see cref="SimulationSpec.Lair"/>): the in-lair legendary action and Legendary Resistance counts where the block has them.</param>
+    public static CombatantTemplate FromStatBlock(StatBlock block, CombatantSpec spec, int id, int side, string label, bool rollHp, bool lair = false)
     {
         var all = new List<MonsterAction>();
         MonsterAction Compile(StatBlockAction action)
@@ -175,8 +176,8 @@ internal static class CombatantCompiler
             Retaliation = Effect(Trait(K.TraitKinds.RetaliationDamage)),
             Aura = Effect(Trait(K.TraitKinds.AuraDamage)),
             DeathBurst = Effect(Trait(K.TraitKinds.DeathBurst)),
-            LegendaryResistance = block.LegendaryResistance,
-            LegendaryUses = block.Legendary?.Uses ?? 0,
+            LegendaryResistance = lair ? block.LegendaryResistanceInLair ?? block.LegendaryResistance : block.LegendaryResistance,
+            LegendaryUses = block.Legendary is { } legendaryActions ? (lair ? legendaryActions.UsesInLair ?? legendaryActions.Uses : legendaryActions.Uses) : 0,
             LegendaryActions = legendary.ToArray(),
             Actions = [.. actions.Where(a => a.Usable), .. spells.Where(s => s.Source.Slot == K.ActionSlots.Action && s.Usable)],
             BonusActions = [.. bonus.Where(a => a.Usable), .. spells.Where(s => s.Source.Slot == K.ActionSlots.BonusAction && s.Usable)],
@@ -190,6 +191,29 @@ internal static class CombatantCompiler
             StatBlock = block,
         };
     }
+
+    /// <summary>
+    /// A placeholder with no simulation route of its own (<see cref="CombatantStart.Placeholder"/> on an entry that gives
+    /// only a name): it is dead from the start and only holds its place in the order, so nothing about it but its label and
+    /// side is ever read.
+    /// </summary>
+    public static CombatantTemplate Placeholder(int id, int side, string label) => new()
+    {
+        Id = id,
+        Side = side,
+        Label = label,
+        Edition = V.Editions.Default,
+        PcLike = false,
+        AverageHp = 1,
+        ArmorClass = 10,
+        Saves = new int[V.Abilities.All.Count],
+        InitiativeBonus = 0,
+        Front = false,
+        Resist = new int[DamageTypes.Count],
+        Immune = new int[DamageTypes.Count],
+        Vulnerable = new int[DamageTypes.Count],
+        Inert = true,
+    };
 
     private static bool Front(CombatantSpec spec, bool hasMelee) =>
         spec.Position is { } position && SimulationValues.Positions.Set.TryMatch(position, out var canonical)

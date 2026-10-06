@@ -93,28 +93,29 @@ public sealed class CampaignPrompts
             $"Recap {which} of campaign `{slug}` from my account of it in this conversation. My account is the source of truth; " +
             "if there is none yet, ask me for it and stop.\n" +
             CampaignOnEveryCall(slug) + "\n\n" +
-            $"1. Read what is recorded: campaign_session {{\"action\": \"get\", \"campaign\": \"{slug}\"{SessionArg(number)}}} " +
+            $"1. Read what is recorded: campaign_session {{\"action\": \"get\"{SessionArg(number)}, \"campaign\": \"{slug}\"}} " +
             $"({{\"action\": \"list\", \"campaign\": \"{slug}\"}} if unsure which session), and campaign_search / " +
             "campaign_get for every person, place and thing my account names, so you use their existing handles instead " +
             "of creating duplicates.\n" +
             "2. React briefly, then connect what happened to open threads, quests and questions: campaign_search " +
-            $"{{\"campaign\": \"{slug}\", \"kinds\": [\"thread\", \"quest\", \"question\"]}}.\n" +
+            $"{{\"kinds\": [\"thread\", \"quest\", \"question\"], \"campaign\": \"{slug}\"}}.\n" +
             "3. Draft ONE campaign_write batch for what the session changed: fact ops for what was learned (statement, " +
             "about, known_by naming who learned it, source \"session N recap\"), status, objective, tick and answer ops for what " +
             "moved, upserts for new people, places and loot. Anything I did not say happened is canon_status \"proposed\" (it " +
             "gets an F code); list those under \"Inventions (accept / strike)\".\n" +
             "4. Write it back, every call as a dry run first (dry_run: true), showing me the result and its warnings, and for real " +
             "only after I approve:\n" +
-            $"   - If {recorded} is live: campaign_write {{\"campaign\": \"{slug}\", \"ops\": [...]}} with no session (it " +
-            $"belongs to the live session), then campaign_session {{\"action\": \"end\", \"campaign\": \"{slug}\", " +
-            "\"recap_md\": ..., \"attendance\": [...]} LAST (ending it closes the session the writes belong to).\n" +
-            $"   - Otherwise: campaign_session {{\"action\": \"record_past\", \"campaign\": \"{slug}\"{SessionArg(number)}, " +
-            "\"title\": ..., \"played_on\": ..., \"recap_md\": ..., \"attendance\": [...]} FIRST, and apply it once I approve " +
+            $"   - If {recorded} is live: campaign_write {{\"ops\": [...], \"campaign\": \"{slug}\"}} with no session (it " +
+            "belongs to the live session), then campaign_session {\"action\": \"end\", \"recap_md\": ..., \"attendance\": [...], " +
+            $"\"campaign\": \"{slug}\"}} LAST (ending it closes the session the writes belong to).\n" +
+            $"   - Otherwise: campaign_session {{\"action\": \"record_past\"{SessionArg(number)}, " +
+            "\"title\": ..., \"played_on\": ..., \"recap_md\": ..., \"attendance\": [...], " +
+            $"\"campaign\": \"{slug}\"}} FIRST, and apply it once I approve " +
             "before dry-running the batch (a write can only name a session that exists); then campaign_write " +
-            $"{{\"campaign\": \"{slug}\", \"session\": {batchSession}, \"ops\": [...]}}." +
+            $"{{\"session\": {batchSession}, \"ops\": [...], \"campaign\": \"{slug}\"}}." +
             pastSession + "\n" +
             "5. Work through the checklist end or record_past returns with me, and give me the batch ids (each can be undone " +
-            $"with campaign_history {{\"action\": \"undo\", \"campaign\": \"{slug}\", \"batch_id\": ...}}).\n\n" +
+            $"with campaign_history {{\"action\": \"undo\", \"batch_id\": ..., \"campaign\": \"{slug}\"}}).\n\n" +
             "Gate warnings mean a secret reached the table before its gate was met: they are applied anyway (the table is the " +
             "source of truth), so tell me about them rather than dropping the reveal. Never copy secret text into the recap.";
     }
@@ -138,19 +139,22 @@ public sealed class CampaignPrompts
             CampaignOnEveryCall(slug) + "\n\n" +
             $"1. Where things stand: campaign {{\"action\": \"summary\", \"campaign\": \"{slug}\"}}, and the last " +
             $"session's recap and next hooks: campaign_session {{\"action\": \"get\", \"campaign\": \"{slug}\"}}.\n" +
-            $"2. What is in play: campaign_search {{\"campaign\": \"{slug}\", \"kinds\": [\"beat\"]}} (which are reachable " +
+            $"2. What is in play: campaign_search {{\"kinds\": [\"beat\"], \"campaign\": \"{slug}\"}} (which are reachable " +
             "now and which are locked behind which), then kinds [\"clock\"] (running clocks) and [\"thread\", \"quest\", " +
             "\"question\"] (open ones), and campaign_get for the NPCs involved (what they want).\n" +
-            $"3. Before planning any reveal, campaign_get {{\"campaign\": \"{slug}\", \"refs\": [<the gated fact or secret>], " +
-            "\"include\": [\"knowledge\"]}: its gate (after, with, routes) and whether it is ready. Do not plan a reveal whose gate " +
+            "3. Before planning any reveal, campaign_get {\"refs\": [<the gated fact or secret>], \"include\": [\"knowledge\"], " +
+            $"\"campaign\": \"{slug}\"}}: its gate (after, with, routes) and whether it is ready. Do not plan a reveal whose gate " +
             "is closed without telling me.\n" +
             "4. Draft the run-sheet scene by scene: a read-aloud hook, what the NPCs want, likely player actions, the mechanical " +
             "spine (DCs, stat blocks, clocks) and the beat it must land.\n" +
-            "5. For each fight, encounter_difficulty with the party's levels and the monsters; offer " +
-            "balance_simulate for the dangerous ones.\n" +
+            $"5. For each fight, encounter_difficulty {{\"party\": \"campaign\", \"monsters\": [...], \"campaign\": \"{slug}\"}} (the " +
+            "party's levels from their sheets). For the dangerous ones, offer to store the fight for the night with combat " +
+            $"{{\"action\": \"prepare\", \"name\": ..., \"combatants\": [...], \"campaign\": \"{slug}\"}} and to run it with " +
+            $"balance_simulate {{\"encounter\": <its name>, \"campaign\": \"{slug}\"}} (the party fights from their sheets).\n" +
             "6. End with \"Inventions (accept / strike)\": every name, place or claim you made up.\n" +
-            $"7. When I approve, save it: campaign_session {{\"action\": \"plan\", \"campaign\": \"{slug}\"{SessionArg(number)}, " +
-            "\"title\": ..., \"prep_md\": <the run-sheet>, \"dry_run\": true}, then the same call without dry_run.";
+            $"7. When I approve, save it: campaign_session {{\"action\": \"plan\"{SessionArg(number)}, " +
+            $"\"title\": ..., \"prep_md\": <the run-sheet>, \"dry_run\": true, \"campaign\": \"{slug}\"}}, then the same call " +
+            "without dry_run.";
     }
 
     [McpServerPrompt(Name = "knowledge_check", Title = "Does this character know that?")]
@@ -168,10 +172,10 @@ public sealed class CampaignPrompts
             $"Check the most recent draft in this conversation against what {who} knows in campaign `{row.Slug}`. If there is " +
             "no draft yet, ask me for it and stop.\n" +
             CampaignOnEveryCall(row.Slug) + "\n\n" +
-            $"1. Call campaign_knowledge {{\"action\": \"check\", \"campaign\": \"{row.Slug}\", \"perspective\": \"{who}\", " +
-            "\"text\": <the draft, verbatim>, \"diegetic\": true}. Use diegetic true for a song or anything said aloud in the world " +
-            "(a lyric is a public statement; audience defaults to the party, give \"public\" for a crowd); false for a private " +
-            "journal.\n" +
+            $"1. Call campaign_knowledge {{\"action\": \"check\", \"perspective\": \"{who}\", " +
+            $"\"text\": <the draft, verbatim>, \"diegetic\": true, \"campaign\": \"{row.Slug}\"}}. Use diegetic true for a song or " +
+            "anything said aloud in the world (a lyric is a public statement; audience defaults to the party, give \"public\" for a " +
+            "crowd); false for a private journal.\n" +
             "2. Report the hard flags first, quoting the draft line for each: names the speaker does not use (other_name), " +
             "things they cannot know (unknown_entity), names from another campaign (cross_campaign), forbidden words, names the " +
             "audience does not know (reveals_to_audience) and secrets at risk. Then the things to review, sorted into knows / " +
@@ -195,15 +199,16 @@ public sealed class CampaignPrompts
             "no draft yet, ask me for it and stop.\n" +
             CampaignOnEveryCall(row.Slug) + "\n\n" +
             "1. Name the canon objects: every person, place, item, faction and claim the draft relies on.\n" +
-            $"2. Confirm each: campaign_search {{\"campaign\": \"{row.Slug}\", \"query\": ...}} then campaign_get " +
-            $"{{\"campaign\": \"{row.Slug}\", \"refs\": [...], \"include\": [\"facts\"]}}. Note what matches, what differs, and what is " +
+            $"2. Confirm each: campaign_search {{\"query\": ..., \"campaign\": \"{row.Slug}\"}} then campaign_get " +
+            $"{{\"refs\": [...], \"include\": [\"facts\"], \"campaign\": \"{row.Slug}\"}}. Note what matches, what differs, and what is " +
             "not recorded at all (a possible invention).\n" +
-            $"3. Check against what was played: campaign_session {{\"action\": \"get\" or \"recap\", \"campaign\": \"{row.Slug}\", " +
-            "\"session\": <n>} for the sessions involved, and campaign_history {\"action\": \"since\", \"campaign\": " +
-            $"\"{row.Slug}\", \"session\": <n>}} if something may have changed. A superseded fact, or one resting on it, is stale.\n" +
-            $"4. Check who could know this: campaign_knowledge {{\"action\": \"check\", \"campaign\": \"{row.Slug}\", " +
-            "\"perspective\": <the speaker, e.g. \"character:<slug>\" or \"party\">, \"text\": <the draft>, \"diegetic\": true for " +
-            "anything said aloud in the world}. It also reports forbidden words of active reveal gates and reveal rules. For any " +
+            "3. Check against what was played: campaign_session {\"action\": \"get\" or \"recap\", \"session\": <n>, " +
+            $"\"campaign\": \"{row.Slug}\"}} for the sessions involved, and campaign_history {{\"action\": \"since\", \"session\": <n>, " +
+            $"\"campaign\": \"{row.Slug}\"}} if something may have changed. A superseded fact, or one resting on it, is stale.\n" +
+            "4. Check who could know this: campaign_knowledge {\"action\": \"check\", " +
+            "\"perspective\": <the speaker, e.g. \"character:<slug>\" or \"party\">, \"text\": <the draft>, \"diegetic\": true, " +
+            $"\"campaign\": \"{row.Slug}\"}} (diegetic true for anything said aloud in the world). It also reports forbidden words " +
+            "of active reveal gates and reveal rules. For any " +
             "reveal in the draft, read the gated fact or secret with campaign_get, include [\"knowledge\"], and check its gate " +
             "(after, with, routes).\n" +
             "5. Flag, don't fix: list each problem with the draft line and what the record says; propose a fix only when I ask. " +
@@ -229,8 +234,8 @@ public sealed class CampaignPrompts
             $"campaign_search / campaign_get with perspective \"{who}\". Use only the names and facts that view " +
             "shows: not your own knowledge of the campaign, not my notes, not earlier author-view results in this conversation.\n" +
             "2. Draft. Where they cannot know something, stay vague rather than inventing (\"an old king\", not a name or an age).\n" +
-            $"3. Before showing me, run campaign_knowledge {{\"action\": \"check\", \"campaign\": \"{row.Slug}\", " +
-            $"\"perspective\": \"{who}\", \"text\": <the draft>, \"diegetic\": true for a song or anything performed}}, fix every " +
+            $"3. Before showing me, run campaign_knowledge {{\"action\": \"check\", \"perspective\": \"{who}\", \"text\": <the draft>, " +
+            $"\"diegetic\": true, \"campaign\": \"{row.Slug}\"}} (diegetic true for a song or anything performed), fix every " +
             "hard flag, and tell me what it listed to review.\n" +
             "4. Mark anything new that could be quoted back as fact (a place, a person, a claim) as an invention for me to accept " +
             "or strike.";
@@ -247,8 +252,8 @@ public sealed class CampaignPrompts
     {
         var slug = OptionalCampaign(campaign);
         var standards = slug is not null
-            ? $"1. Read the house balance standards: campaign_search {{\"campaign\": \"{slug}\", \"kinds\": [\"rule\"], " +
-              "\"query\": \"balance\"}; apply any you find (a target band, an effective-level rule).\n"
+            ? "1. Read the house balance standards: campaign_search {\"kinds\": [\"rule\"], \"query\": \"balance\", " +
+              $"\"campaign\": \"{slug}\"}}; apply any you find (a target band, an effective-level rule).\n"
             : _campaigns.Store.List().Count == 0
                 ? "1. There is no campaign to take house standards from; use the published rules.\n"
                 : "1. No campaign is chosen, so no house standards apply; use the published rules. To apply a campaign's, run " +
@@ -266,9 +271,9 @@ public sealed class CampaignPrompts
             "4. Suggest the smallest change that lands it On budget, and re-run balance_compare to confirm it.\n" +
             (slug is null
                 ? "5. Keep the verdict in the conversation; with no campaign chosen there is none to record it in."
-                : $"5. Record it only after I approve: campaign_write {{\"campaign\": \"{slug}\", \"ops\": [{{\"op\": \"upsert\", " +
+                : "5. Record it only after I approve: campaign_write {\"ops\": [{\"op\": \"upsert\", " +
                   "\"kind\": \"homebrew\", \"name\": ..., \"status\": \"approved\" or \"needs_nerf\", \"body_md\": <the verdict with its " +
-                  "numbers>}], \"dry_run\": true}, then the same call without dry_run.");
+                  $"numbers>}}], \"dry_run\": true, \"campaign\": \"{slug}\"}}, then the same call without dry_run.");
     }
 
     // The campaign, and the session: a number typed where the campaign goes is the session when no campaign has that slug.

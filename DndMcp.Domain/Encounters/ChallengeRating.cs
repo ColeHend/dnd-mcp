@@ -14,6 +14,7 @@ namespace DndMcp.Domain.Encounters;
 /// rules never define, and the XP it reports would look authoritative.
 /// </para>
 /// </summary>
+[System.Text.Json.Serialization.JsonConverter(typeof(ChallengeRatingJsonConverter))]
 public readonly record struct ChallengeRating : IComparable<ChallengeRating>
 {
     public const int MaxWhole = 30;

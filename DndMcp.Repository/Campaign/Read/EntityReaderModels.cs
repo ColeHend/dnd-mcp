@@ -9,13 +9,19 @@ namespace DndMcp.Repository.Campaign.Read;
 /// (<see cref="Default"/>: relations, facts, children), because a get of ten refs with every include can run long, and
 /// the host caps each result.
 /// </summary>
+/// <param name="Sheet">
+/// A character's sheet (Phase 7, contract §7.3/§7.4): the author view for the author, the public line for a current party
+/// member another view is shown, nothing otherwise (<see cref="Characters.SheetReader"/>). Last, with a default, so every
+/// Phase 6 caller's positional includes keep their meaning.
+/// </param>
 public sealed record EntityIncludes(
     bool Relations = false,
     bool Facts = false,
     bool Knowledge = false,
     bool Children = false,
     bool Sessions = false,
-    bool History = false)
+    bool History = false,
+    bool Sheet = false)
 {
     public const string RelationsName = "relations";
     public const string FactsName = "facts";
@@ -23,15 +29,16 @@ public sealed record EntityIncludes(
     public const string ChildrenName = "children";
     public const string SessionsName = "sessions";
     public const string HistoryName = "history";
+    public const string SheetName = "sheet";
 
     /// <summary>The include vocabulary (forgiving spelling).</summary>
-    public static readonly DslValueSet Set = new("include", [RelationsName, FactsName, KnowledgeName, ChildrenName, SessionsName, HistoryName]);
+    public static readonly DslValueSet Set = new("include", [RelationsName, FactsName, KnowledgeName, ChildrenName, SessionsName, HistoryName, SheetName]);
 
     /// <summary>What a get shows when the call names no includes.</summary>
     public static EntityIncludes Default { get; } = new(Relations: true, Facts: true, Children: true);
 
     /// <summary>Everything.</summary>
-    public static EntityIncludes All { get; } = new(true, true, true, true, true, true);
+    public static EntityIncludes All { get; } = new(true, true, true, true, true, true, true);
 
     /// <summary>The includes a call named; null gives <see cref="Default"/>, an empty list none.</summary>
     /// <exception cref="DndInputException">A name that is not an include (all problems listed).</exception>
@@ -58,7 +65,7 @@ public sealed record EntityIncludes(
 
         DslProblems.ThrowIfAny(problems, "include");
         return new EntityIncludes(set.Contains(RelationsName), set.Contains(FactsName), set.Contains(KnowledgeName),
-            set.Contains(ChildrenName), set.Contains(SessionsName), set.Contains(HistoryName));
+            set.Contains(ChildrenName), set.Contains(SessionsName), set.Contains(HistoryName), set.Contains(SheetName));
     }
 
     private static string Echo(string? text) => text is { Length: > 40 } ? text[..40] + "…" : text ?? string.Empty;
@@ -121,6 +128,14 @@ public sealed record EntityDetail(
     /// view only (the web is prep; <see cref="ReadBeats"/>), and only for a beat; null otherwise.
     /// </summary>
     public BeatView? Beat { get; init; }
+
+    /// <summary>
+    /// A character's sheet when the get includes <c>sheet</c> (<see cref="EntityIncludes.Sheet"/>): the author view, or for
+    /// any other view the public line of a current party member it is shown undisguised; null otherwise, and always null
+    /// for anything but a character. A non-author view reads a character it may not be shown a sheet for (an NPC, a dead
+    /// or departed member, a disguised one) exactly as one with no sheet.
+    /// </summary>
+    public Characters.SheetView? Sheet { get; init; }
 }
 
 /// <summary>An alias; <paramref name="Visibility"/> is filled in for the author view only.</summary>

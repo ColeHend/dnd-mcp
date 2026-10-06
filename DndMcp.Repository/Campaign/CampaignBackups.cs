@@ -246,6 +246,79 @@ public sealed partial class CampaignBackups
         return path;
     }
 
+    /// <summary>
+    /// The backup taken before migration <paramref name="version"/>: every attempt copies the file to a new
+    /// <c>pre-migrate-vN</c> backup, and that copy is deleted again when it is byte for byte the newest older
+    /// <c>pre-migrate-vN</c> backup (SHA-256), which is then the one this attempt names.
+    ///
+    /// <para>
+    /// <b>Why not just one copy per attempt</b> (review R02): a migration that cannot take the write lock (another process
+    /// holds campaigns.db past busy_timeout) fails AFTER its backup, and is not cached as failed, so every later campaign
+    /// call tries again; retention keeps every <c>pre-migrate-*</c> forever (the only way back from a schema change), so the
+    /// disk filled one full copy per refused call. A copy of an unchanged file is the same backup, and goes.
+    /// </para>
+    /// <para>
+    /// <b>Why every attempt still copies</b> (F2, review RR01): F1 reused the earlier backup while a fingerprint of the
+    /// file (its user_version, size and AUTOINCREMENT counters) was unchanged, and a write that changes a row in place (an
+    /// UPDATE, or a 0.6.0 logged write that adds no entity, fact or roll: change_log.seq is no AUTOINCREMENT key) moves
+    /// none of them, so the only pre-migrate backup missed a committed write. Correctness first: the bytes decide, and the
+    /// backup the migration leaves holds every write committed before it. Only an OLDER backup is compared with: two
+    /// processes migrating together never delete each other's copies (the oldest of a run of identical copies stays).
+    /// </para>
+    /// </summary>
+    /// <returns>The backup's path (the new copy, or the identical one it was deleted for).</returns>
+    /// <exception cref="SqliteException">The backup could not be written.</exception>
+    /// <exception cref="IOException">backups/ could not be created, or the finished file could not be renamed.</exception>
+    internal string PreMigrate(int version)
+    {
+        var reason = PreMigrateReason(version);
+        var path = Create(reason, applyRetention: false);
+        var mine = List().FirstOrDefault(f => f.Path == path);
+        var newest = mine is null ? null : List().FirstOrDefault(f => f.Reason == reason && IsOlder(f, mine));
+        if (newest is null || !SameBytes(newest.Path, path))
+        {
+            return path;
+        }
+
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger?.LogWarning(ex, "Could not remove the backup {Path}, the same as {Same}; both are kept.", path, newest.Path);
+            return path;
+        }
+
+        _logger?.LogInformation("The backup before updating campaigns.db ({Reason}) is the same as {Path}, taken before an earlier attempt: kept that one.",
+            reason, newest.Path);
+        return newest.Path;
+    }
+
+    // Whether a backup was taken before another: by its stamp, then its name (the order List gives, oldest last).
+    private static bool IsOlder(BackupFile file, BackupFile than) =>
+        file.At < than.At || (file.At == than.At && string.CompareOrdinal(Path.GetFileName(file.Path), Path.GetFileName(than.Path)) < 0);
+
+    // Whether two files hold the same bytes (their SHA-256; the sizes first). A file that cannot be read is not the same.
+    private static bool SameBytes(string a, string b)
+    {
+        try
+        {
+            if (new FileInfo(a).Length != new FileInfo(b).Length)
+            {
+                return false;
+            }
+
+            using var first = File.OpenRead(a);
+            using var second = File.OpenRead(b);
+            return System.Security.Cryptography.SHA256.HashData(first).AsSpan().SequenceEqual(System.Security.Cryptography.SHA256.HashData(second));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>Every backup file in backups/, newest first. Files not named like a backup are not listed.</summary>
     public IReadOnlyList<BackupFile> List()
     {

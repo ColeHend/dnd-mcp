@@ -32,7 +32,7 @@ public sealed class SimulateArchetypeToolTests : IClassFixture<McpServerHarness>
 
         var text = await SimulateToolTests.SimulateAsync(_server, example);
 
-        Assert.StartsWith("# Fight simulation: Fighter ×2, Cleric, Wizard vs Ogre ×3\n", text, StringComparison.Ordinal);
+        Assert.StartsWith("# Fight simulation: Fighter ×4 vs Ogre ×3\n", text, StringComparison.Ordinal);
         Assert.Contains("| archetype fighter (level 5, 2024) |", text, StringComparison.Ordinal);
         Assert.Contains("seed 42*", text, StringComparison.Ordinal);
     }

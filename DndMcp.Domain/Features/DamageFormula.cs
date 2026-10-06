@@ -34,6 +34,7 @@ public sealed record DiceTerm(int Count, int Sides, bool Negative = false)
 /// (Bless + Bane = "1d4-1d4", which must NOT cancel) and refuse flat numbers, which belong in an amount.
 /// </para>
 /// </summary>
+[System.Text.Json.Serialization.JsonConverter(typeof(DamageFormulaJsonConverter))]
 public sealed class DamageFormula : IEquatable<DamageFormula>
 {
     /// <summary>

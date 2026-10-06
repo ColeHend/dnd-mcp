@@ -118,7 +118,7 @@ public sealed class ScenarioBelmakorLeakTests : IClassFixture<ScenarioBelmakorWo
         Assert.Equal(
             "_Perspective: dm. Names are the ones this view knows; author-only text is withheld._\n\n" +
             $"## Facts\n1. `{_w.NameFact}`: {ScenarioBelmakorWorld.NameStatement}\n\n1 result.\n" +
-            "campaign_get {\"campaign\": \"belmakor\", \"refs\": [...], \"perspective\": \"dm\"} reads any of these in full.\n",
+            "campaign_get {\"refs\": [...], \"perspective\": \"dm\", \"campaign\": \"belmakor\"} reads any of these in full.\n",
             body);
     }
 

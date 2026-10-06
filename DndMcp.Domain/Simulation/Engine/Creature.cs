@@ -35,6 +35,13 @@ internal sealed class Creature
     public int MaxHp;
     public int TempHp;
 
+    /// <summary>
+    /// Hit points when the fight started: the maximum in a fresh fight, the seeded HP in a resumed one
+    /// (<see cref="CombatantStart.Hp"/>). Hit points lost and the report's starting HP are measured from it, so damage taken
+    /// before a resume is not counted as the simulation's.
+    /// </summary>
+    public int StartHp;
+
     /// <summary>Dead: out of the fight for good.</summary>
     public bool Dead;
 
@@ -166,6 +173,7 @@ internal sealed class Creature
     {
         Hp = T.StartsDown ? 0 : hp;
         MaxHp = hp;
+        StartHp = hp; // the maximum even for the death-save harness's StartsDown creature, as hit points lost always read it
         TempHp = 0; // a build's temp_hp is granted at the start of the fight (Fight.StartOfFight), by the no-stacking rule
         Dead = false;
         Down = T.StartsDown;
@@ -227,6 +235,9 @@ internal sealed class PcState
         UsesLeft = new int[build.Resources.Length];
         Used = new int[build.Resources.Length];
         Active = new bool[build.Gated.Length];
+        Blocked = new bool[build.Gated.Length];
+        ActionQueue = build.ActionQueue;
+        BonusQueue = build.BonusQueue;
         Turn = new PcTurnContext(build);
         ReactionTurn = new PcTurnContext(build);
     }
@@ -244,6 +255,19 @@ internal sealed class PcState
     /// for good when it has no setup to pay again (the warlock_baseline preset's Hex), until re-established when it has.
     /// </summary>
     public readonly bool[] Active;
+
+    /// <summary>
+    /// Per modifier number: it cannot be set up or cast this fight (a resumed fight's spell with no slot left,
+    /// <see cref="CompiledStart.Unavailable"/>): a setup is never paid, a save effect is cast only while the concentration it
+    /// already holds lasts. All false in a fresh fight.
+    /// </summary>
+    public readonly bool[] Blocked;
+
+    /// <summary>The Attack action's attacks this fight: the build's, less a resumed fight's unavailable ones (<see cref="CompiledStart.UnavailableAttacks"/>).</summary>
+    public int[] ActionQueue;
+
+    /// <summary>The bonus_action attacks this fight: the build's, less a resumed fight's unavailable ones (Spiritual Weapon with no slot left).</summary>
+    public int[] BonusQueue;
 
     /// <summary>The reaction attack will happen this round (drawn at the start of the creature's turn).</summary>
     public bool ReactionPending;
@@ -266,6 +290,9 @@ internal sealed class PcState
 
         Array.Clear(Used);
         Array.Clear(Active);
+        Array.Clear(Blocked);
+        ActionQueue = Build.ActionQueue;
+        BonusQueue = Build.BonusQueue;
         ReactionPending = false;
         ReactionExtra = -1;
         Acted = false;
